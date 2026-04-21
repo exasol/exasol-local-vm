@@ -1,0 +1,7 @@
+.github/workflows/** @exasol/r-d-platform-blue
+.github/actions/** @exasol/r-d-platform-blue
+.github/scripts/** @exasol/r-d-platform-blue
+.github/CODEOWNERS @exasol/r-d-platform-blue
+.github/dependabot.yml @exasol/r-d-platform-blue
+SECURITY.md @exasol/r-d-platform-blue
+Taskfile.yml @exasol/r-d-platform-blue

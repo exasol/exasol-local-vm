@@ -1,0 +1,269 @@
+version: '3'
+
+tasks:
+  install-deps:
+    desc: Install host dependencies for building and running the VM with Podman on Linux
+    run: once
+    cmds:
+      - sudo apt-get update
+      - sudo apt-get install -y jq podman xz-utils qemu-user-static
+      - sudo systemctl restart systemd-binfmt
+
+  download-db-container:
+    desc: Download database container image to release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    status:
+      - test -f release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz
+    cmds:
+      - ./launcher/assets/download-db-container.sh "{{.IMG_ARCH}}"
+
+  stage-init-assets:
+    desc: Copy database container tarball from release/ to launcher/assets/init for {{.IMG_ARCH}}
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: download-db-container
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    status:
+      - test -f launcher/assets/init/exasol-nano-db.tar.gz
+    cmds:
+      - ./launcher/assets/stage-init-assets.sh "{{.IMG_ARCH}}"
+
+  build:
+    desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages for {{.IMG_ARCH}}
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    cmds:
+      - ./host/build/build-artifacts.sh "{{.IMG_ARCH}}"
+
+  build-qemu-container:
+    desc: Build the Podman/QEMU runner container image for starting the VM
+    run: once
+    cmds:
+      - podman build --arch "$(uname -m)" -t exasol-local-vm-runner:latest host/run
+
+  ensure-vm-image:
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    status:
+      - test -f output/{{.IMG_ARCH}}/disk.img
+      - test -f output/{{.IMG_ARCH}}/disk_thin.img
+      - test -f output/{{.IMG_ARCH}}/arch.txt
+      - test -f output/{{.IMG_ARCH}}/vmlinuz-virt
+      - test -f output/{{.IMG_ARCH}}/initramfs.img
+      - test -f output/{{.IMG_ARCH}}/kernel-cmdline.txt
+    cmds:
+      - task: build
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+
+  ensure-qemu-container:
+    status:
+      - podman image exists exasol-local-vm-runner:latest
+    cmds:
+      - task: build-qemu-container
+
+  start-vm:
+    desc: Start the VM in a detached Podman runner container
+    run: once
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ensure-qemu-container
+    cmds:
+      - ./host/run/start-qemu-container.sh "{{.IMG_ARCH}}"
+
+  start-vm-attached:
+    desc: Start the VM in an attached Podman runner container
+    run: once
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ensure-qemu-container
+    cmds:
+      - ./host/run/start-qemu-container.sh -a "{{.IMG_ARCH}}"
+
+  stop-vm:
+    desc: Stop the Podman runner container for the VM
+    cmds:
+      - ./host/run/stop-qemu-container.sh
+
+  startup-benchmark:
+    desc: Benchmark VM startup time (start VM and measure time to SSH)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ensure-qemu-container
+    cmds:
+      - ./host/test/startup-benchmark.sh "{{.IMG_ARCH}}"
+
+  test-ssh-keys:
+    desc: Test SSH key import feature (requires built VM image)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ensure-qemu-container
+    cmds:
+      - ./host/test/test-ssh-keys.sh "{{.IMG_ARCH}}"
+
+  test-ssh-keys-mac:
+    desc: Test SSH key import feature using Mac launcher (macOS only)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [aarch64]
+    cmds:
+      - ./launcher/mac/tests/test-ssh-keys.sh "{{.IMG_ARCH}}"
+
+  test-container:
+    desc: Test container REST server and data persistence (requires running VM with container)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ensure-qemu-container
+    cmds:
+      - ./host/test/test-container.sh "{{.IMG_ARCH}}"
+
+  test:
+    desc: Run all tests
+    cmds:
+      - task: startup-benchmark
+      - task: test-ssh-keys
+      - task: test-container
+
+  package-linux:
+    desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    cmds:
+      - ./host/package/package-linux.sh "{{.IMG_ARCH}}"
+
+  package-mac:
+    desc: Package the raw UEFI disk for macOS/vfkit users
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    cmds:
+      - ./host/package/package-mac.sh "{{.IMG_ARCH}}"
+
+  build-mac-launcher:
+    desc: Build the macOS launcher binary (must be run on macOS)
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [aarch64, x86_64]
+    cmds:
+      - task: stage-init-assets
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
+
+  package-windows:
+    desc: Package the VHDX disk for Windows/Hyper-V users
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    cmds:
+      - ./host/package/package-windows.sh "{{.IMG_ARCH}}"
+
+  package:
+    desc: Build all distributable packages
+    deps:
+      - task: package-linux
+        vars:
+          IMG_ARCH: aarch64
+      - task: package-linux
+        vars:
+          IMG_ARCH: x86_64
+      - task: package-mac
+        vars:
+          IMG_ARCH: aarch64
+      - task: package-windows
+        vars:
+          IMG_ARCH: x86_64
+
+  clean:
+    desc: Remove generated files
+    cmds:
+      - task: stop-vm
+      - git clean -Xf .
+
+  ci-build-mac-launcher:
+    desc: Run Build Packages workflow on current branch and download macOS launcher
+    vars:
+      # if you are only changing macOS launcher code, you can skip the vm disk build to speed up the workflow.
+      # note: you must have a recent successful vm disk build in the same branch for the workflow to use instead.
+      SKIP_LINUX_BUILD: '{{.SKIP_LINUX_BUILD | default "false"}}'
+      # If SKIP_LINUX_BUILD is true, you can optionally specify a previous workflow run ID to download the vm disk
+      # build artifacts from instead of the latest successful run.
+      PREVIOUS_RUN_ID: '{{.PREVIOUS_RUN_ID | default ""}}'
+    cmds:
+      - |
+        {{if eq .SKIP_LINUX_BUILD "true"}}
+          {{if ne .PREVIOUS_RUN_ID ""}}
+            ./host/github/ci-build-mac-launcher.sh --skip-linux-build --use-run-id {{.PREVIOUS_RUN_ID}}
+          {{else}}
+            ./host/github/ci-build-mac-launcher.sh --skip-linux-build
+          {{end}}
+        {{else}}
+          ./host/github/ci-build-mac-launcher.sh
+        {{end}}

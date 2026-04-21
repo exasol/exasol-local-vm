@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="Setup networking and other first boot tasks"
+
+depend()
+{
+        before networking
+}
+
+start() {
+        rm -f /etc/runlevels/*/"${RC_SVCNAME}"
+        ebegin "Starting ${RC_SVCNAME}"
+        # We don't want to do this when creating the image because we don't
+        # necessarily know the interface name
+        setup-interfaces -a
+        eend $?
+        return 0
+}
