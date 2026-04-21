@@ -1,0 +1,16 @@
+#!/bin/sh
+
+# Make `/` a non-"rootfs" so pivot_root works (see pivot_root(8))
+#
+# Once alpine switches to Linux 7.0 this shouldn't be needed anymore because
+# `/` will be "nullfs" which doesn't carry the restrictions on pivot_root that
+# "rootfs" has
+
+# set -eu
+set -x
+
+mkdir /sysroot
+mount -t tmpfs none /sysroot
+cp -a / /sysroot/
+
+exec switch_root /sysroot /sbin/init

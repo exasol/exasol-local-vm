@@ -1,0 +1,66 @@
+FROM alpine AS base
+
+### Install dependencies
+
+RUN apk upgrade -aU \
+  && apk add \
+    alpine-base \
+    openssh \
+    # Needed to handle poweroff signal from the vm manager
+    acpid \
+    # Needed to auto-grow /var partition
+    cloud-utils-growpart e2fsprogs e2fsprogs-extra \
+    # podman needs iptables but it's not pulled in for some reason?
+    podman iptables \
+    # Needed to read the podman container manifest
+    jq \
+    # Needed for autologin on some ttys
+    agetty \
+    linux-virt
+
+### Configure SSH to allow root login
+
+RUN printf 'PermitRootLogin yes\nPasswordAuthentication no\nPubkeyAuthentication yes\n' >> /etc/ssh/sshd_config
+
+
+### Enable serial console
+### Enable autologin for root user
+#
+# I don't really understand exactly how the serial console stuff works. We might
+# have to add some different ones here at some point.
+RUN printf '# defaults\n\n::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\n\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n\n# tty1 is nice to have for some graphical vm interfaces\n# hvc0 is virtio_console, which all hypervisors should support\ntty1::respawn:/sbin/agetty --noclear --autologin root tty1\nhvc0::respawn:/sbin/agetty --noclear --autologin root hvc0\n' > /etc/inittab
+
+### VM startup scripts
+
+COPY init /init
+
+# TODO mount /mnt/host from Hyper-V data disk for windows
+COPY fstab /etc/fstab
+
+COPY exasol-network /etc/init.d/exasol-network
+COPY format-data-disk.initd.sh /etc/init.d/format-data-disk
+COPY grow-var-fs.initd.sh /etc/init.d/grow-var-fs
+COPY report-ip.initd.sh /etc/init.d/report-ip
+COPY run-host-init.initd.sh /etc/init.d/run-host-init
+COPY setup-var-structure.initd.sh /etc/init.d/setup-var-structure
+
+# acpid handler for the power button event (best-effort backup path; primary
+# shutdown mechanism is the launcher SSHing in and running poweroff).
+COPY acpi-powerbtn.event /etc/acpi/events/powerbtn
+
+# Enables the same services that the default alpine vm image enables:
+# https://github.com/alpinelinux/alpine-make-vm-image/blob/ab659ff532b0e27684a08d11df116b9f7665081a/alpine-make-vm-image#L685-L694
+#
+# Adds our custom services
+RUN --mount=type=bind,target=/host/ true \
+  && /host/rc_add sysinit  devfs dmesg mdev hwdrivers \
+  && /host/rc_add boot     exasol-network format-data-disk grow-var-fs report-ip \
+  && /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking \
+  && /host/rc_add boot     run-host-init setup-var-structure \
+  && /host/rc_add default  acpid sshd \
+  && /host/rc_add shutdown killprocs savecache mount-ro
+
+
+### Clean up to minimize image
+
+RUN apk cache purge

@@ -1,0 +1,27 @@
+# Build from the repository root:
+#   podman build -t exasol-local-vm-runner host/run
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bash \
+        jq \
+        ovmf \
+        procps \
+        qemu-efi-aarch64 \
+        qemu-system-arm \
+        qemu-system-x86 \
+        virtiofsd \
+        curl && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY vm-config.json /etc/exasol-local-vm/vm-config.json
+
+COPY run-qemu.sh /usr/local/bin/run-exasol-vm
+
+RUN chmod +x /usr/local/bin/run-exasol-vm
+
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/run-exasol-vm"]
