@@ -15,11 +15,12 @@ cleanup() {
     echo "==> Stopping VM..."
     ./host/run/stop-vm.sh || true
   fi
-  
-  # Clean up test files
+
+  # Clean up host-side test key only. Do NOT delete shared/authorized_keys
+  # — start-vm.sh re-populates it with vm-key.pub on next boot and the
+  # baked-in key in the disk should remain usable.
   echo "==> Removing test files..."
   rm -f "$TEST_KEY" "$TEST_KEY.pub"
-  rm -f "$AUTHORIZED_KEYS"
   
   exit $exit_code
 }
@@ -56,6 +57,18 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     if ssh -i "$TEST_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 exasol@localhost "echo 'SSH key import successful!'" 2>/dev/null; then
         echo "==> ✓ Test passed: Successfully connected with imported key after ${ELAPSED} seconds"
         SUCCESS=true
+
+        # Scrub the test-key from the shipped image: overwrite authorized_keys
+        # directly as the exasol user (no sudo needed — Alpine doesn't ship
+        # sudo) and sync so the write reaches disk before stop-vm kills QEMU.
+        # Also reset shared/authorized_keys so a future task start-vm starts
+        # clean.
+        echo "==> Removing test-key from shipped image..."
+        cat vm-key.pub > "$AUTHORIZED_KEYS"
+        ssh -i "$TEST_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            exasol@localhost \
+            "cat > ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && sync" \
+            < vm-key.pub
         break
     fi
     

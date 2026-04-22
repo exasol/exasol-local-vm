@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DISK_IMG="disk.img"
-MIN_SIZE_BUFFER_MB=100  # Extra space beyond minimum
+MIN_SIZE_BUFFER_MB=2048  # Extra space for pre-extracted DB files + runtime needs
 
 if [ ! -f "$DISK_IMG" ]; then
     echo "Error: $DISK_IMG not found. Run 'task init-vm' first."
@@ -114,7 +114,5 @@ parted "$DISK_IMG" print 2>&1 | grep -q "Partition Table: gpt" || {
 }
 
 echo "==> Disk shrinking complete!"
-echo "==> Original size: 3GB"
 echo "==> New size: ${FINAL_SIZE_MB}MB (~$(echo "scale=1; $FINAL_SIZE_MB / 1024" | bc)GB)"
-echo "==> Saved: ~$((3072 - FINAL_SIZE_MB))MB"
 touch disk-shrunk.flag

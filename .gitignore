@@ -24,3 +24,4 @@ package/
 !host/package/
 release/
 *.flag
+vm.log
