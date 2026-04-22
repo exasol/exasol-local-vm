@@ -20,6 +20,6 @@ vfkit.log
 shared/*
 !shared/.gitkeep
 !shared/README.md
-package/
-release/
+/package/
+/release/
 *.flag
