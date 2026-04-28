@@ -146,8 +146,12 @@ tasks:
       - ./host/lib/cleanup-force.sh
 
   clean:
-    desc: Remove all generated files (disk image, cloud-init ISO, SSH keys, etc.)
+    desc: Remove generated build artifacts (disk image, cloud-init ISO, SSH keys, etc.)
     cmds:
       - task: stop-vm
-      - git clean -Xf .
-      - echo "==> Cleaned all ignored files in buildvm directory"
+      - rm -f *.flag
+      - rm -f cloud-init.iso disk.img virtiofs.sock.pid vm-init.log vm-key vm-key.pub vm.log
+      - rm -f sared/authorized_keys
+      - find shared -mindepth 1 -not -name '.gitkeep' -delete
+      - rm -rf package release linux-run/dist
+      - echo "==> Cleaned build artifacts"
