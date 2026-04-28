@@ -1,5 +1,11 @@
 #!/bin/sh
 set -e
+echo "==> Setting up logging service..."
+cp /mnt/host/scripts/setup-logging.initd /etc/init.d/setup-logging
+chmod +x /etc/init.d/setup-logging
+rc-update del syslog default 2>/dev/null || true
+rc-update add setup-logging default
+
 echo "==> Setting up SSH service..."
 rc-update add sshd default
 service sshd start

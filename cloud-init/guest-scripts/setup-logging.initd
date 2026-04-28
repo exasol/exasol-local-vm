@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+
+name="setup-logging"
+description="Redirect syslog to shared host mount, or suppress it if not mounted"
+
+depend() {
+  need localmount
+  before syslog
+}
+
+start() {
+  if mountpoint -q /mnt/host; then
+    ebegin "Shared folder mounted — redirecting syslog to /mnt/host/log"
+    mkdir -p /mnt/host/log
+    rm -rf /var/log
+    ln -s /mnt/host/log /var/log
+    rc-service syslog start
+    eend $?
+  else
+    ebegin "Shared folder not mounted — syslog suppressed"
+    eend 0
+  fi
+}
