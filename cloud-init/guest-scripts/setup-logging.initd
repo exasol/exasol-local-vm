@@ -10,14 +10,17 @@ depend() {
 
 start() {
   if mountpoint -q /mnt/host; then
-    ebegin "Shared folder mounted — redirecting syslog to /mnt/host/log"
-    mkdir -p /mnt/host/log
+    ebegin "Shared folder mounted — redirecting syslog to /mnt/host/.system-logs"
+    mkdir -p /mnt/host/.system-logs
+    chmod 777 /mnt/host/.system-logs
     rm -rf /var/log
-    ln -s /mnt/host/log /var/log
-    rc-service syslog start
+    ln -s /mnt/host/.system-logs /var/log
+    touch /var/log/messages
+    echo 'SYSLOGD_OPTS="-O /var/log/messages"' > /etc/conf.d/syslog
     eend $?
   else
     ebegin "Shared folder not mounted — syslog suppressed"
     eend 0
   fi
 }
+
