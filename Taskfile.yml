@@ -139,6 +139,20 @@ tasks:
     cmds:
       - ./host/package/package-windows.sh
 
+  start-cloud-mac:
+    desc: Provision cloud Mac on AWS (OpenTofu) and upload the mac-arm64 release package
+    deps:
+      - package-mac
+    cmds:
+      - tofu -chdir=test/cloud-mac init -input=false
+      - tofu -chdir=test/cloud-mac apply -auto-approve
+      - ./test/cloud-mac/upload-to-mac.sh
+
+  stop-cloud-mac:
+    desc: Destroy the cloud Mac AWS instance
+    cmds:
+      - tofu -chdir=test/cloud-mac destroy -auto-approve
+
   cleanup-force:
     desc: Force kill all QEMU and virtiofsd processes and clean up files
     cmds:
