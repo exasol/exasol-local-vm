@@ -83,6 +83,21 @@ tasks:
     cmds:
       - sudo ./host/build/shrink-disk.sh
 
+  split-image:
+    desc: Extract kernel and initramfs from disk.img into split-image/package/ for vfkit direct boot
+    cmds:
+      - ./split-image/split-kernel.sh
+
+  start-direct:
+    desc: Start the VM using QEMU direct kernel boot (Linux, run after split-image)
+    cmds:
+      - ./split-image/start-qemu.sh 2 2048 shared
+
+  stop-direct:
+    desc: Stop the VM started by start-direct
+    cmds:
+      - ./split-image/stop-qemu.sh
+
   start-vm:
     desc: Start the Exasol VM
     cmds:
