@@ -1,0 +1,6 @@
+{
+  "efiPartitionSizeMB": 512,
+  "dataPartitionSizeMB": 2048,
+  "diskPaddingSizeMB": 64,
+  "kernelCmdline": "console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0"
+}

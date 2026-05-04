@@ -4,10 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RAW_DISK="$ROOT_DIR/output/disk.img"
 ARCH_FILE="$ROOT_DIR/output/arch.txt"
-VFKIT_SCRIPT="$ROOT_DIR/host/run/start-vfkit.sh"
+LINUX_SCRIPT="$ROOT_DIR/host/run/start-linux.sh"
 VM_CONFIG="$ROOT_DIR/config/vm-config.json"
-GVPROXY_VERSION="v0.8.8"
-GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/download/${GVPROXY_VERSION}/gvproxy-darwin"
 
 if [ ! -f "$RAW_DISK" ]; then
     echo "Error: $RAW_DISK not found. Run 'task build' first."
@@ -21,8 +19,8 @@ fi
 
 ARCH="$(tr -d '\n' < "$ARCH_FILE")"
 case "$ARCH" in
-    x86_64) PACKAGE_NAME="mac-x86_64" ;;
-    aarch64) PACKAGE_NAME="mac-arm64" ;;
+    x86_64) PACKAGE_NAME="linux-x86_64" ;;
+    aarch64) PACKAGE_NAME="linux-arm64" ;;
     *) echo "Error: unknown architecture: $ARCH" >&2; exit 1 ;;
 esac
 
@@ -33,28 +31,20 @@ mkdir -p "$PACKAGE_DIR" "$ROOT_DIR/release"
 cp "$RAW_DISK" "$PACKAGE_DIR/exasol-vm.img"
 cp "$ARCH_FILE" "$PACKAGE_DIR/arch.txt"
 cp "$VM_CONFIG" "$PACKAGE_DIR/vm-config.json"
-cp "$VFKIT_SCRIPT" "$PACKAGE_DIR/start.sh"
+cp "$LINUX_SCRIPT" "$PACKAGE_DIR/start.sh"
 chmod +x "$PACKAGE_DIR/start.sh"
 
-curl -fSL -o "$PACKAGE_DIR/gvproxy" "$GVPROXY_URL"
-chmod +x "$PACKAGE_DIR/gvproxy"
-
 cat > "$PACKAGE_DIR/README.md" <<'EOF'
-# Exasol VM for macOS
+# Exasol VM for Linux
 
-This package contains a raw UEFI disk image and a `vfkit` launcher.
+This package contains a raw UEFI disk image and a QEMU launcher.
 
 ## Prerequisites
 
-- macOS 13+
-- `vfkit`
+- `qemu-system-x86_64` or `qemu-system-aarch64`
+- UEFI firmware (`ovmf` for x86_64, `qemu-efi-aarch64` for arm64)
 - `jq`
-
-Install dependencies with Homebrew:
-
-```bash
-brew install vfkit jq
-```
+- Optional for folder sharing: `virtiofsd`
 
 ## Usage
 
@@ -70,13 +60,11 @@ Override CPUs and memory:
 ./start.sh 4 4096
 ```
 
-Share a host directory through virtio-fs:
+Share a host directory through virtiofs:
 
 ```bash
 ./start.sh 2 2048 /path/to/shared
 ```
-
-The launcher uses the bundled `gvproxy` binary to expose the TCP ports declared in `vm-config.json`.
 
 The built-in disk already contains:
 
@@ -86,5 +74,5 @@ EOF
 
 tar -C "$ROOT_DIR/package" -cf - "$PACKAGE_NAME" | xz -6 -v > "$RELEASE_FILE"
 
-echo "==> macOS package created: $PACKAGE_DIR"
+echo "==> Linux package created: $PACKAGE_DIR"
 echo "==> Release archive: $RELEASE_FILE"

@@ -1,32 +1,27 @@
-[ ] implement build profiles for windows and mac, making the choice of which vm image to download easy
+# TODO
 
-[ ] prevent vm wasting time in the boot menu
+## Current initramfs build
 
-[ ] configure aggressive log rotation / move logs to shared directory
+[ ] start the embedded Exasol Nano container automatically from OpenRC
 
-[x] support port remapping in the manifest file
-    - should probably be handled by the launcher script using the final vm's port mapping feature.
+[ ] mount `/mnt/host` from virtiofs on QEMU/vfkit and from a Hyper-V data disk when virtiofs is unavailable
 
-[x] extend the mounting system to allow the manifest file to decide on its own disk mounts.
+[ ] grow the `/var` partition and resize the filesystem when the disk has extra space
 
-[x] the container should be loaded into the vm as part of the init-vm task
+[ ] decide and implement the final SSH/user model; the current image autologins root
 
-[x] increase the timeouts on init-vm and test operations
+[ ] prevent VM startup from wasting time in firmware or boot menus
 
-[x] if the container manifest does not list a path to the container file, the existing container should be run
+[ ] configure aggressive log rotation or move runtime logs to host-backed storage
 
-[x] remove container name from the manifest
+[ ] add smoke tests for boot, networking, `/var`, `/mnt/host`, and Exasol Nano startup
 
-[x] document container loading system
+[ ] reconcile package launchers with the final guest behavior, especially shared storage on macOS and Windows
 
-[x] fix shrinking the partition is breaking the disk
+## Preserved generic shared-container runtime
 
-[x] support x86
+[ ] decide whether to port or retire the old shared-container manifest runtime
 
-[x] packaging as .vhdx for windows hyper-v
+[ ] if ported, wire the preserved `container/guest-services/shared-container/` scripts into the new `Containerfile` and OpenRC model
 
-[x] tail qemu logs automatically for the init-vm task
-
-[x] ensure podman is using all resources available in the vm, not limited by cgroups
-
-[x] clear all authorized keys that are not included in the shared directory
+[ ] if ported, update the preserved tests so they target the new image instead of the removed cloud-init flow
