@@ -9,6 +9,8 @@ set -eu
 apk add alpine-base
 # Handle poweroff signal
 apk add acpid
+# Auto-grow /var partition
+apk add cloud-utils-growpart e2fsprogs e2fsprogs-extra
 apk add openssh
 # podman needs iptables but it's not pulled in for some reason?
 apk add podman fuse-overlayfs slirp4netns shadow-uidmap iptables
@@ -65,21 +67,20 @@ EOF
 
 COPY --link container/init /init
 
-# TODO grow /var partition when the packaged disk is enlarged.
-# TODO resize /var filesystem after partition growth.
 # TODO mount /mnt/host from virtiofs or a Hyper-V data disk.
 COPY --link <<-'EOF' /etc/fstab
 LABEL=exasol-data  /var  ext4  defaults  0 2
 EOF
 
 COPY --link container/exasol-network /etc/init.d/exasol-network
+COPY --link container/grow-var-fs.initd.sh /etc/init.d/grow-var-fs
 COPY --link container/import-shared-keys.initd.sh /etc/init.d/import-shared-keys
 COPY --link container/import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
 
 RUN --mount=type=bind,source=container,target=/host/ <<-"EOF"
 set -eu
 /host/rc_add sysinit  devfs dmesg mdev hwdrivers
-/host/rc_add boot     exasol-network import-shared-keys
+/host/rc_add boot     exasol-network import-shared-keys grow-var-fs
 /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking
 /host/rc_add default  podman acpid sshd
 /host/rc_add shutdown killprocs savecache mount-ro
@@ -122,7 +123,7 @@ COPY --link --from=base /boot/vmlinuz-virt /
 
 FROM fedora AS vm_image_build
 
-ARG DISK_PADDING_SIZE_MB=64
+ARG DISK_PADDING_SIZE='3G'
 
 ARG KERNEL_CMDLINE="console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0"
 
@@ -146,7 +147,7 @@ RUN --mount=type=bind,from=base,target=/base \
     cp -a /base/var /artifacts/var && \
     cp /kernel/vmlinuz-virt /artifacts/vmlinuz-virt && \
     cp /initramfs/initramfs.img.zst /artifacts/initramfs.img.zst && \
-    DISK_PADDING_SIZE_MB="$DISK_PADDING_SIZE_MB" \
+    DISK_PADDING_SIZE="$DISK_PADDING_SIZE" \
     KERNEL_CMDLINE="$KERNEL_CMDLINE" \
     /host/build-vm-image.sh /artifacts
 

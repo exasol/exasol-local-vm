@@ -12,7 +12,7 @@ ARCH_FILE="${ARTIFACT_DIR}/arch.txt"
 CMDLINE_FILE="${ARTIFACT_DIR}/kernel-cmdline.txt"
 LAYOUT_FILE="${ARTIFACT_DIR}/disk-layout.json"
 
-DISK_PADDING_SIZE_MB="${DISK_PADDING_SIZE_MB:-64}"
+DISK_PADDING_SIZE="${DISK_PADDING_SIZE:-3G}"
 KERNEL_CMDLINE="${KERNEL_CMDLINE:-console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0}"
 
 mkdir -p "${ARTIFACT_DIR}"
@@ -77,6 +77,7 @@ Label=exasol-data
 Format=ext4
 Minimize=guess
 CopyFiles=/var:/
+PaddingMinBytes=${DISK_PADDING_SIZE}
 EOF
 
 systemd-repart \
