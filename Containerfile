@@ -65,19 +65,19 @@ EOF
 
 ### VM startup scripts
 
-COPY --link container/init /init
+COPY --link init /init
 
 # TODO mount /mnt/host from virtiofs or a Hyper-V data disk.
 COPY --link <<-'EOF' /etc/fstab
 LABEL=exasol-data  /var  ext4  defaults  0 2
 EOF
 
-COPY --link container/exasol-network /etc/init.d/exasol-network
-COPY --link container/grow-var-fs.initd.sh /etc/init.d/grow-var-fs
-COPY --link container/import-shared-keys.initd.sh /etc/init.d/import-shared-keys
-COPY --link container/import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
+COPY --link exasol-network /etc/init.d/exasol-network
+COPY --link grow-var-fs.initd.sh /etc/init.d/grow-var-fs
+COPY --link import-shared-keys.initd.sh /etc/init.d/import-shared-keys
+COPY --link import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
 
-RUN --mount=type=bind,source=container,target=/host/ <<-"EOF"
+RUN --mount=type=bind,target=/host/ <<-"EOF"
 set -eu
 /host/rc_add sysinit  devfs dmesg mdev hwdrivers
 /host/rc_add boot     exasol-network import-shared-keys grow-var-fs
@@ -142,7 +142,7 @@ RUN dnf install -y \
 RUN --mount=type=bind,from=base,target=/base \
     --mount=type=bind,from=kernel,target=/kernel \
     --mount=type=bind,from=initramfs,target=/initramfs \
-    --mount=type=bind,source=container,target=/host \
+    --mount=type=bind,target=/host \
     mkdir -p /artifacts && \
     cp -a /base/var /artifacts/var && \
     cp /kernel/vmlinuz-virt /artifacts/vmlinuz-virt && \

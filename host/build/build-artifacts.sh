@@ -38,10 +38,12 @@ BUILD_ARGS=(
     "KERNEL_CMDLINE=${KERNEL_CMDLINE}"
     --arch
     "${IMG_ARCH}"
+    -f
+    "${ROOT_DIR}/Containerfile"
 )
 
 echo "==> Building VM artifacts with podman..."
-podman build "${BUILD_ARGS[@]}" "$ROOT_DIR"
+podman build "${BUILD_ARGS[@]}" "$ROOT_DIR/container"
 
 ARCH_FILE="$OUTPUT_DIR/arch.txt"
 if [ ! -f "$ARCH_FILE" ]; then
