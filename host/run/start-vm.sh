@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+set -x
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DISK_IMG="$ROOT_DIR/output/disk.img"
 PID_FILE="$ROOT_DIR/qemu.pid"
