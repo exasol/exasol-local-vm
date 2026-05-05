@@ -52,7 +52,6 @@ if [ ! -f "$ARCH_FILE" ]; then
 fi
 
 ARCH="$(tr -d '\n' < "$ARCH_FILE")"
-printf "%s\n" "$ARCH" > "$ROOT_DIR/config/disk-arch.txt"
 
 echo "==> Build completed"
 echo "==> Architecture: $ARCH"
