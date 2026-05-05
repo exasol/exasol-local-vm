@@ -41,11 +41,18 @@ RUN tee /etc/subuid /etc/subgid <<-'EOF'
 containers:100000:65536
 EOF
 
+### Add exasol user
+
+RUN setup-user -a -u exasol
+COPY --link <<-'EOF' /etc/doas.conf.d/exasol.conf
+permit nopass :wheel
+EOF
+
 ### Enable autologin
 
 COPY --link <<-'EOF' /usr/sbin/autologin
 #!/bin/sh
-exec login -f root
+exec login -f exasol
 EOF
 
 RUN <<-'EOF'
@@ -61,17 +68,18 @@ COPY --link container/init /init
 # TODO grow /var partition when the packaged disk is enlarged.
 # TODO resize /var filesystem after partition growth.
 # TODO mount /mnt/host from virtiofs or a Hyper-V data disk.
-# TODO decide the final SSH/user model; this image currently autologins root.
 COPY --link <<-'EOF' /etc/fstab
 LABEL=exasol-data  /var  ext4  defaults  0 2
 EOF
 
 COPY --link container/exasol-network /etc/init.d/exasol-network
+COPY --link container/import-shared-keys.initd.sh /etc/init.d/import-shared-keys
+COPY --link container/import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
 
 RUN --mount=type=bind,source=container,target=/host/ <<-"EOF"
 set -eu
 /host/rc_add sysinit  devfs dmesg mdev hwdrivers
-/host/rc_add boot     exasol-network
+/host/rc_add boot     exasol-network import-shared-keys
 /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking
 /host/rc_add default  podman acpid sshd
 /host/rc_add shutdown killprocs savecache mount-ro
