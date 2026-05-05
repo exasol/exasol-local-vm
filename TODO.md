@@ -2,8 +2,6 @@
 
 ## Current initramfs build
 
-[ ] start the embedded Exasol Nano container automatically from OpenRC
-
 [ ] mount `/mnt/host` from virtiofs on QEMU/vfkit and from a Hyper-V data disk when virtiofs is unavailable
 
 [ ] grow the `/var` partition and resize the filesystem when the disk has extra space
@@ -14,7 +12,7 @@
 
 [ ] configure aggressive log rotation or move runtime logs to host-backed storage
 
-[ ] add smoke tests for boot, networking, `/var`, `/mnt/host`, and Exasol Nano startup
+[ ] add smoke tests for boot, networking, `/var`, `/mnt/host`, and service startup
 
 [ ] reconcile package launchers with the final guest behavior, especially shared storage on macOS and Windows
 

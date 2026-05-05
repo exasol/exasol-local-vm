@@ -2,8 +2,6 @@ FROM alpine AS alpine_base
 
 FROM alpine_base AS base
 
-ARG TARGETARCH
-
 RUN apk upgrade -aU
 
 RUN <<-'EOF'
@@ -43,18 +41,6 @@ RUN tee /etc/subuid /etc/subgid <<-'EOF'
 containers:100000:65536
 EOF
 
-RUN --mount=type=bind,source=container,target=/context <<EOF
-set -eu
-if [ "${TARGETARCH}" = "amd64" ]; then
-  podman load -i "/context/exasol_nano_x86_64.tar"
-elif [ "${TARGETARCH}" = "arm64" ]; then
-  podman load -i "/context/exasol_nano_aarch64.tar"
-else
-  echo "Unknown arch: ${TARGETARCH}" >&2
-  exit 1
-fi
-EOF
-
 ### Enable autologin
 
 COPY --link <<-'EOF' /usr/sbin/autologin
@@ -75,7 +61,6 @@ COPY --link container/init /init
 # TODO grow /var partition when the packaged disk is enlarged.
 # TODO resize /var filesystem after partition growth.
 # TODO mount /mnt/host from virtiofs or a Hyper-V data disk.
-# TODO start the embedded Exasol Nano container from OpenRC.
 # TODO decide the final SSH/user model; this image currently autologins root.
 COPY --link <<-'EOF' /etc/fstab
 LABEL=exasol-data  /var  ext4  defaults  0 2

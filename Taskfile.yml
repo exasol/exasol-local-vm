@@ -7,47 +7,8 @@ tasks:
       - sudo apt-get update
       - sudo apt-get install -y jq ovmf podman qemu-efi-aarch64 qemu-system-aarch64 qemu-system-x86 qemu-utils virtiofsd xz-utils
 
-  download_nano:
-    desc: Download exasol db.run from github
-    vars:
-      NANO_RELEASE: '2026.04.09'
-      NANO_FILE: 'exasol-nano-db-{{.NANO_VERSION}}-{{.NANO_ARCH}}.run'
-      NANO_URL: 'https://github.com/exasol-labs/exasol-nano/releases/download/{{.NANO_RELEASE}}/{{.NANO_FILE}}'
-    cmds:
-      - cmd: |
-          cat <<EOF
-          echo download manually for now:
-
-          curl -L -f "{{.NANO_URL}}" -o "nano/{{.NANO_FILE}}"
-          EOF
-        silent: true
-      - exit 1
-    status:
-      # For now skip if it exists until we figure out authentication for downloads
-      - test -f "nano/{{.NANO_FILE}}"
-
-  build_nano:
-    desc: Build minimal container with exasol db.run
-    vars:
-      NANO_VERSION: '2026.1.0-dev.1'
-    deps:
-      - task: download_nano
-        vars:
-          NANO_ARCH:
-            ref: .NANO_ARCH
-          NANO_VERSION:
-            ref: .NANO_VERSION
-    cmds:
-      - |
-        set -eu
-        podman build --arch "{{.NANO_ARCH}}" --build-arg "NANO_VERSION={{.NANO_VERSION}}" nano
-        image="$(podman build --quiet --arch "{{.NANO_ARCH}}" --build-arg "NANO_VERSION={{.NANO_VERSION}}" nano)"
-        podman save "${image}" > "container/exasol_nano_{{.NANO_ARCH}}.tar"
-
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages
-    deps:
-      - task: build_nano
     cmds:
       - ./host/build/build-artifacts.sh
 

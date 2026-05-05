@@ -3,13 +3,11 @@
 The VM image is built from container stages instead of a temporary booted VM.
 The active build path is:
 
-1. `Taskfile.yml` builds a minimal Exasol Nano container image from `nano/`.
-2. The image is saved as `container/exasol_nano_${IMG_ARCH}.tar`.
-3. The root `Containerfile` installs Alpine, Podman, OpenRC services, and the
-   matching saved Nano image.
-4. The initramfs stage packages the guest root filesystem, excluding `/boot`
+1. `Taskfile.yml` calls the host artifact build wrapper.
+2. The root `Containerfile` installs Alpine, Podman, and OpenRC services.
+3. The initramfs stage packages the guest root filesystem, excluding `/boot`
    and `/var`.
-5. The disk-image stage creates a unified kernel image and a GPT disk with an
+4. The disk-image stage creates a unified kernel image and a GPT disk with an
    EFI System Partition plus an ext4 `exasol-data` partition for `/var`.
 
 No cloud-init ISO is generated, and the build does not run QEMU to initialize
@@ -28,8 +26,6 @@ Accepted values:
 - `x86_64`
 - `aarch64`
 
-The matching Nano installer must already exist in `nano/`.
-
 ## Runtime Shape
 
 The VM boots a unified kernel image from the EFI System Partition. The root
@@ -38,7 +34,7 @@ The `/var` tree is stored on the `exasol-data` ext4 partition.
 
 Current runtime behavior is intentionally minimal:
 
-- Podman and the Exasol Nano image are present in the guest.
+- Podman is installed in the guest.
 - OpenRC starts base services, networking, Podman, `acpid`, and `sshd`.
 - The guest currently autologins as root on configured consoles.
 

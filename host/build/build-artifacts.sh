@@ -20,28 +20,18 @@ if [ ! -f "$BUILD_CONFIG_FILE" ]; then
     exit 1
 fi
 
-DISK_PADDING_SIZE_MB="${DISK_PADDING_SIZE_MB:-$(jq -r '.diskPaddingSizeMB' "$BUILD_CONFIG_FILE")}"
 KERNEL_CMDLINE="${KERNEL_CMDLINE:-$(jq -r '.kernelCmdline' "$BUILD_CONFIG_FILE")}"
-TARGET_ARCH="${TARGET_ARCH:-}"
 
 mkdir -p "$OUTPUT_DIR"
 
 BUILD_ARGS=(
     --jobs=0
     --pull=newer
-    # For nested `podman pull` :-/
-    --cap-add=SYS_ADMIN
     --output
     "type=local,dest=${OUTPUT_DIR}"
     --build-arg
-    "DISK_PADDING_SIZE_MB=${DISK_PADDING_SIZE_MB}"
-    --build-arg
     "KERNEL_CMDLINE=${KERNEL_CMDLINE}"
 )
-
-if [ -n "$TARGET_ARCH" ]; then
-    BUILD_ARGS+=(--arch "$TARGET_ARCH")
-fi
 
 echo "==> Building VM artifacts with podman..."
 podman build "${BUILD_ARGS[@]}" "$ROOT_DIR"
