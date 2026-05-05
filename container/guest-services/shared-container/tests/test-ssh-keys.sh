@@ -9,12 +9,9 @@ cleanup() {
   local exit_code=$?
   echo ""
   echo "==> Cleaning up..."
-  
-  # Stop the VM if it's running
-  if [ -f "qemu.pid" ]; then
-    echo "==> Stopping VM..."
-    ./host/run/stop-vm.sh || true
-  fi
+
+  echo "==> Stopping VM..."
+  task stop-vm || true
   
   # Clean up test files
   echo "==> Removing test files..."
@@ -44,7 +41,7 @@ cat "$TEST_KEY.pub" >> "$AUTHORIZED_KEYS"
 
 # Start the VM
 echo "==> Starting VM..."
-./host/run/start-vm.sh
+task start-vm
 
 # Try to connect with the test key (retry for 5 minutes)
 echo "==> Testing SSH connection with test key (will retry for 5 minutes)..."

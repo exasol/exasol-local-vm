@@ -2,10 +2,10 @@ version: '3'
 
 tasks:
   install-deps:
-    desc: Install host dependencies for building with Podman and running the VM locally on Linux
+    desc: Install host dependencies for building and running the VM with Podman on Linux
     cmds:
       - sudo apt-get update
-      - sudo apt-get install -y jq ovmf podman qemu-efi-aarch64 qemu-system-aarch64 qemu-system-x86 qemu-utils virtiofsd xz-utils
+      - sudo apt-get install -y jq podman xz-utils
 
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages
@@ -67,7 +67,7 @@ tasks:
       - ./host/run/stop-container.sh
 
   package-linux:
-    desc: Package the raw UEFI disk for Linux/QEMU users
+    desc: Package the VM artifacts and Podman/QEMU runner for Linux users
     deps:
       - build
     cmds:
@@ -93,12 +93,6 @@ tasks:
       - package-linux
       - package-mac
       - package-windows
-
-  cleanup-force:
-    desc: Force kill all QEMU and virtiofsd processes and clean up files
-    cmds:
-      - task: clean
-      - ./host/lib/cleanup-force.sh
 
   clean:
     desc: Remove generated files

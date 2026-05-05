@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Ensure VM is stopped on exit (success or failure)
-trap './host/run/stop-vm.sh 2>/dev/null || true' EXIT
+trap 'task stop-vm 2>/dev/null || true' EXIT
 
 echo "==> Starting VM startup benchmark..."
 echo ""
@@ -11,7 +11,7 @@ echo ""
 START_TIME=$(date +%s%3N)  # milliseconds
 
 # Start the VM
-./host/run/start-vm.sh
+task start-vm
 
 echo ""
 echo "==> Waiting for SSH connection..."

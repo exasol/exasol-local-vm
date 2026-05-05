@@ -30,11 +30,15 @@ The build exports artifacts under `output/`:
 
 ## Local Linux Run
 
-Start the built image with QEMU:
+Start the image with the Podman-based QEMU runner:
 
 ```bash
 task start-vm
 ```
+
+If the VM artifacts or runner image are missing, the task builds them first.
+The host only needs Podman and jq for the Linux run path; QEMU, firmware, and
+virtiofsd are installed inside the runner image.
 
 Keep the console attached:
 
@@ -52,8 +56,9 @@ IMG_ARCH=x86_64 task package-mac
 IMG_ARCH=x86_64 task package-windows
 ```
 
-The Linux and macOS packages use the raw UEFI disk image. The Windows package
-uses the VHDX artifact for Hyper-V Generation 2 VMs.
+The Linux package uses the Podman-based QEMU runner. The macOS package uses the
+raw UEFI disk image with vfkit. The Windows package uses the VHDX artifact for
+Hyper-V Generation 2 VMs.
 
 ## Reference Runtime Code
 

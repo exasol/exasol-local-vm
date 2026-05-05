@@ -5,6 +5,7 @@ CONTAINER_NAME="${VM_CONTAINER_NAME:-exasol-nano-vm}"
 
 if ! command -v podman >/dev/null 2>&1; then
     echo "Error: podman is required" >&2
+    echo "Run: task install-deps" >&2
     exit 1
 fi
 

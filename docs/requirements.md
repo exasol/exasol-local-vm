@@ -53,11 +53,16 @@ keys from a shared folder.
 ## Packaging And Launchers
 
 Packages MUST include the relevant disk image, `arch.txt`, `vm-config.json`,
-and the platform launcher.
+and the platform launcher. Linux packages MUST also include `vmlinuz-virt`,
+`initramfs.img.zst`, and `kernel-cmdline.txt` for the Podman/QEMU runner.
 
-The Linux package uses QEMU with the raw disk image. The macOS package uses
-vfkit with the raw disk image. The Windows package uses Hyper-V with the VHDX
-image.
+The Linux package uses the Podman-based QEMU runner with the raw disk, kernel,
+initrd, and kernel command line artifacts. The macOS package uses vfkit with
+the raw disk image. The Windows package uses Hyper-V with the VHDX image.
+
+Linux hosts MUST NOT need QEMU, UEFI firmware, or virtiofsd installed directly
+for the default launch path; those dependencies belong inside
+`host/run/Containerfile`.
 
 Runtime port forwarding is controlled by `config/vm-config.json` and the
 platform launcher.

@@ -1,11 +1,5 @@
 output/*
 
-qemu.pid
-virtiofs.sock.pid
-virtiofsd.pid
-virtiofs.sock
-vm.log
-vm-console.log
 vfkit.pid
 vfkit.log
 shared/*

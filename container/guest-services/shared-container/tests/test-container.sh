@@ -24,12 +24,9 @@ cleanup() {
   local exit_code=$?
   echo ""
   echo_info "Cleaning up..."
-  
-  # Stop the VM if it's running
-  if [ -f "qemu.pid" ]; then
-    echo_info "Stopping VM..."
-    ./host/run/stop-vm.sh || true
-  fi
+
+  echo_info "Stopping VM..."
+  task stop-vm || true
   
   exit $exit_code
 }
@@ -41,7 +38,7 @@ echo_info "Testing containerized REST server..."
 
 # Start the VM
 echo_info "Starting VM..."
-./host/run/start-vm.sh
+task start-vm
 
 # Wait for VM to be ready
 echo_info "Waiting for VM to initialize..."

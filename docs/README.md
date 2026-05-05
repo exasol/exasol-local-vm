@@ -38,6 +38,10 @@ Current runtime behavior is intentionally minimal:
 - OpenRC starts base services, networking, Podman, `acpid`, and `sshd`.
 - The guest currently autologins as root on configured consoles.
 
+On Linux, the default launcher is a Podman-based QEMU runner. Host-side QEMU,
+UEFI firmware, and virtiofsd dependencies are intentionally isolated inside
+`host/run/Containerfile`.
+
 The following behavior still needs implementation:
 
 - Mount `/mnt/host` through virtiofs on QEMU/vfkit and a data disk on Hyper-V.

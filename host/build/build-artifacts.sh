@@ -7,11 +7,13 @@ OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output}"
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "Error: jq is required to read ${BUILD_CONFIG_FILE}" >&2
+    echo "Run: task install-deps" >&2
     exit 1
 fi
 
 if ! command -v podman >/dev/null 2>&1; then
     echo "Error: podman is required to build the VM artifacts" >&2
+    echo "Run: task install-deps" >&2
     exit 1
 fi
 
