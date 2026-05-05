@@ -20,6 +20,11 @@ if [ ! -f "$BUILD_CONFIG_FILE" ]; then
     exit 1
 fi
 
+if [ -z "$IMG_ARCH" ]; then
+    echo "Error: set IMG_ARCH to x86_64 or aarch64" >&2
+    exit 1
+fi
+
 KERNEL_CMDLINE="${KERNEL_CMDLINE:-$(jq -r '.kernelCmdline' "$BUILD_CONFIG_FILE")}"
 
 mkdir -p "$OUTPUT_DIR"
@@ -31,6 +36,8 @@ BUILD_ARGS=(
     "type=local,dest=${OUTPUT_DIR}"
     --build-arg
     "KERNEL_CMDLINE=${KERNEL_CMDLINE}"
+    --arch
+    "${IMG_ARCH}"
 )
 
 echo "==> Building VM artifacts with podman..."
