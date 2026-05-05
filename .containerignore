@@ -1,0 +1,16 @@
+.git
+.codex
+output/
+package/
+release/
+shared/*
+!shared/.gitkeep
+!shared/README.md
+qemu.pid
+virtiofs.sock.pid
+virtiofsd.pid
+virtiofs.sock
+vm.log
+vm-console.log
+vfkit.pid
+vfkit.log
