@@ -67,9 +67,10 @@ EOF
 
 COPY --link init /init
 
-# TODO mount /mnt/host from virtiofs or a Hyper-V data disk.
+# TODO mount /mnt/host from Hyper-V data disk for windows
 COPY --link <<-'EOF' /etc/fstab
-LABEL=exasol-data  /var  ext4  defaults  0 2
+LABEL=exasol-data   /var        ext4       defaults         0 2
+hostshare           /mnt/host   virtiofs   defaultsnofail   0 0
 EOF
 
 COPY --link exasol-network /etc/init.d/exasol-network
