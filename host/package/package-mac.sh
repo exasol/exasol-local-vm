@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ -z "$IMG_ARCH" ]; then
-    echo "Error: set IMG_ARCH to x86_64 or aarch64" >&2
+if [ "$#" -lt 1 ]; then
+    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
     exit 1
 fi
+IMG_ARCH="${1}"
+shift
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RAW_DISK="$ROOT_DIR/output/${IMG_ARCH}/disk.img"

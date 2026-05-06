@@ -15,10 +15,8 @@ tasks:
       vars:
         - name: IMG_ARCH
           enum: [x86_64, aarch64]
-    env:
-      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
-      - ./host/build/build-artifacts.sh
+      - ./host/build/build-artifacts.sh "{{.IMG_ARCH}}"
 
   build-qemu-container:
     desc: Build the Podman/QEMU runner container image for starting the VM
@@ -62,10 +60,8 @@ tasks:
         vars:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ensure-qemu-container
-    env:
-      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
-      - ./host/run/start-container.sh
+      - ./host/run/start-container.sh "{{.IMG_ARCH}}"
 
   start-vm-attached:
     desc: Start the VM in an attached Podman runner container
@@ -79,10 +75,8 @@ tasks:
         vars:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ensure-qemu-container
-    env:
-      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
-      - ./host/run/start-container.sh --attached
+      - ./host/run/start-container.sh -a "{{.IMG_ARCH}}"
 
   stop-vm:
     desc: Stop the Podman runner container for the VM
@@ -100,10 +94,8 @@ tasks:
       - task: ensure-vm-image
         vars:
           IMG_ARCH: "{{.IMG_ARCH}}"
-    env:
-      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
-      - ./host/package/package-linux.sh
+      - ./host/package/package-linux.sh "{{.IMG_ARCH}}"
 
   package-mac:
     desc: Package the raw UEFI disk for macOS/vfkit users
@@ -116,10 +108,8 @@ tasks:
       - task: ensure-vm-image
         vars:
           IMG_ARCH: "{{.IMG_ARCH}}"
-    env:
-      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
-      - ./host/package/package-mac.sh
+      - ./host/package/package-mac.sh "{{.IMG_ARCH}}"
 
   package-windows:
     desc: Package the VHDX disk for Windows/Hyper-V users
@@ -132,10 +122,8 @@ tasks:
       - task: ensure-vm-image
         vars:
           IMG_ARCH: "{{.IMG_ARCH}}"
-    env:
-      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
-      - ./host/package/package-windows.sh
+      - ./host/package/package-windows.sh "{{.IMG_ARCH}}"
 
   package:
     desc: Build all distributable packages

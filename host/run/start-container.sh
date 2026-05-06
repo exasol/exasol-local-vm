@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ -z "$IMG_ARCH" ]; then
-    echo "Error: set IMG_ARCH to x86_64 or aarch64" >&2
+ATTACHED=false
+while getopts "a" opt; do
+    case "$opt" in
+        a)
+            ATTACHED=true
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+done
+shift $(($OPTIND - 1))
+
+if [ "$#" -lt 1 ]; then
+    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
     exit 1
 fi
+IMG_ARCH="${1}"
+shift
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER_IMAGE="${VM_RUNNER_IMAGE:-exasol-nano-vm-runner:latest}"
@@ -12,11 +27,6 @@ CONTAINER_NAME="${VM_CONTAINER_NAME:-exasol-nano-vm}"
 OUTPUT_DIR="${VM_OUTPUT_DIR:-$ROOT_DIR/output/$IMG_ARCH}"
 SHARED_DIR="${VM_SHARED_DIR:-$ROOT_DIR/shared}"
 VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
-
-ATTACHED=false
-if [ "${1:-}" = "--attached" ]; then
-    ATTACHED=true
-fi
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then

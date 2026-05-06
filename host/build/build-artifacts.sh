@@ -7,10 +7,12 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ -z "$IMG_ARCH" ]; then
-    echo "Error: set IMG_ARCH to x86_64 or aarch64" >&2
+if [ "$#" -lt 1 ]; then
+    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
     exit 1
 fi
+IMG_ARCH="${1}"
+shift
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/$IMG_ARCH}"
