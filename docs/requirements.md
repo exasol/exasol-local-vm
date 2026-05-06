@@ -26,7 +26,6 @@ The build MUST produce these files in `output/`:
 - `vmlinuz-virt`
 - `arch.txt`
 - `kernel-cmdline.txt`
-- `disk-layout.json`
 
 The raw disk MUST be a GPT UEFI disk with:
 

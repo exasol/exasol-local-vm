@@ -1,34 +1,30 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bash
 
-ARTIFACT_DIR="${1:-/artifacts}"
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
+    exit 1
+fi
+IMG_ARCH="${1}"
+IMAGE_DIR="${2:-/image}"
+ARTIFACT_DIR="${3:-/output}"
+
+IMAGE_KERNEL="${IMAGE_DIR}/boot/vmlinuz-virt"
+IMAGE_VAR_DIR="${IMAGE_DIR}/var"
+
 KERNEL_FILE="${ARTIFACT_DIR}/vmlinuz-virt"
 INITRAMFS_FILE="${ARTIFACT_DIR}/initramfs.img.zst"
-UKI_FILE="${ARTIFACT_DIR}/vm.efi"
 RAW_DISK_FILE="${ARTIFACT_DIR}/disk.img"
 RAW_DISK_THIN_FILE="${ARTIFACT_DIR}/disk_thin.img"
 VHDX_FILE="${ARTIFACT_DIR}/disk.vhdx"
 ARCH_FILE="${ARTIFACT_DIR}/arch.txt"
 CMDLINE_FILE="${ARTIFACT_DIR}/kernel-cmdline.txt"
-LAYOUT_FILE="${ARTIFACT_DIR}/disk-layout.json"
 
 DISK_PADDING_SIZE="${DISK_PADDING_SIZE:-3G}"
 KERNEL_CMDLINE="${KERNEL_CMDLINE:-console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0}"
 
-mkdir -p "${ARTIFACT_DIR}"
-
-if [ ! -f "${KERNEL_FILE}" ]; then
-    echo "missing kernel artifact: ${KERNEL_FILE}" >&2
-    exit 1
-fi
-
-if [ ! -f "${INITRAMFS_FILE}" ]; then
-    echo "missing initramfs artifact: ${INITRAMFS_FILE}" >&2
-    exit 1
-fi
-
-ARCH="$(uname -m)"
-case "${ARCH}" in
+case "${IMG_ARCH}" in
     x86_64)
         EFI_STUB="/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
         EFI_BOOT_FILE="BOOTX64.EFI"
@@ -38,28 +34,65 @@ case "${ARCH}" in
         EFI_BOOT_FILE="BOOTAA64.EFI"
         ;;
     *)
-        echo "unsupported build architecture: ${ARCH}" >&2
+        echo "unsupported build architecture: ${IMG_ARCH}" >&2
         exit 1
         ;;
 esac
 
-printf "%s\n" "${ARCH}" > "${ARCH_FILE}"
+mkdir -p "${ARTIFACT_DIR}"
+
+
+### write metadata
+
+printf "%s\n" "${IMG_ARCH}" > "${ARCH_FILE}"
 printf "%s\n" "${KERNEL_CMDLINE}" > "${CMDLINE_FILE}"
+
+
+### copy kernel
+
+cp "${IMAGE_KERNEL}" "${KERNEL_FILE}"
+
+
+### write initramfs
+
+pushd "${IMAGE_DIR}"
+find . -xdev -not -path './boot/*' -not -path './var/*' |
+    cpio --quiet -H newc -o |
+    zstdmt -9 \
+        >"${INITRAMFS_FILE}"
+popd
+
+
+### prepare image write
+
+COPY_SOURCE_DIR="$(mktemp -d)"
+DEFINITIONS_DIR="$(mktemp -d)"
+trap 'rm -rf "${COPY_SOURCE_DIR}" "${DEFINITIONS_DIR}"' EXIT
+
+
+### prepare image contents
+
+mkdir -p "${COPY_SOURCE_DIR}/EFI/BOOT"
 
 ukify build \
     --linux="${KERNEL_FILE}" \
     --initrd="${INITRAMFS_FILE}" \
     --cmdline="${KERNEL_CMDLINE}" \
     --stub="${EFI_STUB}" \
-    --output="${UKI_FILE}"
+    --output="${COPY_SOURCE_DIR}/EFI/BOOT/${EFI_BOOT_FILE}"
 
-COPY_SOURCE_DIR="$(mktemp -d)"
-DEFINITIONS_DIR="$(mktemp -d)"
-trap 'rm -rf "${COPY_SOURCE_DIR}" "${DEFINITIONS_DIR}"' EXIT
+cp -a "${IMAGE_VAR_DIR}" "${COPY_SOURCE_DIR}/var"
 
-mkdir -p "${COPY_SOURCE_DIR}/EFI/BOOT"
-cp "${UKI_FILE}" "${COPY_SOURCE_DIR}/EFI/BOOT/${EFI_BOOT_FILE}"
-cp -a /artifacts/var "${COPY_SOURCE_DIR}/var"
+### declare images
+
+cat > "${DEFINITIONS_DIR}/10-esp.conf" <<EOF
+[Partition]
+Type=esp
+Label=EFI
+Format=vfat
+Minimize=guess
+CopyFiles=/EFI:/EFI
+EOF
 
 cat > "${DEFINITIONS_DIR}/20-data.conf" <<EOF
 [Partition]
@@ -71,6 +104,14 @@ CopyFiles=/var:/
 PaddingMinBytes=${DISK_PADDING_SIZE}
 EOF
 
+
+### write images
+
+# remove because systemd-repart refuses to overwrite them
+# racy for concurrent builds but we probably don't care and littering `output`
+# with temporary files is just a different failure mode.
+rm -f "${RAW_DISK_THIN_FILE}" "${RAW_DISK_FILE}" "${VHDX_FILE}"
+
 systemd-repart \
     --dry-run=no \
     --offline=yes \
@@ -79,16 +120,8 @@ systemd-repart \
     --sector-size=512 \
     --definitions="${DEFINITIONS_DIR}" \
     --copy-source="${COPY_SOURCE_DIR}" \
+    --exclude-partitions=esp \
     "${RAW_DISK_THIN_FILE}"
-
-cat > "${DEFINITIONS_DIR}/10-esp.conf" <<EOF
-[Partition]
-Type=esp
-Label=EFI
-Format=vfat
-Minimize=guess
-CopyFiles=/EFI:/EFI
-EOF
 
 systemd-repart \
     --dry-run=no \
@@ -101,11 +134,3 @@ systemd-repart \
     "${RAW_DISK_FILE}"
 
 qemu-img convert -f raw -O vhdx -o subformat=dynamic "${RAW_DISK_FILE}" "${VHDX_FILE}"
-
-cat > "${LAYOUT_FILE}" <<EOF
-{
-  "arch": "${ARCH}",
-  "efiBootFile": "${EFI_BOOT_FILE}",
-  "kernelCmdline": "${KERNEL_CMDLINE}"
-}
-EOF

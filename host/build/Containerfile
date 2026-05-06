@@ -1,0 +1,19 @@
+FROM fedora
+
+ARG DISK_PADDING_SIZE='3G'
+ARG KERNEL_CMDLINE="console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0"
+
+RUN dnf install -y \
+    cpio \
+    dosfstools \
+    e2fsprogs \
+    mtools \
+    qemu-img \
+    systemd \
+    systemd-boot-unsigned \
+    systemd-ukify \
+    zstd && \
+    dnf clean all
+
+COPY --link /build-vm-image.sh /build-vm-image.sh
+ENTRYPOINT ["/build-vm-image.sh"]

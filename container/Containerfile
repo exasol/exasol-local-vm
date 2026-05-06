@@ -1,22 +1,29 @@
-FROM alpine AS alpine_base
+FROM alpine AS base
 
-FROM alpine_base AS base
+### Install dependencies
 
 RUN apk upgrade -aU
 
 RUN <<-'EOF'
 set -eu
 apk add alpine-base
+
+apk add openssh
+
 # Handle poweroff signal
 apk add acpid
+
 # Auto-grow /var partition
 apk add cloud-utils-growpart e2fsprogs e2fsprogs-extra
-apk add openssh
+
 # podman needs iptables but it's not pulled in for some reason?
 apk add podman fuse-overlayfs slirp4netns shadow-uidmap iptables
 
 apk add linux-virt
 EOF
+
+
+### TODO unclear if this is actually needed?
 
 RUN <<-'EOF'
 set -eu
@@ -26,7 +33,8 @@ for console in ttyS0 ttyAMA0 hvc0; do
 done
 EOF
 
-### Enable services
+
+### Configure podman
 
 COPY --link <<-'EOF' /etc/containers/storage.conf
 [storage]
@@ -43,6 +51,7 @@ RUN tee /etc/subuid /etc/subgid <<-'EOF'
 containers:100000:65536
 EOF
 
+
 ### Add exasol user
 
 RUN setup-user -a -u exasol
@@ -50,7 +59,8 @@ COPY --link <<-'EOF' /etc/doas.conf.d/exasol.conf
 permit nopass :wheel
 EOF
 
-### Enable autologin
+
+### Enable autologin for exasol user
 
 COPY --link <<-'EOF' /usr/sbin/autologin
 #!/bin/sh
@@ -62,6 +72,7 @@ set -eu
 chmod +x /usr/sbin/autologin
 sed -i 's@:respawn:/sbin/getty@:respawn:/sbin/getty -n -l /usr/sbin/autologin@g' /etc/inittab
 EOF
+
 
 ### VM startup scripts
 
@@ -78,6 +89,10 @@ COPY --link grow-var-fs.initd.sh /etc/init.d/grow-var-fs
 COPY --link import-shared-keys.initd.sh /etc/init.d/import-shared-keys
 COPY --link import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
 
+# Enables the same services that the default alpine vm image enables:
+# https://github.com/alpinelinux/alpine-make-vm-image/blob/ab659ff532b0e27684a08d11df116b9f7665081a/alpine-make-vm-image#L685-L694
+#
+# Adds our custom services
 RUN --mount=type=bind,target=/host/ <<-"EOF"
 set -eu
 /host/rc_add sysinit  devfs dmesg mdev hwdrivers
@@ -88,74 +103,6 @@ set -eu
 EOF
 
 
-### Clean up
+### Clean up to minimize image
 
 RUN apk cache purge
-
-
-###
-
-FROM alpine_base AS initramfs_build
-
-RUN apk add zstd
-
-RUN --mount=type=bind,from=base,target=/image <<-'EOF'
-set -eu
-cd /image
-find . -xdev -not -path './boot/*' -not -path './var/*' \
-    | cpio --quiet -H newc -o \
-    | zstdmt -9 \
-    > /initramfs.img.zst
-EOF
-
-###
-
-FROM scratch AS initramfs
-
-COPY --link --from=initramfs_build /initramfs.img* /
-
-###
-
-FROM scratch AS kernel
-
-COPY --link --from=base /boot/vmlinuz-virt /
-
-###
-
-FROM fedora AS vm_image_build
-
-ARG DISK_PADDING_SIZE='3G'
-
-ARG KERNEL_CMDLINE="console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0"
-
-RUN dnf install -y \
-    cpio \
-    dosfstools \
-    e2fsprogs \
-    mtools \
-    qemu-img \
-    systemd \
-    systemd-boot-unsigned \
-    systemd-ukify \
-    zstd && \
-    dnf clean all
-
-RUN --mount=type=bind,from=base,target=/base \
-    --mount=type=bind,from=kernel,target=/kernel \
-    --mount=type=bind,from=initramfs,target=/initramfs \
-    --mount=type=bind,target=/host \
-    mkdir -p /artifacts && \
-    cp -a /base/var /artifacts/var && \
-    cp /kernel/vmlinuz-virt /artifacts/vmlinuz-virt && \
-    cp /initramfs/initramfs.img.zst /artifacts/initramfs.img.zst && \
-    DISK_PADDING_SIZE="$DISK_PADDING_SIZE" \
-    KERNEL_CMDLINE="$KERNEL_CMDLINE" \
-    /host/build-vm-image.sh /artifacts
-
-###
-
-FROM scratch AS all
-
-COPY --from=kernel /* /
-COPY --from=initramfs /* /
-COPY --from=vm_image_build /artifacts/arch.txt /artifacts/kernel-cmdline.txt /artifacts/disk.img /artifacts/disk_thin.img /artifacts/disk.vhdx /

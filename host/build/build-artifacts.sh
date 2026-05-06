@@ -19,19 +19,30 @@ OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/$IMG_ARCH}"
 
 mkdir -p "$OUTPUT_DIR"
 
-BUILD_ARGS=(
+BASE_BUILD_ARGS=(
     --jobs=0
     --pull=newer
-    --output
-    "type=local,dest=${OUTPUT_DIR}"
-    --arch
-    "${IMG_ARCH}"
-    -f
-    "${ROOT_DIR}/Containerfile"
+    --arch="${IMG_ARCH}"
+    --iidfile="${OUTPUT_DIR}/base_image_id"
+)
+IMG_CONVERTER_BUILD_ARGS=(
+    --jobs=0
+    --pull=newer
+    --arch="${IMG_ARCH}"
+    --iidfile="${OUTPUT_DIR}/converter_image_id"
 )
 
 echo "==> Building VM artifacts with podman..."
-podman build "${BUILD_ARGS[@]}" "$ROOT_DIR/container"
+podman build "${BASE_BUILD_ARGS[@]}" "$ROOT_DIR/container"
+podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "$ROOT_DIR/host/build"
+
+IMG_CONVERTER_RUN_ARGS=(
+    --rm
+    --arch="${IMG_ARCH}"
+    --mount="type=image,src=$(cat "${OUTPUT_DIR}/base_image_id"),dst=/image"
+    --mount="type=bind,src=${OUTPUT_DIR},dst=/output,relabel=shared"
+)
+podman run "${IMG_CONVERTER_RUN_ARGS[@]}" "$(cat "${OUTPUT_DIR}/converter_image_id")" "${IMG_ARCH}"
 
 ARCH_FILE="$OUTPUT_DIR/arch.txt"
 if [ ! -f "$ARCH_FILE" ]; then

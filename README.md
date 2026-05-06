@@ -1,10 +1,8 @@
 # exasol-nano-vm
 
 This repository builds a minimal Linux VM image to run an Exasol container.
-The image is assembled by Podman builder stages:
-  - Alpine provides the guest root filesystem and kernel
-  - Fedora builds the unified kernel image and disk images with `ukify` and
-    `systemd-repart`.
+The image is built from `container/Containerfile` and then converted to vm
+images using another container buiult from `host/build/Containerfile`.
 
 ## Build
 
