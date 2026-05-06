@@ -79,6 +79,20 @@ port_args_from_config() {
         done
 }
 
+port_args_from_container() {
+    if [ ! -f "$SHARED_DIR/container-manifest.json" ]; then
+        return 0
+    fi
+
+    jq -r '.ports[]?' "$SHARED_DIR/container-manifest.json" \
+        | while IFS='' read -r port; do
+            if [ -n "$port" ]; then
+                printf '%s\n' "-p"
+                printf '%s\n' "${port}:${port}"
+            fi
+        done
+}
+
 require_command jq "task install-deps"
 require_command podman "task install-deps"
 
@@ -119,7 +133,7 @@ fi
 
 while IFS= read -r port_arg; do
     RUN_ARGS+=("$port_arg")
-done < <(port_args_from_config)
+done < <(port_args_from_config; port_args_from_container)
 
 if [ "$ATTACHED" = "true" ]; then
     echo "==> Starting attached VM container: $CONTAINER_NAME"

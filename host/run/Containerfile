@@ -36,6 +36,7 @@ INITRD_FILE="${INITRD_FILE:-/vm-image/initramfs.img.zst}"
 KERNEL_CMDLINE_FILE="${KERNEL_CMDLINE_FILE:-/vm-image/kernel-cmdline.txt}"
 DEFAULT_VM_CONFIG="/etc/exasol-nano-vm/vm-config.json"
 SHARED_DIR="${SHARED_DIR:-/shared}"
+CONTAINER_MANIFEST="$SHARED_DIR/container-manifest.json"
 
 QEMU_PID=""
 VIRTIOFSD_PID=""
@@ -228,11 +229,6 @@ if jq -e 'has("ports") and (.ports | type == "array")' "$CONFIG_FILE" >/dev/null
     done
 fi
 
-NETDEV_ARGS=(-netdev user,id=net0)
-if [ "${#PORTFWD_RULES[@]}" -gt 0 ]; then
-    NETDEV_ARGS=(-netdev "user,id=net0,$(IFS=,; echo "${PORTFWD_RULES[*]}")")
-fi
-
 VIRTIOFS_ARGS=()
 if [ -d "$SHARED_DIR" ]; then
     VIRTIOFSD="$(find_first_executable \
@@ -265,6 +261,21 @@ if [ -d "$SHARED_DIR" ]; then
         -object "memory-backend-memfd,id=mem,size=${VM_MEMORY}M,share=on"
         -numa node,memdev=mem
     )
+
+    if [ -f "${CONTAINER_MANIFEST}" ] && \
+            jq -e 'has("ports") and (.ports | type == "array")' "${CONTAINER_MANIFEST}" >/dev/null 2>&1; then
+        PORT_COUNT="$(jq -r '.ports | length' "${CONTAINER_MANIFEST}")"
+        for ((i = 0; i < PORT_COUNT; i++)); do
+            PORT="$(jq -r ".ports[$i]" "${CONTAINER_MANIFEST}")"
+            PORTFWD_RULES+=("hostfwd=::${PORT}-:${PORT}")
+        done
+    fi
+
+fi
+
+NETDEV_ARGS=(-netdev user,id=net0)
+if [ "${#PORTFWD_RULES[@]}" -gt 0 ]; then
+    NETDEV_ARGS=(-netdev "user,id=net0,$(IFS=,; echo "${PORTFWD_RULES[*]}")")
 fi
 
 QEMU_ARGS=(
