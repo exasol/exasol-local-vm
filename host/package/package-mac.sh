@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -z "$IMG_ARCH" ]; then
+    echo "Error: set IMG_ARCH to x86_64 or aarch64" >&2
+    exit 1
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RAW_DISK="$ROOT_DIR/output/disk.img"
-ARCH_FILE="$ROOT_DIR/output/arch.txt"
+RAW_DISK="$ROOT_DIR/output/${IMG_ARCH}/disk.img"
+ARCH_FILE="$ROOT_DIR/output/${IMG_ARCH}/arch.txt"
 VFKIT_SCRIPT="$ROOT_DIR/host/run/start-vfkit.sh"
 VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
 GVPROXY_VERSION="v0.8.8"

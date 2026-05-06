@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -z "$IMG_ARCH" ]; then
+    echo "Error: set IMG_ARCH to x86_64 or aarch64" >&2
+    exit 1
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output}"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/${IMG_ARCH}}"
 PACKAGE_ROOT="${PACKAGE_ROOT:-$ROOT_DIR/package}"
 RELEASE_ROOT="${RELEASE_ROOT:-$ROOT_DIR/release}"
 RAW_DISK="$OUTPUT_DIR/disk.img"
@@ -36,17 +41,16 @@ esac
 
 PACKAGE_DIR="$PACKAGE_ROOT/$PACKAGE_NAME"
 RELEASE_FILE="$RELEASE_ROOT/$PACKAGE_NAME.tar.xz"
-PACKAGE_OUTPUT_DIR="$PACKAGE_DIR/output"
 
 rm -rf "$PACKAGE_DIR"
-mkdir -p "$PACKAGE_OUTPUT_DIR" "$PACKAGE_DIR/shared" "$RELEASE_ROOT"
+mkdir -p "$PACKAGE_DIR/shared" "$RELEASE_ROOT"
 
-cp "$RAW_DISK" "$PACKAGE_OUTPUT_DIR/disk.img"
-cp "$ARCH_FILE" "$PACKAGE_OUTPUT_DIR/arch.txt"
-cp "$KERNEL_FILE" "$PACKAGE_OUTPUT_DIR/vmlinuz-virt"
-cp "$INITRD_FILE" "$PACKAGE_OUTPUT_DIR/initramfs.img.zst"
-cp "$KERNEL_CMDLINE_FILE" "$PACKAGE_OUTPUT_DIR/kernel-cmdline.txt"
-cp "$VM_CONFIG" "$PACKAGE_OUTPUT_DIR/vm-config.json"
+cp "$RAW_DISK" "$PACKAGE_DIR/disk.img"
+cp "$ARCH_FILE" "$PACKAGE_DIR/arch.txt"
+cp "$KERNEL_FILE" "$PACKAGE_DIR/vmlinuz-virt"
+cp "$INITRD_FILE" "$PACKAGE_DIR/initramfs.img.zst"
+cp "$KERNEL_CMDLINE_FILE" "$PACKAGE_DIR/kernel-cmdline.txt"
+cp "$VM_CONFIG" "$PACKAGE_DIR/vm-config.json"
 cp "$RUN_CONTAINERFILE" "$PACKAGE_DIR/Containerfile"
 
 cat > "$PACKAGE_DIR/start.sh" <<'EOF'
@@ -56,8 +60,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_IMAGE="${VM_RUNNER_IMAGE:-exasol-nano-vm-runner:latest}"
 CONTAINER_NAME="${VM_CONTAINER_NAME:-exasol-nano-vm}"
-OUTPUT_DIR="${VM_OUTPUT_DIR:-$SCRIPT_DIR/output}"
-CONFIG_FILE="$OUTPUT_DIR/vm-config.json"
+CONFIG_FILE="$SCRIPT_DIR/vm-config.json"
 SHARED_DIR="${VM_SHARED_DIR:-$SCRIPT_DIR/shared}"
 
 require_command() {
@@ -81,11 +84,6 @@ port_args_from_config() {
 require_command podman
 require_command jq
 
-if [ ! -d "$OUTPUT_DIR" ]; then
-    echo "Error: VM artifact directory is missing: $OUTPUT_DIR" >&2
-    exit 1
-fi
-
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: VM config is missing: $CONFIG_FILE" >&2
     exit 1
@@ -100,7 +98,7 @@ RUN_ARGS=(
     -it
     --replace
     --name "$CONTAINER_NAME"
-    -v "$OUTPUT_DIR:/vm-image:Z"
+    -v "$SCRIPT_DIR:/vm-image:ro,Z"
 )
 
 if [ -d "$SHARED_DIR" ]; then

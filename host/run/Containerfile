@@ -106,31 +106,31 @@ find_first_executable() {
 
 if [ ! -f "$DISK_IMG" ]; then
     echo "Error: VM disk not found: $DISK_IMG" >&2
-    echo "Mount the build output directory with: -v \"\$PWD/output:/vm-image:Z\"" >&2
+    echo "Mount the build output directory with: -v \"\$PWD/output/\$IMG_ARCH:/vm-image:Z\"" >&2
     exit 1
 fi
 
 if [ ! -f "$ARCH_FILE" ]; then
     echo "Error: architecture file not found: $ARCH_FILE" >&2
-    echo "Mount the build output directory with: -v \"\$PWD/output:/vm-image:Z\"" >&2
+    echo "Mount the build output directory with: -v \"\$PWD/output/\$IMG_ARCH:/vm-image:Z\"" >&2
     exit 1
 fi
 
 if [ ! -f "$KERNEL_FILE" ]; then
     echo "Error: kernel file not found: $KERNEL_FILE" >&2
-    echo "Mount the build output directory with: -v \"\$PWD/output:/vm-image:Z\"" >&2
+    echo "Mount the build output directory with: -v \"\$PWD/output/\$IMG_ARCH:/vm-image:Z\"" >&2
     exit 1
 fi
 
 if [ ! -f "$INITRD_FILE" ]; then
     echo "Error: initrd file not found: $INITRD_FILE" >&2
-    echo "Mount the build output directory with: -v \"\$PWD/output:/vm-image:Z\"" >&2
+    echo "Mount the build output directory with: -v \"\$PWD/output/\$IMG_ARCH:/vm-image:Z\"" >&2
     exit 1
 fi
 
 if [ ! -f "$KERNEL_CMDLINE_FILE" ]; then
     echo "Error: kernel command line file not found: $KERNEL_CMDLINE_FILE" >&2
-    echo "Mount the build output directory with: -v \"\$PWD/output:/vm-image:Z\"" >&2
+    echo "Mount the build output directory with: -v \"\$PWD/output/\$IMG_ARCH:/vm-image:Z\"" >&2
     exit 1
 fi
 

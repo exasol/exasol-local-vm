@@ -1,6 +1,13 @@
 version: '3'
 
 tasks:
+  img-arch:
+    internal: true
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+
   install-deps:
     desc: Install host dependencies for building and running the VM with Podman on Linux
     run: once
@@ -11,10 +18,8 @@ tasks:
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages
     run: when_changed
-    requires:
-      vars:
-        - name: IMG_ARCH
-          enum: [x86_64, aarch64]
+    deps:
+      - img-arch
     cmds:
       - ./host/build/build-artifacts.sh
 
@@ -26,12 +31,12 @@ tasks:
 
   ensure-vm-image:
     status:
-      - test -f output/disk.img
-      - test -f output/disk_thin.img
-      - test -f output/arch.txt
-      - test -f output/vmlinuz-virt
-      - test -f output/initramfs.img.zst
-      - test -f output/kernel-cmdline.txt
+      - test -f output/{{.IMG_ARCH}}/disk.img
+      - test -f output/{{.IMG_ARCH}}/disk_thin.img
+      - test -f output/{{.IMG_ARCH}}/arch.txt
+      - test -f output/{{.IMG_ARCH}}/vmlinuz-virt
+      - test -f output/{{.IMG_ARCH}}/initramfs.img.zst
+      - test -f output/{{.IMG_ARCH}}/kernel-cmdline.txt
     cmds:
       - task: build
 
@@ -45,6 +50,7 @@ tasks:
     desc: Start the VM in a detached Podman runner container
     run: once
     deps:
+      - img-arch
       - ensure-vm-image
       - ensure-qemu-container
     cmds:
@@ -54,6 +60,7 @@ tasks:
     desc: Start the VM in an attached Podman runner container
     run: once
     deps:
+      - img-arch
       - ensure-vm-image
       - ensure-qemu-container
     cmds:
@@ -67,6 +74,7 @@ tasks:
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users
     deps:
+      - img-arch
       - ensure-vm-image
     cmds:
       - ./host/package/package-linux.sh
@@ -74,6 +82,7 @@ tasks:
   package-mac:
     desc: Package the raw UEFI disk for macOS/vfkit users
     deps:
+      - img-arch
       - ensure-vm-image
     cmds:
       - ./host/package/package-mac.sh
@@ -81,6 +90,7 @@ tasks:
   package-windows:
     desc: Package the VHDX disk for Windows/Hyper-V users
     deps:
+      - img-arch
       - ensure-vm-image
     cmds:
       - ./host/package/package-windows.sh

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output}"
-
 if ! command -v podman >/dev/null 2>&1; then
     echo "Error: podman is required to build the VM artifacts" >&2
     echo "Run: task install-deps" >&2
@@ -14,6 +11,9 @@ if [ -z "$IMG_ARCH" ]; then
     echo "Error: set IMG_ARCH to x86_64 or aarch64" >&2
     exit 1
 fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/$IMG_ARCH}"
 
 mkdir -p "$OUTPUT_DIR"
 

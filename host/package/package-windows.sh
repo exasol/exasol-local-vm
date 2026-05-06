@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -z "$IMG_ARCH" ]; then
+    echo "Error: set IMG_ARCH to x86_64 or aarch64" >&2
+    exit 1
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VHDX_DISK="$ROOT_DIR/output/disk.vhdx"
-ARCH_FILE="$ROOT_DIR/output/arch.txt"
+VHDX_DISK="$ROOT_DIR/output/${IMG_ARCH}/disk.vhdx"
+ARCH_FILE="$ROOT_DIR/output/${IMG_ARCH}/arch.txt"
 HYPERV_SCRIPT="$ROOT_DIR/host/run/start-hyperv.ps1"
 VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
 
