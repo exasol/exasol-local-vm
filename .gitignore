@@ -5,6 +5,5 @@ vfkit.log
 shared/*
 !shared/.gitkeep
 !shared/README.md
-package/
-!host/package/
+/package/
 release/
