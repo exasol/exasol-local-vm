@@ -2,23 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_CONFIG_FILE="${BUILD_CONFIG_FILE:-$ROOT_DIR/config/build-config.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output}"
-
-if ! command -v jq >/dev/null 2>&1; then
-    echo "Error: jq is required to read ${BUILD_CONFIG_FILE}" >&2
-    echo "Run: task install-deps" >&2
-    exit 1
-fi
 
 if ! command -v podman >/dev/null 2>&1; then
     echo "Error: podman is required to build the VM artifacts" >&2
     echo "Run: task install-deps" >&2
-    exit 1
-fi
-
-if [ ! -f "$BUILD_CONFIG_FILE" ]; then
-    echo "Error: build config not found: ${BUILD_CONFIG_FILE}" >&2
     exit 1
 fi
 
@@ -27,8 +15,6 @@ if [ -z "$IMG_ARCH" ]; then
     exit 1
 fi
 
-KERNEL_CMDLINE="${KERNEL_CMDLINE:-$(jq -r '.kernelCmdline' "$BUILD_CONFIG_FILE")}"
-
 mkdir -p "$OUTPUT_DIR"
 
 BUILD_ARGS=(
@@ -36,8 +22,6 @@ BUILD_ARGS=(
     --pull=newer
     --output
     "type=local,dest=${OUTPUT_DIR}"
-    --build-arg
-    "KERNEL_CMDLINE=${KERNEL_CMDLINE}"
     --arch
     "${IMG_ARCH}"
     -f

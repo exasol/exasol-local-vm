@@ -1,4 +1,0 @@
-{
-  "description": "Podman builder configuration for the initramfs-based VM image.",
-  "kernelCmdline": "console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0"
-}
