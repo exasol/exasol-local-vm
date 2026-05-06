@@ -19,6 +19,9 @@ apk add cloud-utils-growpart e2fsprogs e2fsprogs-extra
 # podman needs iptables but it's not pulled in for some reason?
 apk add podman fuse-overlayfs slirp4netns shadow-uidmap iptables
 
+# For container load manifest
+apk add jq
+
 apk add linux-virt
 EOF
 
