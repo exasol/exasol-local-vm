@@ -27,6 +27,7 @@ tasks:
   ensure-vm-image:
     status:
       - test -f output/disk.img
+      - test -f output/disk_thin.img
       - test -f output/arch.txt
       - test -f output/vmlinuz-virt
       - test -f output/initramfs.img.zst

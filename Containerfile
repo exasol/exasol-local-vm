@@ -158,4 +158,4 @@ FROM scratch AS all
 
 COPY --from=kernel /* /
 COPY --from=initramfs /* /
-COPY --from=vm_image_build /artifacts/arch.txt /artifacts/kernel-cmdline.txt /artifacts/disk.img /artifacts/disk.qcow2 /artifacts/disk.vhdx /
+COPY --from=vm_image_build /artifacts/arch.txt /artifacts/kernel-cmdline.txt /artifacts/disk.img /artifacts/disk_thin.img /artifacts/disk.vhdx /

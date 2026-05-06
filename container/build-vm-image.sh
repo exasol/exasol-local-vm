@@ -6,8 +6,8 @@ KERNEL_FILE="${ARTIFACT_DIR}/vmlinuz-virt"
 INITRAMFS_FILE="${ARTIFACT_DIR}/initramfs.img.zst"
 UKI_FILE="${ARTIFACT_DIR}/vm.efi"
 RAW_DISK_FILE="${ARTIFACT_DIR}/disk.img"
+RAW_DISK_THIN_FILE="${ARTIFACT_DIR}/disk_thin.img"
 VHDX_FILE="${ARTIFACT_DIR}/disk.vhdx"
-QCOW2_FILE="${ARTIFACT_DIR}/disk.qcow2"
 ARCH_FILE="${ARTIFACT_DIR}/arch.txt"
 CMDLINE_FILE="${ARTIFACT_DIR}/kernel-cmdline.txt"
 LAYOUT_FILE="${ARTIFACT_DIR}/disk-layout.json"
@@ -61,15 +61,6 @@ mkdir -p "${COPY_SOURCE_DIR}/EFI/BOOT"
 cp "${UKI_FILE}" "${COPY_SOURCE_DIR}/EFI/BOOT/${EFI_BOOT_FILE}"
 cp -a /artifacts/var "${COPY_SOURCE_DIR}/var"
 
-cat > "${DEFINITIONS_DIR}/10-esp.conf" <<EOF
-[Partition]
-Type=esp
-Label=EFI
-Format=vfat
-Minimize=guess
-CopyFiles=/EFI:/EFI
-EOF
-
 cat > "${DEFINITIONS_DIR}/20-data.conf" <<EOF
 [Partition]
 Type=linux-generic
@@ -88,10 +79,28 @@ systemd-repart \
     --sector-size=512 \
     --definitions="${DEFINITIONS_DIR}" \
     --copy-source="${COPY_SOURCE_DIR}" \
+    "${RAW_DISK_THIN_FILE}"
+
+cat > "${DEFINITIONS_DIR}/10-esp.conf" <<EOF
+[Partition]
+Type=esp
+Label=EFI
+Format=vfat
+Minimize=guess
+CopyFiles=/EFI:/EFI
+EOF
+
+systemd-repart \
+    --dry-run=no \
+    --offline=yes \
+    --size=auto \
+    --empty=create \
+    --sector-size=512 \
+    --definitions="${DEFINITIONS_DIR}" \
+    --copy-source="${COPY_SOURCE_DIR}" \
     "${RAW_DISK_FILE}"
 
 qemu-img convert -f raw -O vhdx -o subformat=dynamic "${RAW_DISK_FILE}" "${VHDX_FILE}"
-qemu-img convert -f raw -O qcow2 "${RAW_DISK_FILE}" "${QCOW2_FILE}"
 
 cat > "${LAYOUT_FILE}" <<EOF
 {
