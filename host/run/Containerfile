@@ -22,7 +22,7 @@ apt-get -y --no-install-recommends install curl
 rm -rf /var/lib/apt/lists/*
 EOF
 
-COPY config/vm-config.json /etc/exasol-nano-vm/vm-config.json
+COPY vm-config.json /etc/exasol-nano-vm/vm-config.json
 
 COPY <<'EOF' /usr/local/bin/run-exasol-vm
 #!/usr/bin/env bash

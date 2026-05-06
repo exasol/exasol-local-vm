@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RAW_DISK="$ROOT_DIR/output/disk.img"
 ARCH_FILE="$ROOT_DIR/output/arch.txt"
 VFKIT_SCRIPT="$ROOT_DIR/host/run/start-vfkit.sh"
-VM_CONFIG="$ROOT_DIR/config/vm-config.json"
+VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
 GVPROXY_VERSION="v0.8.8"
 GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/download/${GVPROXY_VERSION}/gvproxy-darwin"
 

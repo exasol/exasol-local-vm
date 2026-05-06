@@ -64,7 +64,7 @@ Linux hosts MUST NOT need QEMU, UEFI firmware, or virtiofsd installed directly
 for the default launch path; those dependencies belong inside
 `host/run/Containerfile`.
 
-Runtime port forwarding is controlled by `config/vm-config.json` and the
+Runtime port forwarding is controlled by `host/run/vm-config.json` and the
 platform launcher.
 
 ## Retired Behavior

@@ -6,7 +6,7 @@ RUNNER_IMAGE="${VM_RUNNER_IMAGE:-exasol-nano-vm-runner:latest}"
 CONTAINER_NAME="${VM_CONTAINER_NAME:-exasol-nano-vm}"
 OUTPUT_DIR="${VM_OUTPUT_DIR:-$ROOT_DIR/output}"
 SHARED_DIR="${VM_SHARED_DIR:-$ROOT_DIR/shared}"
-VM_CONFIG="${VM_CONFIG:-$ROOT_DIR/config/vm-config.json}"
+VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
 
 ATTACHED=false
 if [ "${1:-}" = "--attached" ]; then

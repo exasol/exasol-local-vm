@@ -3,8 +3,8 @@
 
 set -euo pipefail
 
-MANIFEST_FILE="shared/container-manifest.json"
-VM_CONFIG="config/vm-config.json"
+MANIFEST_FILE="${MANIFEST_FILE:-shared/container-manifest.json}"
+VM_CONFIG="${VM_CONFIG:-output/vm-config.json}"
 
 # Check if jq is installed
 if ! command -v jq &> /dev/null; then

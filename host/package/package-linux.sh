@@ -10,7 +10,7 @@ ARCH_FILE="$OUTPUT_DIR/arch.txt"
 KERNEL_FILE="$OUTPUT_DIR/vmlinuz-virt"
 INITRD_FILE="$OUTPUT_DIR/initramfs.img.zst"
 KERNEL_CMDLINE_FILE="$OUTPUT_DIR/kernel-cmdline.txt"
-VM_CONFIG="$ROOT_DIR/config/vm-config.json"
+VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
 RUN_CONTAINERFILE="$ROOT_DIR/host/run/Containerfile"
 
 for artifact in \
@@ -37,17 +37,16 @@ esac
 PACKAGE_DIR="$PACKAGE_ROOT/$PACKAGE_NAME"
 RELEASE_FILE="$RELEASE_ROOT/$PACKAGE_NAME.tar.xz"
 PACKAGE_OUTPUT_DIR="$PACKAGE_DIR/output"
-PACKAGE_CONFIG_DIR="$PACKAGE_DIR/config"
 
 rm -rf "$PACKAGE_DIR"
-mkdir -p "$PACKAGE_OUTPUT_DIR" "$PACKAGE_CONFIG_DIR" "$PACKAGE_DIR/shared" "$RELEASE_ROOT"
+mkdir -p "$PACKAGE_OUTPUT_DIR" "$PACKAGE_DIR/shared" "$RELEASE_ROOT"
 
 cp "$RAW_DISK" "$PACKAGE_OUTPUT_DIR/disk.img"
 cp "$ARCH_FILE" "$PACKAGE_OUTPUT_DIR/arch.txt"
 cp "$KERNEL_FILE" "$PACKAGE_OUTPUT_DIR/vmlinuz-virt"
 cp "$INITRD_FILE" "$PACKAGE_OUTPUT_DIR/initramfs.img.zst"
 cp "$KERNEL_CMDLINE_FILE" "$PACKAGE_OUTPUT_DIR/kernel-cmdline.txt"
-cp "$VM_CONFIG" "$PACKAGE_CONFIG_DIR/vm-config.json"
+cp "$VM_CONFIG" "$PACKAGE_OUTPUT_DIR/vm-config.json"
 cp "$RUN_CONTAINERFILE" "$PACKAGE_DIR/Containerfile"
 
 cat > "$PACKAGE_DIR/start.sh" <<'EOF'
@@ -58,7 +57,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNNER_IMAGE="${VM_RUNNER_IMAGE:-exasol-nano-vm-runner:latest}"
 CONTAINER_NAME="${VM_CONTAINER_NAME:-exasol-nano-vm}"
 OUTPUT_DIR="${VM_OUTPUT_DIR:-$SCRIPT_DIR/output}"
-CONFIG_FILE="${VM_CONFIG:-$SCRIPT_DIR/config/vm-config.json}"
+CONFIG_FILE="$OUTPUT_DIR/vm-config.json"
 SHARED_DIR="${VM_SHARED_DIR:-$SCRIPT_DIR/shared}"
 
 require_command() {
@@ -102,8 +101,6 @@ RUN_ARGS=(
     --replace
     --name "$CONTAINER_NAME"
     -v "$OUTPUT_DIR:/vm-image:Z"
-    -e VM_CONFIG=/vm-config.json
-    -v "$CONFIG_FILE:/vm-config.json:ro,Z"
 )
 
 if [ -d "$SHARED_DIR" ]; then

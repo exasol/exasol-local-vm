@@ -27,7 +27,7 @@ tasks:
   build-qemu-container:
     desc: Build the Podman/QEMU runner container image for starting the VM
     cmds:
-      - podman build -f host/run/Containerfile -t exasol-nano-vm-runner:latest .
+      - podman build -t exasol-nano-vm-runner:latest host/run
 
   ensure-vm-image:
     status:

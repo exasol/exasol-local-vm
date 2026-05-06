@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VHDX_DISK="$ROOT_DIR/output/disk.vhdx"
 ARCH_FILE="$ROOT_DIR/output/arch.txt"
 HYPERV_SCRIPT="$ROOT_DIR/host/run/start-hyperv.ps1"
-VM_CONFIG="$ROOT_DIR/config/vm-config.json"
+VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
 
 if [ ! -f "$VHDX_DISK" ]; then
     echo "Error: $VHDX_DISK not found. Run 'task build' first."
