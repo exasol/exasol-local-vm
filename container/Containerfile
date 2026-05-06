@@ -100,7 +100,7 @@ set -eu
 /host/rc_add sysinit  devfs dmesg mdev hwdrivers
 /host/rc_add boot     exasol-network import-shared-keys grow-var-fs load-shared-container
 /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking
-/host/rc_add default  podman acpid sshd
+/host/rc_add default  acpid sshd
 /host/rc_add shutdown killprocs savecache mount-ro
 EOF
 
