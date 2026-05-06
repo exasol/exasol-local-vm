@@ -1,13 +1,6 @@
 version: '3'
 
 tasks:
-  img-arch:
-    internal: true
-    requires:
-      vars:
-        - name: IMG_ARCH
-          enum: [x86_64, aarch64]
-
   install-deps:
     desc: Install host dependencies for building and running the VM with Podman on Linux
     run: once
@@ -16,10 +9,14 @@ tasks:
       - sudo apt-get install -y jq podman xz-utils
 
   build:
-    desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages
+    desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages for {{.IMG_ARCH}}
     run: when_changed
-    deps:
-      - img-arch
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    env:
+      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./host/build/build-artifacts.sh
 
@@ -30,6 +27,11 @@ tasks:
       - podman build -t exasol-nano-vm-runner:latest host/run
 
   ensure-vm-image:
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
     status:
       - test -f output/{{.IMG_ARCH}}/disk.img
       - test -f output/{{.IMG_ARCH}}/disk_thin.img
@@ -39,6 +41,8 @@ tasks:
       - test -f output/{{.IMG_ARCH}}/kernel-cmdline.txt
     cmds:
       - task: build
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
 
   ensure-qemu-container:
     status:
@@ -49,20 +53,34 @@ tasks:
   start-vm:
     desc: Start the VM in a detached Podman runner container
     run: once
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
     deps:
-      - img-arch
-      - ensure-vm-image
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
       - ensure-qemu-container
+    env:
+      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./host/run/start-container.sh
 
   start-vm-attached:
     desc: Start the VM in an attached Podman runner container
     run: once
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
     deps:
-      - img-arch
-      - ensure-vm-image
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
       - ensure-qemu-container
+    env:
+      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./host/run/start-container.sh --attached
 
@@ -72,35 +90,68 @@ tasks:
       - ./host/run/stop-container.sh
 
   package-linux:
-    desc: Package the VM artifacts and Podman/QEMU runner for Linux users
+    desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
     deps:
-      - img-arch
-      - ensure-vm-image
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    env:
+      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./host/package/package-linux.sh
 
   package-mac:
     desc: Package the raw UEFI disk for macOS/vfkit users
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [aarch64]
     deps:
-      - img-arch
-      - ensure-vm-image
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    env:
+      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./host/package/package-mac.sh
 
   package-windows:
     desc: Package the VHDX disk for Windows/Hyper-V users
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64]
     deps:
-      - img-arch
-      - ensure-vm-image
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    env:
+      IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./host/package/package-windows.sh
 
   package:
     desc: Build all distributable packages
     deps:
-      - package-linux
-      - package-mac
-      - package-windows
+      - task: package-linux
+        vars:
+          IMG_ARCH: aarch64
+      - task: package-linux
+        vars:
+          IMG_ARCH: x86_64
+      - task: package-mac
+        vars:
+          IMG_ARCH: aarch64
+      - task: package-windows
+        vars:
+          IMG_ARCH: x86_64
 
   clean:
     desc: Remove generated files
