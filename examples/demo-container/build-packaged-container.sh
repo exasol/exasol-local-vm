@@ -1,6 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
+if [ "$#" -lt 1 ]; then
+    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
+    exit 1
+fi
+IMG_ARCH="${1}"
+shift
+
 # Configuration
 IMAGE_NAME="test-server"
 IMAGE_TAG="latest"
@@ -39,32 +46,21 @@ echo_info "Starting container build and packaging process..."
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-# Detect target architecture from disk-arch.txt
-ARCH_FILE="../../config/disk-arch.txt"
-if [ -f "$ARCH_FILE" ]; then
-    DISK_ARCH=$(cat "$ARCH_FILE")
-    echo_info "Detected disk architecture: $DISK_ARCH"
-    
-    # Map to GOARCH
-    case "$DISK_ARCH" in
-        x86_64)
-            GOARCH="amd64"
-            PLATFORM="linux/amd64"
-            ;;
-        aarch64)
-            GOARCH="arm64"
-            PLATFORM="linux/arm64"
-            ;;
-        *)
-            echo_error "Unknown architecture: $DISK_ARCH"
-            exit 1
-            ;;
-    esac
-else
-    echo_warn "disk-arch.txt not found, defaulting to arm64"
-    GOARCH="arm64"
-    PLATFORM="linux/arm64"
-fi
+echo_info "Detected disk architecture: $IMG_ARCH"
+
+# Map to GOARCH
+case "$IMG_ARCH" in
+    x86_64)
+        GOARCH="amd64"
+        ;;
+    aarch64)
+        GOARCH="arm64"
+        ;;
+    *)
+        echo_error "Unknown architecture: $IMG_ARCH"
+        exit 1
+        ;;
+esac
 
 # Build the Go binary for target architecture
 echo_info "Building Go binary for $GOARCH..."
@@ -76,8 +72,8 @@ else
 fi
 
 # Build the container image
-echo_info "Building container image: ${IMAGE_NAME}:${IMAGE_TAG} for $PLATFORM..."
-if podman build --platform $PLATFORM -t "${IMAGE_NAME}:${IMAGE_TAG}" -f Containerfile .; then
+echo_info "Building container image: ${IMAGE_NAME}:${IMAGE_TAG} for $IMG_ARCH..."
+if podman build --arch "${IMG_ARCH}" -t "${IMAGE_NAME}:${IMAGE_TAG}" -f Containerfile .; then
     echo_info "Container image built successfully"
 else
     echo_error "Failed to build container image"

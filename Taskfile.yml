@@ -83,6 +83,73 @@ tasks:
     cmds:
       - ./host/run/stop-container.sh
 
+  startup-benchmark:
+    desc: Benchmark VM startup time (start VM and measure time to SSH)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ensure-qemu-container
+    cmds:
+      - ./host/test/startup-benchmark.sh "{{.IMG_ARCH}}"
+
+  test-ssh-keys:
+    desc: Test SSH key import feature (requires built VM image)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ensure-qemu-container
+    cmds:
+      - ./host/test/test-ssh-keys.sh "{{.IMG_ARCH}}"
+
+  test-container:
+    desc: Test container REST server and data persistence (requires running VM with container)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: ensure-vm-image
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ensure-qemu-container
+      - copy-test-container-to-shared
+    cmds:
+      - ./host/test/test-container.sh "{{.IMG_ARCH}}"
+
+  test:
+    desc: Run all tests
+    cmds:
+      - task: test-ssh-keys
+      - task: test-container
+
+  copy-test-container-to-shared:
+    deps:
+      - build-test-container
+    cmds:
+      - cp examples/demo-container/dist/test-server-container.tar.gz shared/test-server-container.tar.gz
+      - cp examples/demo-container/dist/container-manifest.json shared/container-manifest.json
+      - echo "Container tarball and manifest copied to shared directory"
+
+  build-test-container:
+    desc: Build and package the test Podman container for distribution
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    dir: examples/demo-container
+    cmds:
+      - ./build-packaged-container.sh "{{.IMG_ARCH}}"
+
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
     run: when_changed
