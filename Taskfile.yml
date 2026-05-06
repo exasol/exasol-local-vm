@@ -3,29 +3,24 @@ version: '3'
 tasks:
   install-deps:
     desc: Install host dependencies for building and running the VM with Podman on Linux
+    run: once
     cmds:
       - sudo apt-get update
       - sudo apt-get install -y jq podman xz-utils
 
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
     cmds:
-      - |
-        if [ -z "${IMG_ARCH:-}" ]; then
-          case "$(uname -m)" in
-            x86_64|amd64) export IMG_ARCH=x86_64 ;;
-            aarch64|arm64) export IMG_ARCH=aarch64 ;;
-            *)
-              echo "Error: unsupported host architecture: $(uname -m)" >&2
-              echo "Set IMG_ARCH explicitly to x86_64 or aarch64." >&2
-              exit 1
-              ;;
-          esac
-        fi
-        ./host/build/build-artifacts.sh
+      - ./host/build/build-artifacts.sh
 
   build-qemu-container:
     desc: Build the Podman/QEMU runner container image for starting the VM
+    run: once
     cmds:
       - podman build -t exasol-nano-vm-runner:latest host/run
 
@@ -47,6 +42,7 @@ tasks:
 
   start-vm:
     desc: Start the VM in a detached Podman runner container
+    run: once
     deps:
       - ensure-vm-image
       - ensure-qemu-container
@@ -55,6 +51,7 @@ tasks:
 
   start-vm-attached:
     desc: Start the VM in an attached Podman runner container
+    run: once
     deps:
       - ensure-vm-image
       - ensure-qemu-container
@@ -69,21 +66,21 @@ tasks:
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users
     deps:
-      - build
+      - ensure-vm-image
     cmds:
       - ./host/package/package-linux.sh
 
   package-mac:
     desc: Package the raw UEFI disk for macOS/vfkit users
     deps:
-      - build
+      - ensure-vm-image
     cmds:
       - ./host/package/package-mac.sh
 
   package-windows:
     desc: Package the VHDX disk for Windows/Hyper-V users
     deps:
-      - build
+      - ensure-vm-image
     cmds:
       - ./host/package/package-windows.sh
 
