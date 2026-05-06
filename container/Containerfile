@@ -55,7 +55,7 @@ EOF
 ### Add exasol user
 
 RUN setup-user -a -u exasol
-COPY --link <<-'EOF' /etc/doas.conf.d/exasol.conf
+COPY --link --chmod=600 <<-'EOF' /etc/doas.d/99-exasol.conf
 permit nopass :wheel
 EOF
 
