@@ -8,7 +8,11 @@ fi
 IMG_ARCH="${1}"
 shift
 
+TEST_DIR="$(mktemp -d)"
 export VM_CONTAINER_NAME="exasol-nano-test-vm-$$"
+# Set this to something that doesn't exist to make sure we can also start
+# without a shared dir.  Other tests exercise the shared directory code path.
+export VM_SHARED_DIR="${TEST_DIR}/non-existent"
 
 # Ensure VM is stopped on exit (success or failure)
 trap './host/run/stop-qemu-container.sh 2>/dev/null || true' EXIT
