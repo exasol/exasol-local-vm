@@ -22,7 +22,7 @@ ARCH_FILE="${ARTIFACT_DIR}/arch.txt"
 CMDLINE_FILE="${ARTIFACT_DIR}/kernel-cmdline.txt"
 
 DISK_PADDING_SIZE="${DISK_PADDING_SIZE:-3G}"
-KERNEL_CMDLINE="${KERNEL_CMDLINE:-console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0}"
+KERNEL_CMDLINE="${KERNEL_CMDLINE:-}"
 
 case "${IMG_ARCH}" in
     x86_64)

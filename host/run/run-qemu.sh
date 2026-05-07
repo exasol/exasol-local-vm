@@ -144,10 +144,6 @@ mkdir -p "$RUNTIME_DIR"
 
 ARCH="$(tr -d '\n' < "$ARCH_FILE")"
 KERNEL_CMDLINE="$(tr -d '\n' < "$KERNEL_CMDLINE_FILE")"
-if [ -z "$KERNEL_CMDLINE" ]; then
-    echo "Error: kernel command line file is empty: $KERNEL_CMDLINE_FILE" >&2
-    exit 1
-fi
 
 case "$ARCH" in
     x86_64)
