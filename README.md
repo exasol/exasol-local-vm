@@ -1,8 +1,10 @@
 # exasol-nano-vm
 
 This repository builds a minimal Linux VM image to run an Exasol container.
-The image is built from `container/Containerfile` and then converted to vm
-images using another container buiult from `host/build/Containerfile`.
+`task build` first builds the guest filesystem image from
+`container/Containerfile`. It then builds and runs a separate VM image builder
+container from `host/build/Containerfile` that repackages that guest image into
+VM artifacts.
 
 ## Build
 
@@ -19,10 +21,11 @@ Supported `IMG_ARCH` values are:
 
 The build exports artifacts under `output/`:
 
+- `arch.txt`
 - `vmlinuz-virt`
 - `initramfs.img.zst`
+- `disk_thin.img`
 - `disk.img`
-- `disk.qcow2`
 - `disk.vhdx`
 - `kernel-cmdline.txt`
 
@@ -50,17 +53,11 @@ Create distributable bundles for each runtime:
 
 ```bash
 IMG_ARCH=x86_64 task package-linux
-IMG_ARCH=x86_64 task package-mac
+IMG_ARCH=aarch64 task package-linux
+IMG_ARCH=aarch64 task package-mac
 IMG_ARCH=x86_64 task package-windows
 ```
 
 The Linux package uses the Podman-based QEMU runner. The macOS package uses the
 raw UEFI disk image with vfkit. The Windows package uses the VHDX artifact for
 Hyper-V Generation 2 VMs.
-
-## Reference Runtime Code
-
-The previous branch used cloud-init to seed a booted VM image. That build path
-has been removed. Reusable pieces from the old generic shared-container runtime
-are kept under `container/guest-services/shared-container/` as reference only;
-they are not wired into the current image.
