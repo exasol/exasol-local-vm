@@ -50,17 +50,15 @@ podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "$ROOT_DIR/host/build"
 BASE_IMG_ID="$(cat "${OUTPUT_DIR}/base_image_id")"
 CONVERTER_IMG_ID="$(cat "${OUTPUT_DIR}/converter_image_id")"
 
-IMG_CONVERTER_RUN_ARGS=(
-    --rm
-    --arch="${IMG_ARCH}"
-    --mount="type=image,src=${BASE_IMG_ID},dst=/image"
-    --mount="type=bind,src=${OUTPUT_DIR},dst=/output,relabel=shared"
-)
-
 echo "==> Converting VM podman image -> VM disk image..."
-echo "    ==> VM contents podman image:  ${BASE_IMG_ID}"
-echo "    ==> VM converter podman image: ${CONVERTER_IMG_ID}"
-podman run "${IMG_CONVERTER_RUN_ARGS[@]}" "${CONVERTER_IMG_ID}" "${IMG_ARCH}"
+echo "    ==> podman->VM converter image:      ${CONVERTER_IMG_ID}"
+echo "    ==> VM guest contents podman image:  ${BASE_IMG_ID}"
+
+"${ROOT_DIR}/host/build/convert-podman-vm.sh" \
+    "${IMG_ARCH}" \
+    "${CONVERTER_IMG_ID}" \
+    "${BASE_IMG_ID}" \
+    "${OUTPUT_DIR}"
 
 OUTPUT_DIR_RELATIVE="${OUTPUT_DIR##"${PWD}/"}"
 echo "==> Build completed"
