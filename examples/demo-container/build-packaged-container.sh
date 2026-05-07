@@ -46,43 +46,14 @@ echo_info "Starting container build and packaging process..."
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-echo_info "Detected disk architecture: $IMG_ARCH"
-
-# Map to GOARCH
-case "$IMG_ARCH" in
-    x86_64)
-        GOARCH="amd64"
-        ;;
-    aarch64)
-        GOARCH="arm64"
-        ;;
-    *)
-        echo_error "Unknown architecture: $IMG_ARCH"
-        exit 1
-        ;;
-esac
-
-# Build the Go binary for target architecture
-echo_info "Building Go binary for $GOARCH..."
-if CGO_ENABLED=0 GOOS=linux GOARCH=$GOARCH go build -a -installsuffix cgo -o server .; then
-    echo_info "Go binary built successfully"
-else
-    echo_error "Failed to build Go binary"
-    exit 1
-fi
-
 # Build the container image
 echo_info "Building container image: ${IMAGE_NAME}:${IMAGE_TAG} for $IMG_ARCH..."
 if podman build --arch "${IMG_ARCH}" -t "${IMAGE_NAME}:${IMAGE_TAG}" -f Containerfile .; then
     echo_info "Container image built successfully"
 else
     echo_error "Failed to build container image"
-    rm -f server  # Clean up binary
     exit 1
 fi
-
-# Clean up the local binary
-rm -f server
 
 # Save the container image to a tar archive
 echo_info "Packaging container image to ${OUTPUT_DIR}/${ARCHIVE_NAME}..."
