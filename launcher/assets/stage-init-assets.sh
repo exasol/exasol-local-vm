@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -lt 1 ]; then
+    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
+    exit 1
+fi
+IMG_ARCH="${1}"
+shift
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+echo "==> Staging init assets for $IMG_ARCH..."
+
+# Read the tarball name from config.json
+CONFIG_FILE="$ROOT_DIR/launcher/assets/init/config.json"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: config.json not found at $CONFIG_FILE" >&2
+    exit 1
+fi
+
+TARBALL_NAME=$(jq -r '.db.tarball_name' "$CONFIG_FILE")
+if [ -z "$TARBALL_NAME" ] || [ "$TARBALL_NAME" = "null" ]; then
+    echo "Error: db.tarball_name not found in $CONFIG_FILE" >&2
+    exit 1
+fi
+
+SOURCE_TARBALL="$ROOT_DIR/release/exasol-nano-db-${IMG_ARCH}.tar.gz"
+DEST_TARBALL="$ROOT_DIR/launcher/assets/init/$TARBALL_NAME"
+
+if [ ! -f "$SOURCE_TARBALL" ]; then
+    echo "Error: Container tarball not found at $SOURCE_TARBALL" >&2
+    echo "Run: task download-db-container IMG_ARCH=$IMG_ARCH" >&2
+    exit 1
+fi
+
+echo "    Source: $SOURCE_TARBALL"
+echo "    Destination: $DEST_TARBALL"
+
+# Copy the container tarball to the init assets directory
+echo "==> Copying container tarball..."
+cp "$SOURCE_TARBALL" "$DEST_TARBALL"
+
+echo "==> Init assets staged successfully"
+echo "    Tarball size: $(du -h "$DEST_TARBALL" | cut -f1)"

@@ -1,0 +1,2 @@
+LABEL=exasol-data   /var        ext4       defaults          0 0
+hostshare           /mnt/host   virtiofs   defaults          0 0

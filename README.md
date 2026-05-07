@@ -26,7 +26,7 @@ The build exports artifacts under `output/`:
 
 - `arch.txt`
 - `vmlinuz-virt`
-- `initramfs.img.zst`
+- `initramfs.img`
 - `disk_thin.img`
 - `disk.img`
 - `disk.vhdx`

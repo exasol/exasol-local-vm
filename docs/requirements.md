@@ -48,21 +48,22 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 - `arch.txt`: text file with the build architecture
 - `kernel-cmdline.txt`: text file containing the kernel commandline
 - `vmlinuz-virt`: kernel binary
-- `initramfs.img.zst`: compressed iniramfs
+- `initramfs.img`: initramfs
 - `disk_thin.img`: "thin" disk image in raw format
 - `disk.img`: "fat" disk image in raw format
 - `disk.vhdx`: "fat" disk image in vhdx format
 
-**R3.4**: The initramfs MUST be compressed with zstdandard
-
-**R3.5**: The initramfs MUST contain all contenS of the guest image excluding `/boot` and `/var`
+**R3.4**: The initramfs MUST contain all contents of the guest image excluding `/boot` and `/var`
 
 **R3.6**: The "fat" disk images MUST contain:
 - A boot EFI system partition with the kernel, initrd and commandline packed into a unified kernel image
-- An ext4 partition with the contents of `/var` from the guest image and partition label `exasol-data`
 
 **R3.7**: The "thin" disk images MUST contain:
-- An ext4 partition with the contents of `/var` from the guest image and partition label `exasol-data`
+- An EFI system partition (may be excluded or empty depending on boot method)
+
+Note: The `/var` directory is NOT stored on the boot disk images. Instead, a separate data disk
+(`data.img`) is created by the launcher at runtime and formatted on first boot with the label
+`exasol-data`. This prevents label collisions between the boot disk and data disk.
 
 **R3.8**: The "thin" disk images MUST NOT contain the kernel or initrd
 
@@ -407,7 +408,7 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 - `disk.img` (raw disk)
 - `vm-config.json` (default: 2 CPUs, 2GB RAM)
 - `vmlinuz-virt`
-- `initramfs.img.zst`
+- `initramfs.img`
 - `kernel-cmdline.txt`
 - `Containerfile`
 - `start.sh`
