@@ -89,7 +89,7 @@ RUN_ARGS=(
     --rm
     --name="$CONTAINER_NAME"
     --network=host
-    --mount="type=bind,src=$OUTPUT_DIR,dst=/vm-image,relabel=shared"
+    --mount="type=bind,src=$OUTPUT_DIR,dst=/vm-image,relabel=shared,ro"
 )
 
 if [ -f "$VM_CONFIG" ]; then

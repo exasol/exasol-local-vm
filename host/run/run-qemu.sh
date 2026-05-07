@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Start qemu and (optionally) virtiofsd and clean up again
-# Will modify the mounted image
+# Uses snapshot mode to avoid modifying the disk image
 #
 # Easiest way to run this is via the provided Containerfile
 #
@@ -10,7 +10,7 @@ set -euo pipefail
 #   podman run --rm -ti \
 #     --privileged \
 #     --network=host \
-#     --mount="type=bind,src=${PWD}/output/aarch64,dst=/vm-image,relabel=shared" \
+#     --mount="type=bind,src=${PWD}/output/aarch64,dst=/vm-image,relabel=shared,ro" \
 #     exasol-nano-vm-runner:latest
 #
 # Or just:
@@ -280,7 +280,8 @@ QEMU_ARGS=(
     -kernel "$KERNEL_FILE"
     -initrd "$INITRD_FILE"
     -append "$KERNEL_CMDLINE"
-    -drive "file=$DISK_IMG,format=raw,if=virtio"
+    -drive "file=$DISK_IMG,format=raw,if=virtio,discard=unmap"
+    -snapshot
     "${NETDEV_ARGS[@]}"
     -device 'virtio-net-pci,netdev=net0'
     "${VIRTIOFS_ARGS[@]}"
