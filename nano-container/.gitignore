@@ -1,4 +1,0 @@
-# The .run is fetched at build time from the URL in nano-version.env.
-# Never commit it (large binary, version-specific).
-nano.run
-nano.run.tmp

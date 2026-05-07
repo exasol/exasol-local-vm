@@ -1,0 +1,379 @@
+name: Build Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip-linux-build:
+        description: 'Skip building Linux packages (use existing artifact)'
+        type: boolean
+        default: false
+      previous-run-id:
+        description: 'Previous workflow run ID to download Linux packages from (leave empty to use latest successful run)'
+        type: string
+        required: false
+  workflow_call:
+    secrets:
+      # A Classic github personal access token that can download releases from the private repository exasol-labs/exasol-nano.
+      EXASOL_NANO_TOKEN:
+        required: true
+      IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED:
+        required: true
+      IOS_PKCS12_IDENTITY_CERTIFICATE_PASSWORD:
+        required: true
+      IOS_CER_DEVELOPERID_APPLICATION_BASE64_ENCODED:
+        required: true
+      IOS_APPSTORECONNECTAPI_ISSUERID:
+        required: true
+      IOS_APPSTORECONNECTAPI_KEYID:
+        required: true
+      IOS_APPSTORECONNECTAPI_AUTHKEY:
+        required: true
+    outputs:
+      linux-packages-artifact:
+        description: "Name of the Linux packages artifact"
+        value: ${{ jobs.build-linux-packages.outputs.artifact-name }}
+      mac-launcher-artifact:
+        description: "Name of the macOS launcher artifact"
+        value: ${{ jobs.build-mac-launcher.outputs.artifact-name }}
+
+jobs:
+  build-linux-packages:
+    if: ${{ !inputs.skip-linux-build }}
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-id }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install curl and Task
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl
+          sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+      
+      - name: Install system dependencies
+        run: task install-deps
+      
+      - name: Build mac package
+        run: task package-mac IMG_ARCH=aarch64
+      
+      - name: Download container tarball
+        run: |
+          # Download container image for the Mac launcher to embed
+          # We do this on Linux because Mac CI runners don't support virtualization
+          task download-db-container IMG_ARCH=aarch64
+          echo "✓ Container tarball downloaded to release/"
+          ls -lh release/exasol-nano-db-aarch64.tar.gz
+      
+      - name: Verify release artifacts
+        run: |
+          if [ ! -d release ]; then
+            echo "ERROR: release directory not created!" >&2
+            exit 1
+          fi
+          if [ ! -f release/mac-arm64.tar.xz ]; then
+            echo "ERROR: release/mac-arm64.tar.xz not created!" >&2
+            exit 1
+          fi
+          if [ ! -f release/exasol-nano-db-aarch64.tar.gz ]; then
+            echo "ERROR: release/exasol-nano-db-aarch64.tar.gz not created!" >&2
+            exit 1
+          fi
+          echo "✓ Release artifacts verified"
+          ls -lh release/
+      
+      - name: Upload release artifacts
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: release
+          retention-days: 7
+      
+      - name: List generated artifacts
+        run: |
+          echo "=== Release packages ==="
+          ls -lh release/
+
+  build-mac-launcher:
+    runs-on: macos-latest
+    needs: build-linux-packages
+    if: ${{ always() && (needs.build-linux-packages.result == 'success' || needs.build-linux-packages.result == 'skipped') }}
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-id }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Check build-linux-packages job status
+        run: |
+          echo "build-linux-packages result: ${{ needs.build-linux-packages.result }}"
+          if [ "${{ needs.build-linux-packages.result }}" = "success" ]; then
+            echo "Will download from current run"
+          elif [ "${{ needs.build-linux-packages.result }}" = "skipped" ]; then
+            echo "Will download from previous run"
+          else
+            echo "ERROR: Unexpected job result: ${{ needs.build-linux-packages.result }}"
+            exit 1
+          fi
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: launcher/mac/go.sum
+      
+      - name: Download release packages from current run
+        if: ${{ needs.build-linux-packages.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: .
+      
+      - name: Reorganize downloaded artifacts
+        if: ${{ needs.build-linux-packages.result == 'success' }}
+        run: |
+          echo "=== Checking download location ==="
+          if [ -f mac-arm64.tar.xz ]; then
+            echo "Found mac-arm64.tar.xz in root, moving to release/"
+            mkdir -p release
+            mv mac-arm64.tar.xz release/
+          fi
+          if [ -f exasol-nano-db-aarch64.tar.gz ]; then
+            echo "Found exasol-nano-db-aarch64.tar.gz in root, moving to release/"
+            mkdir -p release
+            mv exasol-nano-db-aarch64.tar.gz release/
+          fi
+          if [ -d release ]; then
+            echo "✓ Release directory exists"
+            ls -lh release/
+          else
+            echo "✗ ERROR: No release artifacts found!" >&2
+            exit 1
+          fi
+          
+          echo ""
+          echo "Checking for required artifacts:"
+          if [ -f release/mac-arm64.tar.xz ]; then
+            echo "✓ Found: release/mac-arm64.tar.xz ($(du -h release/mac-arm64.tar.xz | cut -f1))"
+          else
+            echo "✗ Missing: release/mac-arm64.tar.xz" >&2
+            exit 1
+          fi
+          if [ -f release/exasol-nano-db-aarch64.tar.gz ]; then
+            echo "✓ Found: release/exasol-nano-db-aarch64.tar.gz ($(du -h release/exasol-nano-db-aarch64.tar.gz | cut -f1))"
+          else
+            echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz" >&2
+            exit 1
+          fi
+      
+      - name: Download release packages from previous run
+        if: ${{ needs.build-linux-packages.result == 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          
+          RUN_ID="${{ inputs.previous-run-id }}"
+          
+          if [ -z "$RUN_ID" ]; then
+            echo "Finding latest workflow run with successful build-linux-packages job on branch: ${{ github.ref_name }}..."
+            
+            # Get list of successful runs and check each one for build-linux-packages job
+            RUN_IDS=$(gh run list \
+              --workflow build-packages.yml \
+              --branch "${{ github.ref_name }}" \
+              --status success \
+              --limit 20 \
+              --json databaseId \
+              --jq '.[].databaseId')
+            
+            for candidate_run_id in $RUN_IDS; do
+              echo "Checking run $candidate_run_id for build-linux-packages job..."
+              BUILD_JOB_STATUS=$(gh run view "$candidate_run_id" \
+                --json jobs \
+                --jq '.jobs[] | select(.name == "build-linux-packages") | .conclusion')
+              
+              if [ "$BUILD_JOB_STATUS" = "success" ]; then
+                RUN_ID="$candidate_run_id"
+                echo "✓ Found run $RUN_ID with successful build-linux-packages job"
+                break
+              fi
+            done
+            
+            if [ -z "$RUN_ID" ]; then
+              echo "Error: No successful run with build-linux-packages job found on branch ${{ github.ref_name }}" >&2
+              echo "You need to run the workflow without skip-linux-build at least once first" >&2
+              exit 1
+            fi
+          fi
+          
+          echo "Downloading release-packages artifact from run $RUN_ID..."
+          gh run download "$RUN_ID" \
+            --name release-packages \
+            --dir .
+          
+          echo "=== Checking download location ==="
+          if [ -f mac-arm64.tar.xz ]; then
+            echo "Found mac-arm64.tar.xz in root, moving to release/"
+            mkdir -p release
+            mv mac-arm64.tar.xz release/
+          fi
+          if [ -f exasol-nano-db-aarch64.tar.gz ]; then
+            echo "Found exasol-nano-db-aarch64.tar.gz in root, moving to release/"
+            mkdir -p release
+            mv exasol-nano-db-aarch64.tar.gz release/
+          fi
+          if [ -d release ]; then
+            echo "✓ Release directory exists"
+            ls -lh release/
+          else
+            echo "✗ ERROR: No release artifacts found!" >&2
+            exit 1
+          fi
+          
+          echo ""
+          echo "Checking for required artifacts:"
+          if [ -f release/mac-arm64.tar.xz ]; then
+            echo "✓ Found: release/mac-arm64.tar.xz ($(du -h release/mac-arm64.tar.xz | cut -f1))"
+          else
+            echo "✗ Missing: release/mac-arm64.tar.xz" >&2
+            exit 1
+          fi
+          if [ -f release/exasol-nano-db-aarch64.tar.gz ]; then
+            echo "✓ Found: release/exasol-nano-db-aarch64.tar.gz ($(du -h release/exasol-nano-db-aarch64.tar.gz | cut -f1))"
+          else
+            echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz" >&2
+            exit 1
+          fi
+      
+      - name: Install Task
+        run: |
+          brew install go-task
+      
+      - name: Stage container tarball for launcher build
+        run: |
+          # Copy the container tarball to release/ so stage-init-assets can find it
+          # The tarball is architecture-specific in release/ but generic in launcher/assets/init/
+          mkdir -p release
+          if [ -f release/exasol-nano-db-aarch64.tar.gz ]; then
+            echo "✓ Container tarball ready in release/"
+            ls -lh release/exasol-nano-db-aarch64.tar.gz
+          else
+            echo "ERROR: Container tarball not found in artifacts!" >&2
+            echo "Expected: release/exasol-nano-db-aarch64.tar.gz" >&2
+            ls -lh release/ || true
+            exit 1
+          fi
+      
+      - name: Setup macOS signing certificate
+        id: macos-signing
+        uses: ./.github/actions/setup-macos-signing
+        with:
+          p12-key: ${{ secrets.IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED }}
+          p12-password: ${{ secrets.IOS_PKCS12_IDENTITY_CERTIFICATE_PASSWORD }}
+          application-cert: ${{ secrets.IOS_CER_DEVELOPERID_APPLICATION_BASE64_ENCODED }}
+      
+      - name: Build macOS ARM64 launcher
+        env:
+          MACOS_SIGN_KEYCHAIN: ${{ steps.macos-signing.outputs.keychain-path }}
+          MACOS_SIGN_IDENTITY: ${{ steps.macos-signing.outputs.signing-identity }}
+        run: task build-mac-launcher IMG_ARCH=aarch64
+      
+      - name: Package macOS launcher for notarization
+        run: |
+          mkdir -p dist
+          # Package the launcher directory contents (launcher binary, manifest.json, etc.)
+          # Change to the directory and zip contents to avoid including parent directory in archive
+          cd release/launcher/darwin/aarch64
+          ditto -c -k . ../../../../dist/mac-runner-aarch64.zip
+          cd ../../../../
+          shasum -a 256 dist/mac-runner-aarch64.zip > dist/mac-runner-aarch64.zip.sha256
+      
+      - name: Notarize macOS launcher
+        env:
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.IOS_APPSTORECONNECTAPI_ISSUERID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.IOS_APPSTORECONNECTAPI_KEYID }}
+          MACOS_NOTARY_KEY: ${{ secrets.IOS_APPSTORECONNECTAPI_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          KEY_PATH="$(mktemp /tmp/notary-key.XXXXXX.p8)"
+          trap 'rm -f "$KEY_PATH"' EXIT
+          
+          # Try to decode as base64 first
+          if echo "$MACOS_NOTARY_KEY" | base64 -d > "$KEY_PATH" 2>/dev/null && grep -q "BEGIN PRIVATE KEY" "$KEY_PATH"; then
+            echo "✓ Decoded base64-encoded key"
+          else
+            # Use as raw text
+            printf '%s' "$MACOS_NOTARY_KEY" > "$KEY_PATH"
+          fi
+          
+          # Validate the key format
+          if ! grep -q "BEGIN PRIVATE KEY" "$KEY_PATH"; then
+            echo "Error: Key file does not contain valid PEM format" >&2
+            echo "Expected '-----BEGIN PRIVATE KEY-----' header" >&2
+            exit 1
+          fi
+          
+          if ! grep -q "END PRIVATE KEY" "$KEY_PATH"; then
+            echo "Error: Key file missing '-----END PRIVATE KEY-----' footer" >&2
+            exit 1
+          fi
+          
+          echo "✓ Key format validated"
+          
+          # Validate notarization credentials
+          if [ -z "$MACOS_NOTARY_ISSUER_ID" ]; then
+            echo "Error: MACOS_NOTARY_ISSUER_ID is empty" >&2
+            exit 1
+          fi
+          echo "  MACOS_NOTARY_ISSUER_ID length: ${#MACOS_NOTARY_ISSUER_ID}"
+          
+          if [ -z "$MACOS_NOTARY_KEY_ID" ]; then
+            echo "Error: MACOS_NOTARY_KEY_ID is empty" >&2
+            exit 1
+          fi
+          echo "  MACOS_NOTARY_KEY_ID length: ${#MACOS_NOTARY_KEY_ID}"
+          
+          echo "✓ Notarization credentials validated"
+          
+          xcrun notarytool submit \
+            dist/mac-runner-aarch64.zip \
+            --issuer "$MACOS_NOTARY_ISSUER_ID" \
+            --key-id "$MACOS_NOTARY_KEY_ID" \
+            --key "$KEY_PATH" \
+            --wait
+      
+      - name: Upload VM logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-vm-logs
+          path: |
+            vm.log
+            vm-console.log
+            vm-state.json
+          if-no-files-found: warn
+          retention-days: 7
+      
+      - name: Verify notarized artifacts
+        run: |
+          echo "Notarized zip:"
+          ls -lh dist/mac-runner-aarch64.zip
+          ls -lh dist/mac-runner-aarch64.zip.sha256
+          echo ""
+          echo "Checksum:"
+          cat dist/mac-runner-aarch64.zip.sha256
+      
+      - name: Upload macOS launcher
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-launcher
+          path: |
+            dist/mac-runner-aarch64.zip
+            dist/mac-runner-aarch64.zip.sha256
+          retention-days: 7

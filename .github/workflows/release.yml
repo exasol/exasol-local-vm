@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-packages.yml
+    secrets: inherit
+    permissions:
+      contents: read
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download Linux packages
+        uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: release-artifacts/linux
+      
+      - name: Download macOS launcher
+        uses: actions/download-artifact@v4
+        with:
+          name: mac-launcher
+          path: release-artifacts/macos
+      
+      - name: List all artifacts
+        run: |
+          echo "=== Linux Packages ==="
+          ls -lh release-artifacts/linux/
+          echo ""
+          echo "=== macOS Launcher ==="
+          ls -lh release-artifacts/macos/
+      
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          echo "Creating release for tag: $TAG_NAME"
+          
+          # Create draft release
+          gh release create "$TAG_NAME" \
+            --draft \
+            --title "$TAG_NAME" \
+            --generate-notes \
+            --repo "$GITHUB_REPOSITORY"
+      
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          
+          # Upload Linux packages
+          for file in release-artifacts/linux/*; do
+            if [ -f "$file" ]; then
+              echo "Uploading: $file"
+              gh release upload "$TAG_NAME" "$file" \
+                --repo "$GITHUB_REPOSITORY" \
+                --clobber
+            fi
+          done
+          
+          # Upload macOS launcher
+          for file in release-artifacts/macos/*; do
+            if [ -f "$file" ]; then
+              echo "Uploading: $file"
+              gh release upload "$TAG_NAME" "$file" \
+                --repo "$GITHUB_REPOSITORY" \
+                --clobber
+            fi
+          done
+      
+      - name: Publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          
+          echo "Publishing release: $TAG_NAME"
+          gh release edit "$TAG_NAME" --draft=false \
+            --repo "$GITHUB_REPOSITORY"

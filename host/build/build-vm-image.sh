@@ -15,11 +15,11 @@ IMAGE_KERNEL="${IMAGE_DIR}/boot/vmlinuz-virt"
 IMAGE_VAR_DIR="${IMAGE_DIR}/var"
 
 DISK_PADDING_SIZE="${DISK_PADDING_SIZE:-3G}"
-KERNEL_CMDLINE="${KERNEL_CMDLINE:-}"
+KERNEL_CMDLINE="${KERNEL_CMDLINE:-console=hvc0}"
 
 # Outputs
 KERNEL_FILE="${ARTIFACT_DIR}/vmlinuz-virt"
-INITRAMFS_FILE="${ARTIFACT_DIR}/initramfs.img.zst"
+INITRAMFS_FILE="${ARTIFACT_DIR}/initramfs.img"
 RAW_DISK_FILE="${ARTIFACT_DIR}/disk.img"
 RAW_DISK_THIN_FILE="${ARTIFACT_DIR}/disk_thin.img"
 VHDX_FILE="${ARTIFACT_DIR}/disk.vhdx"
@@ -64,8 +64,7 @@ cp "${IMAGE_KERNEL}" "${KERNEL_FILE}"
 
 pushd "${IMAGE_DIR}"
 find . -xdev -not -path './boot/*' -not -path './var/*' |
-    cpio --quiet -H newc -o |
-    zstdmt -9 \
+    cpio --quiet -H newc -o \
         >"${INITRAMFS_FILE}"
 popd
 
@@ -77,12 +76,15 @@ COPY_SOURCE_DIR="$(mktemp -d)"
 DEFINITIONS_DIR="$(mktemp -d)"
 trap 'rm -rf "${COPY_SOURCE_DIR}" "${DEFINITIONS_DIR}"' EXIT
 
-# Pack the kernel, initrd and cmdline into a single EFI binary that cat be
+# Pack the kernel, initrd and cmdline into a single EFI binary that can be
 # started directly by UEFI. This avoids the need for an actual bootloader and
 # configuration, which simplifies our setup.
 #
 # The UKI is the only file that needs to be in the ESP and it just needs to be
 # placed in the correct location to be started automatically.
+#
+# IMPORTANT: Use copies of kernel and initramfs as input to ukify to avoid
+# any potential in-place modification of the output files
 case "${IMG_ARCH}" in
     x86_64)
         EFI_STUB="/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
@@ -99,15 +101,13 @@ case "${IMG_ARCH}" in
 esac
 
 mkdir -p "${COPY_SOURCE_DIR}/EFI/BOOT"
+
 ukify build \
     --linux="${KERNEL_FILE}" \
     --initrd="${INITRAMFS_FILE}" \
     --cmdline="${KERNEL_CMDLINE}" \
     --stub="${EFI_STUB}" \
     --output="${COPY_SOURCE_DIR}/EFI/BOOT/${EFI_BOOT_FILE}"
-
-# We need to copy /var to COPY_SOURCE_DIR, so systemd-repart can find it
-cp -a "${IMAGE_VAR_DIR}" "${COPY_SOURCE_DIR}/var"
 
 ### declare images
 
@@ -118,16 +118,6 @@ Label=EFI
 Format=vfat
 Minimize=guess
 CopyFiles=/EFI:/EFI
-EOF
-
-cat > "${DEFINITIONS_DIR}/20-data.conf" <<EOF
-[Partition]
-Type=linux-generic
-Label=exasol-data
-Format=ext4
-Minimize=guess
-CopyFiles=/var:/
-PaddingMinBytes=${DISK_PADDING_SIZE}
 EOF
 
 

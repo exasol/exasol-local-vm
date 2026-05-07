@@ -58,7 +58,7 @@ ELAPSED=0
 START_TIME=$(date +%s)
 
 while [ $ELAPSED -lt $MAX_WAIT ] && podman container exists "${VM_CONTAINER_NAME}"; do
-    if ssh -i "$TEST_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 exasol@127.0.0.1 "echo 'SSH key import successful!'" 2>/dev/null; then
+    if ssh -i "$TEST_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 root@127.0.0.1 "echo 'SSH key import successful!'" 2>/dev/null; then
         echo "==> ✓ Test passed: Successfully connected with imported key after ${ELAPSED} seconds"
         SUCCESS=true
         break

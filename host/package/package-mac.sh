@@ -9,12 +9,11 @@ IMG_ARCH="${1}"
 shift
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RAW_DISK="$ROOT_DIR/output/${IMG_ARCH}/disk.img"
-ARCH_FILE="$ROOT_DIR/output/${IMG_ARCH}/arch.txt"
-VFKIT_SCRIPT="$ROOT_DIR/host/run/start-vfkit.sh"
-VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
-GVPROXY_VERSION="v0.8.8"
-GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/download/${GVPROXY_VERSION}/gvproxy-darwin"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/${IMG_ARCH}}"
+
+RAW_DISK="$OUTPUT_DIR/disk.img"  # Use fat image with ESP for UEFI boot
+
+ARCH_FILE="$OUTPUT_DIR/arch.txt"
 
 if [ ! -f "$RAW_DISK" ]; then
     echo "Error: $RAW_DISK not found. Run 'task build' first."
@@ -37,61 +36,24 @@ PACKAGE_DIR="$ROOT_DIR/package/$PACKAGE_NAME"
 RELEASE_FILE="$ROOT_DIR/release/$PACKAGE_NAME.tar.xz"
 
 mkdir -p "$PACKAGE_DIR" "$ROOT_DIR/release"
-cp "$RAW_DISK" "$PACKAGE_DIR/exasol-vm.img"
-cp "$ARCH_FILE" "$PACKAGE_DIR/arch.txt"
-cp "$VM_CONFIG" "$PACKAGE_DIR/vm-config.json"
-cp "$VFKIT_SCRIPT" "$PACKAGE_DIR/start.sh"
-chmod +x "$PACKAGE_DIR/start.sh"
+cp "$RAW_DISK" "$PACKAGE_DIR/disk.img"
 
-curl -fSL -o "$PACKAGE_DIR/gvproxy" "$GVPROXY_URL"
-chmod +x "$PACKAGE_DIR/gvproxy"
+# Note: Using UEFI boot with fat disk image
+# Kernel, initramfs, and cmdline are bundled in the ESP partition as a UKI
+# Modern ARM64 kernels have EFI stub and require UEFI boot
 
-cat > "$PACKAGE_DIR/README.md" <<'EOF'
-# Exasol VM for macOS
-
-This package contains a raw UEFI disk image and a `vfkit` launcher.
-
-## Prerequisites
-
-- macOS 13+
-- `vfkit`
-- `jq`
-
-Install dependencies with Homebrew:
-
-```bash
-brew install vfkit jq
-```
-
-## Usage
-
-Start with defaults from `vm-config.json`:
-
-```bash
-./start.sh
-```
-
-Override CPUs and memory:
-
-```bash
-./start.sh 4 4096
-```
-
-Share a host directory through virtio-fs:
-
-```bash
-./start.sh 2 2048 /path/to/shared
-```
-
-The launcher uses the bundled `gvproxy` binary to expose the TCP ports declared in `vm-config.json`.
-
-The built-in disk already contains:
-
-- an EFI System Partition for boot
-- an ext4 data partition labeled `exasol-data`
-EOF
-
+# Create the release archive first (without launcher)
 tar -C "$ROOT_DIR/package" -cf - "$PACKAGE_NAME" | xz -6 -v > "$RELEASE_FILE"
+
+echo "==> macOS package archive created: $RELEASE_FILE"
+
+# Build the Go launcher with embedded release archive
+echo "==> Building macOS launcher..."
+LAUNCHER_DIR="$ROOT_DIR/launcher/mac"
+pushd "$LAUNCHER_DIR" > /dev/null
+
+# Copy the release archive to be embedded
+cp "$RELEASE_FILE" vm-package.tar.xz
 
 echo "==> macOS package created: $PACKAGE_DIR"
 echo "==> Release archive: $RELEASE_FILE"
