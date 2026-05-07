@@ -11,7 +11,7 @@ shift
 export VM_CONTAINER_NAME="exasol-nano-test-vm-$$"
 
 # Ensure VM is stopped on exit (success or failure)
-trap './host/run/stop-container.sh 2>/dev/null || true' EXIT
+trap './host/run/stop-qemu-container.sh 2>/dev/null || true' EXIT
 
 echo "==> Starting VM startup benchmark..."
 echo ""
@@ -20,7 +20,7 @@ echo ""
 START_TIME=$(date +%s%3N)  # milliseconds
 
 # Start the VM
-./host/run/start-container.sh "${IMG_ARCH}"
+./host/run/start-qemu-container.sh "${IMG_ARCH}"
 
 echo ""
 echo "==> Waiting for SSH connection..."

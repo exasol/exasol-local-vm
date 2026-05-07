@@ -61,7 +61,7 @@ tasks:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ensure-qemu-container
     cmds:
-      - ./host/run/start-container.sh "{{.IMG_ARCH}}"
+      - ./host/run/start-qemu-container.sh "{{.IMG_ARCH}}"
 
   start-vm-attached:
     desc: Start the VM in an attached Podman runner container
@@ -76,12 +76,12 @@ tasks:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ensure-qemu-container
     cmds:
-      - ./host/run/start-container.sh -a "{{.IMG_ARCH}}"
+      - ./host/run/start-qemu-container.sh -a "{{.IMG_ARCH}}"
 
   stop-vm:
     desc: Stop the Podman runner container for the VM
     cmds:
-      - ./host/run/stop-container.sh
+      - ./host/run/stop-qemu-container.sh
 
   startup-benchmark:
     desc: Benchmark VM startup time (start VM and measure time to SSH)

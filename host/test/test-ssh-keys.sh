@@ -24,7 +24,7 @@ cleanup() {
 
   # Stop the VM if it's running
   echo "==> Stopping VM..."
-  ./host/run/stop-container.sh || true
+  ./host/run/stop-qemu-container.sh || true
   
   # Clean up test files
   echo "==> Removing test files..."
@@ -49,7 +49,7 @@ cat "$TEST_KEY.pub" >> "$AUTHORIZED_KEYS"
 
 # Start the VM
 echo "==> Starting VM..."
-./host/run/start-container.sh "${IMG_ARCH}"
+./host/run/start-qemu-container.sh "${IMG_ARCH}"
 
 # Try to connect with the test key (retry for 5 minutes)
 echo "==> Testing SSH connection with test key (will retry for 5 minutes)..."

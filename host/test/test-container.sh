@@ -40,7 +40,7 @@ cleanup() {
   
   # Stop the VM if it's running
   echo_info "Stopping VM..."
-  ./host/run/stop-container.sh || true
+  ./host/run/stop-qemu-container.sh || true
   
   # Clean up test files
   echo_info "Removing test files..."
@@ -56,7 +56,7 @@ echo_info "Testing containerized REST server..."
 
 # Start the VM
 echo_info "Starting VM..."
-./host/run/start-container.sh "${IMG_ARCH}"
+./host/run/start-qemu-container.sh "${IMG_ARCH}"
 
 # Wait for VM to be ready
 echo_info "Waiting for VM to initialize..."
