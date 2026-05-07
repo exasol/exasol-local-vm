@@ -10,32 +10,23 @@ apk add alpine-base
 
 apk add openssh
 
-# Handle poweroff signal
+# Needed to handle poweroff signal from the vm manager
 apk add acpid
 
-# Auto-grow /var partition
+# Needed to auto-grow /var partition
 apk add cloud-utils-growpart e2fsprogs e2fsprogs-extra
 
 # podman needs iptables but it's not pulled in for some reason?
 apk add podman fuse-overlayfs slirp4netns shadow-uidmap iptables
 
-# For container load manifest
+# Needed to read the podman container manifest
 apk add jq
+
+# Needed for autologin on some ttys
+apk add agetty
 
 apk add linux-virt
 EOF
-
-
-### TODO unclear if this is actually needed?
-
-RUN <<-'EOF'
-set -eu
-printf "ttyS0\nttyAMA0\nhvc0\n" >> /etc/securetty
-for console in ttyS0 ttyAMA0 hvc0; do
-    sed -Ei "s|^[# ]*(${console}:.*)|\\1|" /etc/inittab || true
-done
-EOF
-
 
 ### Configure podman
 
@@ -63,19 +54,30 @@ permit nopass :wheel
 EOF
 
 
+### Enable serial console
 ### Enable autologin for exasol user
+#
+# This isn't technically required as our automation will work over the shared
+# directory and ssh, but it's quite nice for debugging.
+#
+# Annoyingly we need to rewrite inittab for this
+# I don't really understand exactly how the serial console stuff works. We might
+# have to add some different ones here at some point.
+COPY --link <<-'EOF' /etc/inittab
+# defaults
 
-COPY --link <<-'EOF' /usr/sbin/autologin
-#!/bin/sh
-exec login -f exasol
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown
+
+# tty1 is nice to have for some graphical vm interfaces
+# hvc0 is virtio_console, which all hypervisors should support
+tty1::respawn:/sbin/agetty --noclear --autologin exasol tty1
+hvc0::respawn:/sbin/agetty --noclear --autologin exasol hvc0
 EOF
-
-RUN <<-'EOF'
-set -eu
-chmod +x /usr/sbin/autologin
-sed -i 's@:respawn:/sbin/getty@:respawn:/sbin/getty -n -l /usr/sbin/autologin@g' /etc/inittab
-EOF
-
 
 ### VM startup scripts
 

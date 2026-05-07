@@ -150,7 +150,7 @@ case "$ARCH" in
         QEMU_BIN="qemu-system-x86_64"
         QEMU_MACHINE="q35"
         QEMU_CPU="qemu64"
-        QEMU_CONSOLE="ttyS0,115200"
+        QEMU_CONSOLE="hvc0"
         QEMU_BIOS="$(find_first_file \
             /usr/share/ovmf/OVMF.fd \
             /usr/share/OVMF/OVMF_CODE.fd \
@@ -165,7 +165,7 @@ case "$ARCH" in
         QEMU_BIN="qemu-system-aarch64"
         QEMU_MACHINE="virt"
         QEMU_CPU="cortex-a72"
-        QEMU_CONSOLE="ttyAMA0,115200"
+        QEMU_CONSOLE="hvc0"
         QEMU_BIOS="$(find_first_file \
             /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
             /usr/share/AAVMF/AAVMF_CODE.fd \
@@ -282,9 +282,12 @@ QEMU_ARGS=(
     -device 'virtio-net-pci,netdev=net0'
     "${VIRTIOFS_ARGS[@]}"
     -display 'none'
-    -chardev 'stdio,id=stdio,mux=on,signal=off'
-    -serial 'chardev:stdio'
-    -mon 'chardev=stdio,mode=readline'
+    -device 'virtio-serial-pci'
+    # Use make sure to use serial0 here instead of some other name because
+    # serial0 is a default device of our vm type and if we use a different
+    # one we get two serial consoles which can cause trouble
+    -device 'virtconsole,chardev=serial0'
+    -serial 'mon:stdio'
 )
 
 echo "==> Starting VM from $DISK_IMG"
