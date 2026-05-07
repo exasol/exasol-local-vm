@@ -65,35 +65,6 @@ check_runner_image() {
     fi
 }
 
-port_args_from_config() {
-    if [ ! -f "$VM_CONFIG" ]; then
-        return 0
-    fi
-
-    jq -r '.ports[]? | [.protocol, .host] | @tsv' "$VM_CONFIG" \
-        | while IFS=$'\t' read -r protocol host_port; do
-            if [ -n "$protocol" ] && [ -n "$host_port" ]; then
-                printf '%s\n' "-p"
-                printf '%s\n' "${host_port}:${host_port}/${protocol}"
-            fi
-        done
-}
-
-port_args_from_container() {
-    if [ ! -f "$SHARED_DIR/container-manifest.json" ]; then
-        return 0
-    fi
-
-    jq -r '.ports[]?' "$SHARED_DIR/container-manifest.json" \
-        | while IFS='' read -r port; do
-            if [ -n "$port" ]; then
-                printf '%s\n' "-p"
-                printf '%s\n' "${port}:${port}"
-            fi
-        done
-}
-
-require_command jq "task install-deps"
 require_command podman "task install-deps"
 
 check_vm_artifacts
@@ -117,6 +88,7 @@ RUN_ARGS=(
     --privileged
     --rm
     --name="$CONTAINER_NAME"
+    --network=host
     --mount="type=bind,src=$OUTPUT_DIR,dst=/vm-image,relabel=shared"
 )
 
@@ -130,10 +102,6 @@ fi
 if [ -d "$SHARED_DIR" ]; then
     RUN_ARGS+=(--mount="type=bind,src=$SHARED_DIR,dst=/shared,relabel=shared")
 fi
-
-while IFS= read -r port_arg; do
-    RUN_ARGS+=("$port_arg")
-done < <(port_args_from_config; port_args_from_container)
 
 if [ "$ATTACHED" = "true" ]; then
     echo "==> Starting attached VM container: $CONTAINER_NAME"

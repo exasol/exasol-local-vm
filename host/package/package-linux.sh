@@ -73,18 +73,7 @@ require_command() {
     fi
 }
 
-port_args_from_config() {
-    jq -r '.ports[]? | [.protocol, .host] | @tsv' "$CONFIG_FILE" \
-        | while IFS=$'\t' read -r protocol host_port; do
-            if [ -n "$protocol" ] && [ -n "$host_port" ]; then
-                printf '%s\n' "-p"
-                printf '%s\n' "${host_port}:${host_port}/${protocol}"
-            fi
-        done
-}
-
 require_command podman
-require_command jq
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: VM config is missing: $CONFIG_FILE" >&2
@@ -99,6 +88,7 @@ RUN_ARGS=(
     --rm
     -it
     --replace
+    --network=host
     --name "$CONTAINER_NAME"
     -v "$SCRIPT_DIR:/vm-image:ro,Z"
 )
@@ -106,10 +96,6 @@ RUN_ARGS=(
 if [ -d "$SHARED_DIR" ]; then
     RUN_ARGS+=(-v "$SHARED_DIR:/shared:Z")
 fi
-
-while IFS= read -r port_arg; do
-    RUN_ARGS+=("$port_arg")
-done < <(port_args_from_config)
 
 echo "==> Starting attached VM container: $CONTAINER_NAME"
 exec podman run "${RUN_ARGS[@]}" "$RUNNER_IMAGE"
@@ -125,7 +111,6 @@ This package contains VM artifacts and a Podman-based QEMU runner.
 ## Prerequisites
 
 - `podman`
-- `jq`
 
 QEMU, UEFI firmware, and virtiofsd are installed inside the runner container.
 
