@@ -84,6 +84,12 @@ if podman container exists "$CONTAINER_NAME"; then
     podman rm "$CONTAINER_NAME" >/dev/null
 fi
 
+# This uses --privileged to get access to /dev/kvm and --network=host so we
+# don't have to individually export ports from the vm that we want to access.
+#
+# In theory this could be tightened down but the main reason to run this in a
+# container is not because we don't trust it but to avoid host dependencies and
+# make cleanup trivial.
 RUN_ARGS=(
     --privileged
     --rm
