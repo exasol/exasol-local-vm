@@ -19,6 +19,7 @@ INITRD_FILE="$OUTPUT_DIR/initramfs.img.zst"
 KERNEL_CMDLINE_FILE="$OUTPUT_DIR/kernel-cmdline.txt"
 VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
 RUN_CONTAINERFILE="$ROOT_DIR/host/run/Containerfile"
+RUN_QEMU_SCRIPT="$ROOT_DIR/host/run/run-qemu.sh"
 
 for artifact in \
     "$RAW_DISK" \
@@ -27,7 +28,8 @@ for artifact in \
     "$INITRD_FILE" \
     "$KERNEL_CMDLINE_FILE" \
     "$VM_CONFIG" \
-    "$RUN_CONTAINERFILE"; do
+    "$RUN_CONTAINERFILE" \
+    "$RUN_QEMU_SCRIPT"; do
     if [ ! -f "$artifact" ]; then
         echo "Error: required package input is missing: $artifact" >&2
         exit 1
@@ -54,6 +56,7 @@ cp "$INITRD_FILE" "$PACKAGE_DIR/initramfs.img.zst"
 cp "$KERNEL_CMDLINE_FILE" "$PACKAGE_DIR/kernel-cmdline.txt"
 cp "$VM_CONFIG" "$PACKAGE_DIR/vm-config.json"
 cp "$RUN_CONTAINERFILE" "$PACKAGE_DIR/Containerfile"
+cp "$RUN_QEMU_SCRIPT" "$PACKAGE_DIR/run-qemu.sh"
 
 cat > "$PACKAGE_DIR/start.sh" <<'EOF'
 #!/usr/bin/env bash
