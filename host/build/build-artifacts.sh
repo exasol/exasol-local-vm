@@ -19,6 +19,12 @@ OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/$IMG_ARCH}"
 
 mkdir -p "$OUTPUT_DIR"
 
+# TODO Potentially add explicit cache-busting instead of --pull=newer?
+# Having e.g. a motd file with a version number for the vm image would be enough
+# as we can bump it before a release.
+#
+# These builds use idfiles so we don't have to tag these temporary containers
+# and clutter the host.
 BASE_BUILD_ARGS=(
     --jobs=0
     --pull=newer
@@ -32,27 +38,33 @@ IMG_CONVERTER_BUILD_ARGS=(
     --iidfile="${OUTPUT_DIR}/converter_image_id"
 )
 
-echo "==> Building VM artifacts with podman..."
+echo "==> Building VM contents image with podman..."
 podman build "${BASE_BUILD_ARGS[@]}" "$ROOT_DIR/container"
+
+echo "==> Building podman image -> VM disk image converter with podman..."
 podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "$ROOT_DIR/host/build"
+
+BASE_IMG_ID="$(cat "${OUTPUT_DIR}/base_image_id")"
+CONVERTER_IMG_ID="$(cat "${OUTPUT_DIR}/converter_image_id")"
 
 IMG_CONVERTER_RUN_ARGS=(
     --rm
     --arch="${IMG_ARCH}"
-    --mount="type=image,src=$(cat "${OUTPUT_DIR}/base_image_id"),dst=/image"
+    --mount="type=image,src=${BASE_IMG_ID},dst=/image"
     --mount="type=bind,src=${OUTPUT_DIR},dst=/output,relabel=shared"
 )
-podman run "${IMG_CONVERTER_RUN_ARGS[@]}" "$(cat "${OUTPUT_DIR}/converter_image_id")" "${IMG_ARCH}"
 
-ARCH_FILE="$OUTPUT_DIR/arch.txt"
-if [ ! -f "$ARCH_FILE" ]; then
-    echo "Error: podman build completed without ${ARCH_FILE}" >&2
-    exit 1
-fi
+echo "==> Converting VM podman image -> VM disk image..."
+echo "    ==> VM contents podman image:  ${BASE_IMG_ID}"
+echo "    ==> VM converter podman image: ${CONVERTER_IMG_ID}"
+podman run "${IMG_CONVERTER_RUN_ARGS[@]}" "${CONVERTER_IMG_ID}" "${IMG_ARCH}"
 
-ARCH="$(tr -d '\n' < "$ARCH_FILE")"
-
+OUTPUT_DIR_RELATIVE="${OUTPUT_DIR##"${PWD}/"}"
 echo "==> Build completed"
-echo "==> Architecture: $ARCH"
-echo "==> Raw disk: $OUTPUT_DIR/disk.img"
-echo "==> VHDX disk: $OUTPUT_DIR/disk.vhdx"
+echo "==> Architecture:        $IMG_ARCH"
+echo "==> Raw (fat) disk:      ${OUTPUT_DIR_RELATIVE}/disk.img"
+echo "==> Raw (thin) disk:     ${OUTPUT_DIR_RELATIVE}/disk_thin.img"
+echo "==> VHDX disk:           ${OUTPUT_DIR_RELATIVE}/disk.vhdx"
+echo "==> Kernel binary:       ${OUTPUT_DIR_RELATIVE}/vmlinuz-virt"
+echo "==> Initramfs image:     ${OUTPUT_DIR_RELATIVE}/initramfs.img.zst"
+echo "==> Kernel commandline:  ${OUTPUT_DIR_RELATIVE}/kernel-cmdline.txt"
