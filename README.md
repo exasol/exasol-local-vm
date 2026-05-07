@@ -1,10 +1,13 @@
 # exasol-nano-vm
 
 This repository builds a minimal Linux VM image to run an Exasol container.
-`task build` first builds the guest filesystem image from
-`container/Containerfile`. It then builds and runs a separate VM image builder
-container from `host/build/Containerfile` that repackages that guest image into
-VM artifacts.
+
+The VM image is buiult using `task build` in two distinct containerized steps:
+
+1. Build the guest filesystem image from `container/Containerfile`.
+2. Build and run a separate VM image builder container from
+   `host/build/Containerfile` that repackages the guest image into exported VM
+   artifacts.
 
 ## Build
 
@@ -61,3 +64,27 @@ IMG_ARCH=x86_64 task package-windows
 The Linux package uses the Podman-based QEMU runner. The macOS package uses the
 raw UEFI disk image with vfkit. The Windows package uses the VHDX artifact for
 Hyper-V Generation 2 VMs.
+
+## Runtime Shape
+
+The VM boots a unified kernel image from the EFI System Partition. The root
+filesystem comes from the initramfs and switches to a tmpfs copy early in boot.
+The `/var` tree is stored on the `exasol-data` ext4 partition.
+
+Current runtime behavior is intentionally minimal:
+
+- Podman is installed in the guest.
+- OpenRC starts base services, networking and initial setup.
+- The guest autologins as `exasol` on configured consoles.
+
+On Linux, the default launcher is a Podman-based QEMU runner. Host-side QEMU,
+UEFI firmware, and virtiofsd dependencies are intentionally isolated inside
+`host/run/Containerfile`.
+
+The following behavior is implemented in the current image:
+
+- Optional `/mnt/host` mounting through virtiofs on the Linux QEMU runner and
+  on vfkit.
+- Boot-time growth of the `/var` partition and filesystem via `growpart` and
+  `resize2fs`.
+- SSH key import for the `exasol` user from `/mnt/host/authorized_keys`.
