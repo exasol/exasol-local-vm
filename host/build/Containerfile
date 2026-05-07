@@ -1,8 +1,5 @@
 FROM fedora
 
-ARG DISK_PADDING_SIZE='3G'
-ARG KERNEL_CMDLINE="console=tty0 console=ttyS0,115200 console=ttyAMA0,115200 console=hvc0"
-
 RUN dnf install -y \
     cpio \
     dosfstools \
