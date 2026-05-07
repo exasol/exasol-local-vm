@@ -22,7 +22,7 @@ tasks:
     desc: Build the Podman/QEMU runner container image for starting the VM
     run: once
     cmds:
-      - podman build -t exasol-nano-vm-runner:latest host/run
+      - podman build --arch "$(uname -m)" -t exasol-nano-vm-runner:latest host/run
 
   ensure-vm-image:
     run: when_changed
