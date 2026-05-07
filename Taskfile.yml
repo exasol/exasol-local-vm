@@ -129,6 +129,7 @@ tasks:
   test:
     desc: Run all tests
     cmds:
+      - task: startup-benchmark
       - task: test-ssh-keys
       - task: test-container
 
