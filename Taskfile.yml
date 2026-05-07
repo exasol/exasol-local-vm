@@ -122,7 +122,6 @@ tasks:
         vars:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ensure-qemu-container
-      - copy-test-container-to-shared
     cmds:
       - ./host/test/test-container.sh "{{.IMG_ARCH}}"
 
@@ -133,14 +132,6 @@ tasks:
       - task: test-ssh-keys
       - task: test-container
 
-  copy-test-container-to-shared:
-    deps:
-      - build-test-container
-    cmds:
-      - cp examples/demo-container/dist/test-server-container.tar.gz shared/test-server-container.tar.gz
-      - cp examples/demo-container/dist/container-manifest.json shared/container-manifest.json
-      - echo "Container tarball and manifest copied to shared directory"
-
   build-test-container:
     desc: Build and package the test Podman container for distribution
     requires:
@@ -149,7 +140,7 @@ tasks:
           enum: [x86_64, aarch64]
     dir: examples/demo-container
     cmds:
-      - ./build-packaged-container.sh "{{.IMG_ARCH}}"
+      - ./build-packaged-container.sh "{{.IMG_ARCH}}" shared
 
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}

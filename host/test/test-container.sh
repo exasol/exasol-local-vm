@@ -9,10 +9,13 @@ IMG_ARCH="${1}"
 shift
 
 TEST_DIR="$(mktemp -d)"
+
+TEST_CONTAINER_OUTPUT_DIR="${TEST_DIR}/container"
+mkdir -p "${TEST_CONTAINER_OUTPUT_DIR}"
+
 export VM_CONTAINER_NAME="exasol-nano-test-vm-$$"
-# Ideally this would put everything in TEST_DIR, needs changes in the build/copy steps though
-# export VM_SHARED_DIR="${TEST_DIR}/shared"
-# mkdir -p "${VM_SHARED_DIR}"
+export VM_SHARED_DIR="${TEST_DIR}/shared"
+mkdir -p "${VM_SHARED_DIR}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -51,6 +54,22 @@ cleanup() {
 
 # Set trap to ensure cleanup happens on exit (success or failure)
 trap cleanup EXIT INT TERM
+
+echo_info "building test container"
+./examples/demo-container/build-packaged-container.sh "${IMG_ARCH}" "${TEST_CONTAINER_OUTPUT_DIR}"
+
+TEST_CONTAINER_MANIFEST="${TEST_CONTAINER_OUTPUT_DIR}/container-manifest.json"
+if [ ! -f "${TEST_CONTAINER_MANIFEST}" ]; then
+    echo_error "${TEST_CONTAINER_MANIFEST} is missing" >&2
+    exit 1
+fi
+TEST_CONTAINER_FILE="${TEST_CONTAINER_OUTPUT_DIR}/$(jq -r '.containerFile' "${TEST_CONTAINER_MANIFEST}")"
+if [ ! -f "${TEST_CONTAINER_FILE}" ]; then
+    echo_error "${TEST_CONTAINER_FILE} is missing" >&2
+    exit 1
+fi
+
+cp "${TEST_CONTAINER_FILE}" "${TEST_CONTAINER_MANIFEST}" "${VM_SHARED_DIR}"
 
 echo_info "Testing containerized REST server..."
 
@@ -108,7 +127,7 @@ echo_info "Received correct response: '$RESPONSE'"
 sleep 1
 
 # Check if data was written to shared folder
-DATA_DIR="shared/container-data"
+DATA_DIR="${VM_SHARED_DIR}/container-data"
 if [ ! -d "$DATA_DIR" ]; then
     echo_error "Data directory not found: $DATA_DIR"
     exit 1

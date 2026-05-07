@@ -11,7 +11,7 @@ shift
 # Configuration
 IMAGE_NAME="test-server"
 IMAGE_TAG="latest"
-OUTPUT_DIR="dist"
+OUTPUT_DIR="${1:-dist}"
 ARCHIVE_NAME="test-server-container.tar.gz"
 
 # Colors for output
