@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ "$#" -lt 1 ]; then
+    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
+    exit 1
+fi
+IMG_ARCH="${1}"
+shift
+
+TEST_DIR="$(mktemp -d)"
+
+TEST_CONTAINER_OUTPUT_DIR="${TEST_DIR}/container"
+mkdir -p "${TEST_CONTAINER_OUTPUT_DIR}"
+
+export VM_CONTAINER_NAME="exasol-nano-test-vm-$$"
+export VM_SHARED_DIR="${TEST_DIR}/shared"
+mkdir -p "${VM_SHARED_DIR}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -26,22 +42,40 @@ cleanup() {
   echo_info "Cleaning up..."
   
   # Stop the VM if it's running
-  if [ -f "qemu.pid" ]; then
-    echo_info "Stopping VM..."
-    ./host/run/stop-vm.sh || true
-  fi
+  echo_info "Stopping VM..."
+  ./host/run/stop-qemu-container.sh || true
   
+  # Clean up test files
+  echo_info "Removing test files..."
+  rm -rf "${TEST_DIR}"
+
   exit $exit_code
 }
 
 # Set trap to ensure cleanup happens on exit (success or failure)
 trap cleanup EXIT INT TERM
 
+echo_info "building test container"
+./examples/demo-container/build-packaged-container.sh "${IMG_ARCH}" "${TEST_CONTAINER_OUTPUT_DIR}"
+
+TEST_CONTAINER_MANIFEST="${TEST_CONTAINER_OUTPUT_DIR}/container-manifest.json"
+if [ ! -f "${TEST_CONTAINER_MANIFEST}" ]; then
+    echo_error "${TEST_CONTAINER_MANIFEST} is missing" >&2
+    exit 1
+fi
+TEST_CONTAINER_FILE="${TEST_CONTAINER_OUTPUT_DIR}/$(jq -r '.containerFile' "${TEST_CONTAINER_MANIFEST}")"
+if [ ! -f "${TEST_CONTAINER_FILE}" ]; then
+    echo_error "${TEST_CONTAINER_FILE} is missing" >&2
+    exit 1
+fi
+
+cp "${TEST_CONTAINER_FILE}" "${TEST_CONTAINER_MANIFEST}" "${VM_SHARED_DIR}"
+
 echo_info "Testing containerized REST server..."
 
 # Start the VM
 echo_info "Starting VM..."
-./host/run/start-vm.sh
+./host/run/start-qemu-container.sh "${IMG_ARCH}"
 
 # Wait for VM to be ready
 echo_info "Waiting for VM to initialize..."
@@ -50,30 +84,25 @@ sleep 5
 # Check if container port is accessible (wait up to 30 seconds)
 echo_info "Waiting for container to be ready..."
 MAX_WAIT=600
+START_TIME="$(date +%s)"
 ELAPSED=0
 PORT_READY=false
 
-while [ $ELAPSED -lt $MAX_WAIT ]; do
-    if curl -s --connect-timeout 1 http://localhost:8080/hello > /dev/null 2>&1; then
+while [ $ELAPSED -lt $MAX_WAIT ] && podman container exists "${VM_CONTAINER_NAME}"; do
+    if curl -s --connect-timeout 1 http://127.0.0.1:8080/hello > /dev/null 2>&1; then
         PORT_READY=true
         break
     fi
     sleep 1
-    ELAPSED=$((ELAPSED + 1))
+    ELAPSED="$(( "$(date +%s)" - START_TIME ))"
 done
 
 if [ "$PORT_READY" = "false" ]; then
     echo_error "Container port 8080 not accessible after ${MAX_WAIT} seconds"
-    echo_error "Check if container is running: ssh -i vm-key -p 2222 exasol@localhost 'podman ps'"
+    echo_error "Check if container is running: ssh -i vm-key -p 2222 exasol@127.0.0.1 'podman ps'"
     echo_error ""
     echo_error "Container load logs:"
-    if ls shared/logs/container-load-*.log 1> /dev/null 2>&1; then
-        LATEST_LOG=$(ls -t shared/logs/container-load-*.log | head -1)
-        echo_error "=== $LATEST_LOG ==="
-        cat "$LATEST_LOG" >&2
-    else
-        echo_error "No container load logs found in shared/logs/"
-    fi
+    podman logs "${VM_CONTAINER_NAME}" >&2
     exit 1
 fi
 
@@ -84,7 +113,7 @@ TEST_DATA="Test data from host at $(date +%s)"
 echo_info "Sending POST request with data: '$TEST_DATA'"
 
 # Send POST request and capture response
-RESPONSE=$(curl -s -X POST http://localhost:8080/hello -d "$TEST_DATA")
+RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/hello -d "$TEST_DATA")
 
 # Verify response is "hello"
 if [ "$RESPONSE" != "hello" ]; then
@@ -98,7 +127,7 @@ echo_info "Received correct response: '$RESPONSE'"
 sleep 1
 
 # Check if data was written to shared folder
-DATA_DIR="shared/container-data"
+DATA_DIR="${VM_SHARED_DIR}/container-data"
 if [ ! -d "$DATA_DIR" ]; then
     echo_error "Data directory not found: $DATA_DIR"
     exit 1

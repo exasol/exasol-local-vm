@@ -4,6 +4,8 @@
 SHARED_KEYS="/mnt/host/authorized_keys"
 USER_KEYS="/home/exasol/.ssh/authorized_keys"
 
+set -eu
+
 # Exit if shared folder not mounted or no keys file
 [ ! -f "$SHARED_KEYS" ] && exit 0
 
@@ -12,7 +14,7 @@ mkdir -p /home/exasol/.ssh
 chmod 700 /home/exasol/.ssh
 
 # SECURITY: Clear existing keys - only keys in shared folder will have access
-> "$USER_KEYS"
+true > "$USER_KEYS"
 
 # Import all keys from shared folder
 while IFS= read -r key; do

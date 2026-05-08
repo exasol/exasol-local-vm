@@ -1,0 +1,33 @@
+# Build from the repository root:
+#   podman build -t exasol-nano-vm-runner host/run
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN <<'EOF'
+set -eu
+apt-get update
+apt-get install -y --no-install-recommends \
+    bash \
+    jq \
+    ovmf \
+    procps \
+    qemu-efi-aarch64 \
+    qemu-system-arm \
+    qemu-system-x86 \
+    virtiofsd
+
+# Not needed here but helpful for some tests
+apt-get -y --no-install-recommends install curl
+
+rm -rf /var/lib/apt/lists/*
+EOF
+
+COPY --link vm-config.json /etc/exasol-nano-vm/vm-config.json
+
+COPY --link run-qemu.sh /usr/local/bin/run-exasol-vm
+
+RUN chmod +x /usr/local/bin/run-exasol-vm
+
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/run-exasol-vm"]

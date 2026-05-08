@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# Adds specified services to the runlevel. Current working directory must be
+# root of the image.
+rc_add() {
+	local runlevel="$1"; shift  # runlevel name
+	local services="$*"  # names of services
+
+	local svc; for svc in $services; do
+		mkdir -p etc/runlevels/$runlevel
+		ln -s /etc/init.d/$svc etc/runlevels/$runlevel/$svc
+		echo " * service $svc added to runlevel $runlevel"
+	done
+}
+
+rc_add "$@"
+

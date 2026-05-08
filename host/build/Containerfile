@@ -1,0 +1,16 @@
+FROM fedora
+
+RUN dnf install -y \
+    cpio \
+    dosfstools \
+    e2fsprogs \
+    mtools \
+    qemu-img \
+    systemd \
+    systemd-boot-unsigned \
+    systemd-ukify \
+    zstd && \
+    dnf clean all
+
+COPY --link /build-vm-image.sh /build-vm-image.sh
+ENTRYPOINT ["/build-vm-image.sh"]

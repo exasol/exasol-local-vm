@@ -1,198 +1,128 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Linux VM Startup Script for macOS using vfkit
-# Requires: vfkit (install via: brew install vfkit)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DISK_IMG="$SCRIPT_DIR/exasol-vm.img"
+VM_CONFIG="$SCRIPT_DIR/vm-config.json"
+GVPROXY_BIN="$SCRIPT_DIR/gvproxy"
+VFKIT_PID_FILE="$SCRIPT_DIR/vfkit.pid"
+GVPROXY_PID_FILE="$SCRIPT_DIR/gvproxy.pid"
+VFKIT_SOCK="$SCRIPT_DIR/vfkit.sock"
+GVPROXY_API_SOCK="$SCRIPT_DIR/gvproxy.sock"
+EFI_STORE="$SCRIPT_DIR/efi-variable-store"
+VFKIT_LOG="$SCRIPT_DIR/vfkit.log"
+CONSOLE_LOG="$SCRIPT_DIR/vm-console.log"
+VM_MAC="5a:94:ef:e4:0c:ee"
 
-# Usage: ./start.sh [cpu_count] [memory_mb] [port_rules] [shared_directory]
-# All arguments are optional. Defaults: 2 CPUs, 2048 MB RAM, no port forwarding, no folder sharing
-# port_rules format: "protocol:host:vm,protocol:host:vm,..." (e.g., "tcp:8080:8080,tcp:9000:3000")
+VM_CPUS="${1:-}"
+VM_MEMORY="${2:-}"
+SHARED_DIR="${3:-}"
 
-# Configuration
-VM_NAME="Exasol-VM"
-DISK_IMG="exasol-vm.img"
-SSH_PORT=2222
-
-# Parse command line arguments
-CPUS="${1:-2}"
-MEMORY_MB="${2:-2048}"
-PORT_RULES="${3:-}"
-SHARED_DIR="${4:-}"
-
-# Convert memory from MB to GB for vfkit
-MEMORY_GB=$((MEMORY_MB / 1024))
-
-# Check if vfkit is installed
-if ! command -v vfkit &> /dev/null; then
-    echo "Error: vfkit is not installed"
-    echo "Install it with: brew install vfkit"
-    exit 1
-fi
-
-# Check if disk image exists
 if [ ! -f "$DISK_IMG" ]; then
-    echo "Error: Disk image not found: $DISK_IMG"
+    echo "Error: disk image not found: $DISK_IMG"
     exit 1
 fi
 
-# Resolve disk image to absolute path
-DISK_IMG_ABS="$(cd "$(dirname "$DISK_IMG")" && pwd)/$(basename "$DISK_IMG")"
+if [ ! -f "$VM_CONFIG" ]; then
+    echo "Error: vm-config.json not found: $VM_CONFIG"
+    exit 1
+fi
 
-# Validate and resolve shared directory if provided
-SHARED_DIR_ABS=""
+if [ ! -x "$GVPROXY_BIN" ]; then
+    echo "Error: gvproxy not found: $GVPROXY_BIN"
+    exit 1
+fi
+
+if ! command -v vfkit >/dev/null 2>&1; then
+    echo "Error: vfkit is not installed"
+    exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "Error: jq is required to read vm-config.json"
+    exit 1
+fi
+
+VM_CPUS="${VM_CPUS:-$(jq -r '.cpus // 2' "$VM_CONFIG")}"
+VM_MEMORY="${VM_MEMORY:-$(jq -r '.memoryMB // 2048' "$VM_CONFIG")}"
+
+if [ -f "$VFKIT_PID_FILE" ] && kill -0 "$(cat "$VFKIT_PID_FILE")" 2>/dev/null; then
+    echo "Error: vfkit is already running (PID: $(cat "$VFKIT_PID_FILE"))"
+    exit 1
+fi
+
+if [ -f "$GVPROXY_PID_FILE" ] && kill -0 "$(cat "$GVPROXY_PID_FILE")" 2>/dev/null; then
+    echo "Error: gvproxy is already running (PID: $(cat "$GVPROXY_PID_FILE"))"
+    exit 1
+fi
+
+rm -f "$VFKIT_PID_FILE" "$GVPROXY_PID_FILE" "$VFKIT_SOCK" "$GVPROXY_API_SOCK"
+
+GVPROXY_LISTEN="unix://$GVPROXY_API_SOCK"
+VFKIT_LISTEN="unixgram://$VFKIT_SOCK"
+
+"$GVPROXY_BIN" \
+    --mtu 1500 \
+    --ssh-port -1 \
+    --listen "$GVPROXY_LISTEN" \
+    --listen-vfkit "$VFKIT_LISTEN" \
+    --log-file "$SCRIPT_DIR/gvproxy.log" \
+    --pid-file "$GVPROXY_PID_FILE" &
+
+for _ in {1..20}; do
+    if [ -S "$VFKIT_SOCK" ] && [ -S "$GVPROXY_API_SOCK" ]; then
+        break
+    fi
+    sleep 0.25
+done
+
+VFKIT_ARGS=(
+    --cpus "$VM_CPUS"
+    --memory "$VM_MEMORY"
+    --bootloader "efi,variable-store=$EFI_STORE,create"
+    --device "virtio-blk,path=$DISK_IMG"
+    --device "virtio-net,unixSocketPath=$VFKIT_SOCK,mac=$VM_MAC"
+    --device virtio-rng
+    --device "virtio-serial,logFilePath=$CONSOLE_LOG"
+)
+
 if [ -n "$SHARED_DIR" ]; then
     if [ ! -d "$SHARED_DIR" ]; then
-        echo "Error: Shared directory not found: $SHARED_DIR"
+        echo "Error: shared directory not found: $SHARED_DIR"
         exit 1
     fi
     SHARED_DIR_ABS="$(cd "$SHARED_DIR" && pwd)"
-    echo "==> Shared directory: $SHARED_DIR_ABS"
-fi
-
-# Detect architecture
-CURRENT_ARCH=$(uname -m)
-echo "==> Detected host architecture: $CURRENT_ARCH"
-
-# Configure based on architecture
-if [[ "$CURRENT_ARCH" == "arm64" ]]; then
-    BOOTLOADER="/opt/homebrew/share/vfkit/edk2-aarch64-code.fd"
-    echo "==> Using ARM64 configuration"
-elif [[ "$CURRENT_ARCH" == "x86_64" ]]; then
-    BOOTLOADER="/usr/local/share/vfkit/edk2-x86_64-code.fd"
-    echo "==> Using x86_64 configuration"
-else
-    echo "Error: Unsupported architecture: $CURRENT_ARCH"
-    exit 1
-fi
-
-# Check if bootloader exists
-if [ ! -f "$BOOTLOADER" ]; then
-    echo "Warning: UEFI bootloader not found at expected location: $BOOTLOADER"
-    echo "Attempting to locate alternative bootloader..."
-    
-    # Try to find bootloader in common locations
-    POSSIBLE_LOCATIONS=(
-        "/opt/homebrew/Cellar/vfkit/*/share/vfkit/edk2-${CURRENT_ARCH/arm64/aarch64}-code.fd"
-        "/usr/local/Cellar/vfkit/*/share/vfkit/edk2-${CURRENT_ARCH/arm64/aarch64}-code.fd"
-        "/opt/homebrew/share/vfkit/edk2-${CURRENT_ARCH/arm64/aarch64}-code.fd"
-    )
-    
-    BOOTLOADER=""
-    for pattern in "${POSSIBLE_LOCATIONS[@]}"; do
-        # Use glob expansion
-        for file in $pattern; do
-            if [ -f "$file" ]; then
-                BOOTLOADER="$file"
-                echo "==> Found bootloader: $BOOTLOADER"
-                break 2
-            fi
-        done
-    done
-    
-    if [ -z "$BOOTLOADER" ]; then
-        echo "Error: Could not locate UEFI bootloader for $CURRENT_ARCH"
-        echo "Please ensure vfkit is properly installed with: brew reinstall vfkit"
-        exit 1
-    fi
-fi
-
-echo ""
-echo "=========================================="
-echo "  Starting Linux VM with vfkit"
-echo "=========================================="
-echo ""
-echo "VM Configuration:"
-echo "  Name: $VM_NAME"
-echo "  CPUs: $CPUS"
-echo "  Memory: ${MEMORY_GB}GB (${MEMORY_MB}MB)"
-echo "  Disk: $DISK_IMG"
-echo "  SSH Port: localhost:$SSH_PORT"
-echo "  Bootloader: $BOOTLOADER"
-if [ -n "$SHARED_DIR_ABS" ]; then
-    echo "  Shared Folder: $SHARED_DIR_ABS -> /mnt/host (in VM)"
-else
-    echo "  Shared Folder: None (provide as 3rd argument to enable)"
-fi
-echo ""
-
-# Check if VM is already running by checking for vfkit process
-if pgrep -f "vfkit.*$DISK_IMG" > /dev/null; then
-    echo "Error: VM appears to be already running (vfkit process found)"
-    echo "To stop it, run: killall vfkit"
-    exit 1
-fi
-
-echo "==> Starting VM..."
-echo "==> VM will run in the background. Monitor with: ps aux | grep vfkit"
-echo ""
-
-# Build vfkit command arguments
-VFKIT_ARGS=(
-    --cpus "$CPUS"
-    --memory $((MEMORY_GB * 1024))
-    --bootloader "$BOOTLOADER"
-    --device virtio-blk,path="$DISK_IMG_ABS"
-    --device virtio-net,nat,guestPort=22,hostPort=$SSH_PORT
-    --device virtio-rng
-    --device virtio-serial,logFilePath=vm-console.log
-)
-
-# Add port forwarding rules if provided
-if [ -n "$PORT_RULES" ]; then
-    IFS=',' read -ra RULES <<< "$PORT_RULES"
-    for rule in "${RULES[@]}"; do
-        IFS=':' read -r proto host_port vm_port <<< "$rule"
-        # vfkit requires separate virtio-net devices for each port forward
-        VFKIT_ARGS+=(--device "virtio-net,nat,guestPort=$vm_port,hostPort=$host_port")
-        echo "==> Port forwarding: localhost:$host_port -> VM:$vm_port ($proto)"
-    done
-fi
-
-# Add virtio-fs device if shared directory is provided
-# The mountTag must be "hostshare" to match cloud-init configuration
-if [ -n "$SHARED_DIR_ABS" ]; then
     VFKIT_ARGS+=(--device "virtio-fs,sharedDir=$SHARED_DIR_ABS,mountTag=hostshare")
 fi
 
-# Start vfkit in the background
-# Note: vfkit uses different syntax than QEMU
-# --cpus, --memory (in MiB), --device for virtio devices
-vfkit "${VFKIT_ARGS[@]}" > vfkit.log 2>&1 &
-
+vfkit "${VFKIT_ARGS[@]}" >"$VFKIT_LOG" 2>&1 &
 VFKIT_PID=$!
-echo "$VFKIT_PID" > vfkit.pid
+echo "$VFKIT_PID" > "$VFKIT_PID_FILE"
 
-# Wait a moment for VM to start
 sleep 2
-
-# Check if vfkit is still running
 if ! kill -0 "$VFKIT_PID" 2>/dev/null; then
     echo "Error: vfkit failed to start"
-    echo "Check vfkit.log for details:"
-    cat vfkit.log
+    cat "$VFKIT_LOG"
     exit 1
 fi
 
-echo "==> VM started successfully!"
-echo "==> vfkit PID: $VFKIT_PID"
-echo ""
-echo "Connection Information:"
-echo "  SSH: ssh -i vm-key -p $SSH_PORT exasol@localhost"
-echo "  Console log: tail -f vm-console.log"
-echo "  vfkit log: tail -f vfkit.log"
-if [ -n "$SHARED_DIR_ABS" ]; then
-    echo ""
-    echo "Shared Folder:"
-    echo "  Host: $SHARED_DIR_ABS"
-    echo "  VM:   /mnt/host"
-    echo "  Files in the host directory will be accessible inside the VM at /mnt/host"
-fi
-echo ""
-echo "Management Commands:"
-echo "  Stop VM: kill $VFKIT_PID"
-echo "  Or:      killall vfkit"
-echo "  Check status: ps aux | grep vfkit"
-echo ""
-echo "Note: The VM is running in the background"
-echo "Wait 20-30 seconds for the VM to fully boot before connecting"
-echo ""
+PORT_COUNT="$(jq -r '.ports | length // 0' "$VM_CONFIG" 2>/dev/null || echo 0)"
+for ((i=0; i<PORT_COUNT; i++)); do
+    PROTOCOL="$(jq -r ".ports[$i].protocol" "$VM_CONFIG")"
+    HOST_PORT="$(jq -r ".ports[$i].host" "$VM_CONFIG")"
+    VM_PORT="$(jq -r ".ports[$i].vm" "$VM_CONFIG")"
+    if [ "$PROTOCOL" != "tcp" ]; then
+        echo "Warning: gvproxy forwarding for protocol '$PROTOCOL' is not configured automatically"
+        continue
+    fi
+    curl --silent --show-error \
+        --unix-socket "$GVPROXY_API_SOCK" \
+        http:/unix/services/forwarder/expose \
+        -X POST \
+        -d "{\"local\":\":${HOST_PORT}\",\"remote\":\"192.168.127.2:${VM_PORT}\"}" >/dev/null
+    echo "==> Port forwarding: localhost:${HOST_PORT} -> VM:${VM_PORT} (${PROTOCOL})"
+done
+
+echo "==> vfkit started successfully (PID: $VFKIT_PID)"
+echo "==> gvproxy started successfully (PID: $(cat "$GVPROXY_PID_FILE"))"
+echo "==> Console log: $CONSOLE_LOG"

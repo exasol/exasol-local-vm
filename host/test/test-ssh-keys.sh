@@ -1,37 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TEST_KEY="test-key"
-AUTHORIZED_KEYS="shared/authorized_keys"
+if [ "$#" -lt 1 ]; then
+    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
+    exit 1
+fi
+IMG_ARCH="${1}"
+shift
+
+TEST_DIR="$(mktemp -d)"
+export VM_CONTAINER_NAME="exasol-nano-test-vm-$$"
+export VM_SHARED_DIR="${TEST_DIR}/shared"
+mkdir -p "${VM_SHARED_DIR}"
+
+TEST_KEY="${TEST_DIR}/test-key"
+AUTHORIZED_KEYS="${TEST_DIR}/shared/authorized_keys"
 
 # Cleanup function to stop VM and clean up test files
 cleanup() {
   local exit_code=$?
   echo ""
   echo "==> Cleaning up..."
-  
+
   # Stop the VM if it's running
-  if [ -f "qemu.pid" ]; then
-    echo "==> Stopping VM..."
-    ./host/run/stop-vm.sh || true
-  fi
+  echo "==> Stopping VM..."
+  ./host/run/stop-qemu-container.sh || true
   
   # Clean up test files
   echo "==> Removing test files..."
-  rm -f "$TEST_KEY" "$TEST_KEY.pub"
-  rm -f "$AUTHORIZED_KEYS"
+  rm -rf "${TEST_DIR}"
   
-  exit $exit_code
+  exit "$exit_code"
 }
 
 # Set trap to ensure cleanup happens on exit (success or failure)
 trap cleanup EXIT INT TERM
 
 echo "==> Testing SSH key import feature"
-
-# Clean up from any previous test runs
-rm -f "$TEST_KEY" "$TEST_KEY.pub"
-rm -f "$AUTHORIZED_KEYS"
 
 # Generate a new test key
 echo "==> Generating test SSH key..."
@@ -44,7 +49,7 @@ cat "$TEST_KEY.pub" >> "$AUTHORIZED_KEYS"
 
 # Start the VM
 echo "==> Starting VM..."
-./host/run/start-vm.sh
+./host/run/start-qemu-container.sh "${IMG_ARCH}"
 
 # Try to connect with the test key (retry for 5 minutes)
 echo "==> Testing SSH connection with test key (will retry for 5 minutes)..."
@@ -52,29 +57,25 @@ MAX_WAIT=600  # 10 minutes in seconds
 ELAPSED=0
 START_TIME=$(date +%s)
 
-while [ $ELAPSED -lt $MAX_WAIT ]; do
-    if ssh -i "$TEST_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 exasol@localhost "echo 'SSH key import successful!'" 2>/dev/null; then
+while [ $ELAPSED -lt $MAX_WAIT ] && podman container exists "${VM_CONTAINER_NAME}"; do
+    if ssh -i "$TEST_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 exasol@127.0.0.1 "echo 'SSH key import successful!'" 2>/dev/null; then
         echo "==> ✓ Test passed: Successfully connected with imported key after ${ELAPSED} seconds"
         SUCCESS=true
         break
     fi
-    
+
+    echo "==> Connection failed, retrying... (${ELAPSED}s elapsed, ${MAX_WAIT}s timeout)"
+    sleep 2
+
     # Update elapsed time
     CURRENT_TIME=$(date +%s)
-    ELAPSED=$((CURRENT_TIME - START_TIME))
-    
-    if [ $ELAPSED -lt $MAX_WAIT ]; then
-        echo "==> Connection failed, retrying... (${ELAPSED}s elapsed, ${MAX_WAIT}s timeout)"
-        sleep 2
-        ELAPSED=$((ELAPSED + 2))
-    fi
+    ELAPSED=$((CURRENT_TIME - START_TIME))   
 done
 
 # Report results
 if [ "${SUCCESS:-false}" = "true" ]; then
     echo ""
     echo "==> ✓ SSH key import test PASSED"
-    exit 0
 else
     echo ""
     echo "==> ✗ SSH key import test FAILED"

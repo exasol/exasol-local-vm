@@ -2,7 +2,8 @@
 
 ## Overview
 
-BuildVM is a tool for building lightweight Alpine Linux VM images with embedded Podman container support. The tool produces VM packages for multiple platforms (macOS/vfkit, Windows/Hyper-V) from a single Alpine Linux base image.
+BuildVM builds a minimal Alpine Linux VM image for running Exasol workloads.
+The active build path first builds a guest filesystem image and then uses a separate VM image builder container to repackage that guest image into VM artifacts for Linux, macOS, and Windows launchers.
 
 The VM is branded as "Exasol VM" for end users, with technical references to Alpine Linux preserved in internal documentation. VM hostname is exasol-vm and the default user is exasol.
 
@@ -25,82 +26,99 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 
 **R2.1**: The tool MUST support both x86_64 and ARM64 architectures
 
-**R2.2**: Architecture detection MUST be automatic by:
-- Mounting the disk image via loopback
-- Inspecting the kernel file (vmlinuz-*) with the `file` command
-- Detecting "x86-64|x86_64" or "aarch64|ARM aarch64" patterns (case-insensitive)
-- Writing normalized architecture to disk-arch.txt
+**R2.2**: The build MUST record the selected architecture in `output/<arch>/arch.txt`.
 
 **R2.3**: Package names MUST reflect architecture:
 - mac-arm64 / mac-x86_64
 - windows-arm64 / windows-x86_64
+- linux-arm64 / linux-x86_64
 
 **R2.4**: QEMU configuration MUST be architecture-specific:
 - x86_64: qemu-system-x86_64, q35 machine, qemu64 CPU, OVMF firmware
 - ARM64: qemu-system-aarch64, virt machine, cortex-a72 CPU, QEMU_EFI.fd firmware
 
-### R3: Base Image Requirements
 
-**R3.1**: Base image MUST be Alpine Linux NoCloud UEFI image
+### R3: Image Build Pipeline
 
-**R3.2**: Image source MUST be cached locally as alpine-pristine.img to avoid re-downloading
+**R3.1**: The guest image contents MUST be assembled into a podman image
 
-**R3.3**: Disk image MUST be:
-- Initially resized to 3GB
-- Shrunk to minimum size + overhead after initialization
-- Final size approximately 1-1.5GB depending on contents
+**R3.2**: VM artifact export MUST be performed by the separate VM image builder podman container
 
-### R4: Container Runtime
+**R3.3**: The VM image builder container MUST output under `output/<arch>/`:
+- `arch.txt`: text file with the build architecture
+- `kernel-cmdline.txt`: text file containing the kernel commandline
+- `vmlinuz-virt`: kernel binary
+- `initramfs.img.zst`: compressed iniramfs
+- `disk_thin.img`: "thin" disk image in raw format
+- `disk.img`: "fat" disk image in raw format
+- `disk.vhdx`: "fat" disk image in vhdx format
 
-**R4.1**: VM MUST include Podman for container management
+**R3.4**: The initramfs MUST be compressed with zstdandard
 
-**R4.2**: Podman MUST run as root (not rootless) to avoid cgroup issues
+**R3.5**: The initramfs MUST contain all contenS of the guest image excluding `/boot` and `/var`
 
-**R4.3**: Container MUST have NO resource limits set (--cpus, --memory flags MUST NOT be used)
+**R3.6**: The "fat" disk images MUST contain:
+- A boot EFI system partition with the kernel, initrd and commandline packed into a unified kernel image
+- An ext4 partition with the contents of `/var` from the guest image and partition label `exasol-data`
 
-**R4.4**: Container MUST automatically inherit all VM CPU and memory resources
+**R3.7**: The "thin" disk images MUST contain:
+- An ext4 partition with the contents of `/var` from the guest image and partition label `exasol-data`
 
-**R4.5**: Container MUST use host networking (--network host)
+**R3.8**: The "thin" disk images MUST NOT contain the kernel or initrd
 
-**R4.6**: Container MUST mount data directory: /mnt/host/container-data → /data
+**R3.9**: The active build MUST NOT require:
+- booting a temporary VM during image construction
 
-**R4.7**: Container logs MUST be written to shared folder: /mnt/host/logs/
+### R4: Guest Runtime
 
-### R5: Cloud-Init Integration
+**R4.1**: The guest image MUST be Alpine Linux based.
 
-**R5.1**: VM MUST be initialized using cloud-init NoCloud datasource
+**R4.2**: The guest MUST include:
+- OpenRC
+- OpenSSH
+- acpid
+- Podman
+- `linux-virt`
+- `cloud-utils-growpart`
+- ext4 resize tooling
+- `jq`
 
-**R5.2**: Cloud-init ISO MUST be presented with media=cdrom flag
+**R4.3**: The guest MUST create the `exasol` user and allow console autologin for that user.
 
-**R5.3**: Cloud-init MUST configure:
-- Hostname: exasol-vm
-- User: exasol (with SSH key authentication)
-- System timezone: UTC
-- cgroup2 filesystem mounting
-- Podman installation and configuration
-- SSH key import from shared folder
-- Container loading from shared folder
-- GRUB timeout = 0 (direct grub.cfg edit)
-- Cloud-init service disablement after first boot
+**R4.4**: The guest MUST configure Podman storage to use overlay with `fuse-overlayfs`.
 
-**R5.4**: Cloud-init MUST run custom scripts in order:
-1. setup-system.sh (system configuration)
-2. setup-services.sh (service configuration)
-3. import-shared-keys.sh (SSH key import)
-4. load-shared-container.sh (container loading)
-5. cleanup-and-shutdown.sh (finalization)
+**R4.5**: The guest MUST include the shared-container helper services:
+- `import-shared-keys`
+- `load-shared-container`
+- `grow-var-fs`
+- `exasol-network`
 
-**R5.5**: VM branding and naming MUST be consistent:
-- All user-facing references MUST use "Exasol VM" branding (not "Alpine Linux VM")
-- VM hostname: exasol-vm (not alpine-vm)
-- Default user: exasol (not alpine)
-- SSH key comment: exasol-vm-key (not alpine-vm-key)
-- Console messages: "Starting Exasol VM" (not "Starting Alpine Linux VM")
-- Task descriptions: "Start the Exasol VM" (not "Start the Alpine Linux VM")
-- Hyper-V VM name: Exasol-VM (not Alpine-VM)
-- vfkit VM name: Exasol-VM (not Alpine-VM)
-- Technical documentation MAY reference Alpine Linux as the base OS
-- Internal file names (alpine-pristine.img, alpine-cloud.qcow2) preserved for clarity
+**R4.6**: No application container image MUST be embedded in the VM by default.
+
+**R4.7**: Containers started by the guest helper MUST:
+- run as root inside the VM
+- use `--network host`
+- omit explicit CPU and memory limits
+
+### R5: Boot And Init
+
+**R5.1**: The VM MUST boot from a unified kernel image stored in the EFI System Partition.
+
+**R5.2**: The full raw disk MUST be a GPT UEFI disk with:
+- an EFI System Partition containing the unified kernel image
+- an ext4 partition labeled `exasol-data`
+
+**R5.3**: The guest root filesystem MUST be provided through the initramfs, with `/var` copied into the ext4 data partition.
+
+**R5.4**: The guest MUST use the custom `/init` handoff that switches away from the kernel `rootfs` before starting `/sbin/init`.
+
+**R5.5**: OpenRC service enablement MUST include:
+- `exasol-network`
+- `import-shared-keys`
+- `grow-var-fs`
+- `load-shared-container`
+- `sshd`
+- `acpid`
 
 ### R6: Folder Sharing
 
@@ -224,8 +242,6 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 - Cleanup MUST be performed by clean-shared task (internal) called by init-vm task
 - Cleaned items include: scripts/, test containers, manifests, authorized_keys, logs/, container-data/
 - Rationale: Scripts copied into VM disk, containers loaded into VM image, no longer needed
-- start-vm MUST recreate necessary files:
-  - shared/authorized_keys from vm-key.pub (for SSH access)
 - Container loading service MUST recreate necessary directories on demand:
   - shared/logs/ for container logs
   - shared/container-data/ for volume mounts (if specified in manifest)
@@ -239,7 +255,6 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 **R8.2**: SSH MUST use key-based authentication
 
 **R8.3**: SSH keys MUST be:
-- Generated during build (vm-key, vm-key.pub)
 - Automatically imported from /mnt/host/authorized_keys if present
 - Managed via import-shared-keys service
 
@@ -249,11 +264,6 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 - Only keys in /mnt/host/authorized_keys have VM access
 - All existing keys are replaced (not appended) on each import
 - import-shared-keys service runs before sshd starts accepting connections
-
-**R8.6**: Development workflow MUST:
-- start-vm copies vm-key.pub to shared/authorized_keys
-- connect uses vm-key for SSH access
-- stop-vm removes shared/authorized_keys for security
 
 ### R9: Resource Configuration
 
@@ -298,46 +308,30 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 
 **R9.8**: Both bash and PowerShell scripts MUST support positional parameters for easy launcher integration
 
-### R10: Boot Optimization
 
-**R10.1**: GRUB timeout MUST be set to 0 to skip boot menu
+### R10: Disk Layout And Growth
 
-**R10.2**: GRUB configuration MUST be applied during cloud-init by directly editing /boot/grub/grub.cfg:
-- Set `timeout=0` for immediate boot
-- Set `timeout_style=hidden` to skip menu display
-- Use sed to update existing values or insert new ones
-- Alpine cloud images lack /etc/default/grub and grub-mkconfig tooling
-- Direct config edit avoids package installation overhead and bootloader risks
+**R10.1**: The data partition MUST be labeled `exasol-data` and mounted as `/var`.
 
-**R10.3**: VM MUST boot directly to Alpine Linux without user interaction
+**R10.2**: The guest MUST attempt to grow the `exasol-data` partition and filesystem during boot before local mounts complete.
 
-### R11: Disk Management
+**R10.3**: The grow step MUST use `growpart` and `resize2fs`.
 
-**R11.1**: Disk shrinking MUST:
-- Resize ext4 filesystem to minimum size
-- Calculate new partition size based on sector-based calculation
-- Repair GPT backup header after truncation (sgdisk -e)
-- Verify GPT integrity before completion
-- Add 34 sectors overhead for GPT structures
+**R10.4**: The grow step MUST handle the "already at maximum size" case without failing the boot.
 
-**R11.2**: Disk compression MUST:
-- Use xz compression level 6
-- Keep original file (-k flag)
-- Show progress (-v flag)
-- Produce .img.xz file
+**R10.5**: The default data-partition padding for exported images MUST be `3G` unless overridden by `DISK_PADDING_SIZE`.
 
-**R11.3**: VHDX conversion MUST:
-- Use dynamic allocation (subformat=dynamic)
-- Convert from raw format
-- Be performed by qemu-img
+### R11: Artifact Layout
 
-**R11.4**: Hyper-V data disk MUST:
-- Be created as 10GB dynamically expanding VHDX
-- Default filename: exasol-data.vhdx
-- Created in script directory if no path specified
-- Created automatically if it doesn't exist
-- Persisted across VM lifecycle
-- Attached to VM on creation or when missing
+**R11.1**: `disk_thin.img` MUST be produced as the minimized raw disk variant created without the EFI System Partition.
+
+**R11.2**: `disk.img` MUST be produced as the full raw bootable disk image.
+
+**R11.3**: `disk.vhdx` MUST be produced from `disk.img` using dynamic allocation.
+
+**R11.4**: `kernel-cmdline.txt` MUST record the base kernel command line exported by the build.
+
+**R11.5**: Platform launchers MAY append platform-specific console parameters to the recorded kernel command line at runtime.
 
 ### R12: Network Configuration
 
@@ -354,7 +348,6 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 ### R13: Logging
 
 **R13.1**: VM console output MUST be logged to:
-- vm-init.log (during initialization)
 - vm.log (during runtime)
 - vm-console.log (vfkit)
 
@@ -367,23 +360,17 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 
 **R13.5**: Background tail process MUST be cleaned up via trap on EXIT/INT/TERM
 
+**R13.6**: The Linux repo runner MUST expose console output through the attached QEMU terminal or `podman logs` on the runner container.
+
 ### R14: Build Workflow
 
 **R14.1**: Build process MUST follow these steps in order:
-1. Install dependencies (task install-deps)
-2. Generate SSH key (task generate-ssh-key)
-3. Download Alpine image (task download-image)
-4. Detect architecture
-5. Resize disk (task resize-disk)
-6. Create cloud-init ISO (task create-cloud-init)
-7. Initialize VM (task init-vm)
-8. Shrink disk (task shrink-disk)
-9. Run tests (task test)
-10. Package for distribution (task package-mac / task package-windows)
+1. Build image (`task build IMG_ARCH=<x86_64|aarch64>`)
+2. Package for distribution (`task package-mac IMG_ARCH=aarch64`/ `task package-windows IMG_ARCH=x86_64`)
 
 **R14.2**: Build MUST be idempotent (can re-run from any step)
 
-**R14.3**: Cleanup MUST remove all generated files and running processes
+**R14.3**: Build must not write temporary files to the repository except for build outputs
 
 ### R15: Testing
 
@@ -397,19 +384,35 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 
 **R15.3**: Tests MUST be automated (task test-ssh-keys, task test-container)
 
+**R15.4**: Tests MUST NOT write temporary files to the repository
+
 ### R16: Packaging
 
 **R16.1**: macOS package MUST include:
-- alpine-vm.img (raw disk)
-- start.sh (vfkit startup script)
-- vm-config.json (default: 2 CPUs, 2GB RAM)
-- README.md
+- `exasol-vm.img` (raw disk)
+- `vm-config.json` (default: 2 CPUs, 2GB RAM)
+- `start.sh` (vfkit startup script)
+- `gvproxy`
+- `arch.txt`
+- `README.md`
 
 **R16.2**: Windows package MUST include:
-- alpine-vm.vhdx (Hyper-V disk)
-- start.ps1 (Hyper-V startup script)
-- vm-config.json (default: 2 CPUs, 2GB RAM)
-- README.md
+- `exasol-vm.vhdx` (Hyper-V disk)
+- `vm-config.json` (default: 2 CPUs, 2GB RAM)
+- `start.ps1` (Hyper-V startup script)
+- `arch.txt`
+- `README.md`
+
+**R16.1**: The Linux package MUST include:
+- `disk.img` (raw disk)
+- `vm-config.json` (default: 2 CPUs, 2GB RAM)
+- `vmlinuz-virt`
+- `initramfs.img.zst`
+- `kernel-cmdline.txt`
+- `Containerfile`
+- `start.sh`
+- `arch.txt`
+- `README.md`
 
 **R16.3**: Packages MUST be compressed to .tar.xz format
 
@@ -450,38 +453,24 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 
 ### R18: Development Requirements
 
-**R18.1**: Development environment MUST use QEMU with:
+**R18.1**: Development environment must use podman containers to manage resource cleanup and dependencies.
+
+**R18.2**: Development environment MUST use QEMU with:
 - virtiofsd for folder sharing
 - Background tail for log monitoring
 - Attached mode for debugging (Ctrl-A X to exit)
 
-**R18.2**: Development cycle MUST support:
+**R18.3**: Development cycle MUST support:
 - task start-vm (normal mode)
 - task start-vm-attached (debugging mode)
 - task stop-vm (graceful shutdown, 5 minute timeout)
 - task connect (SSH to VM)
 
-**R18.3**: Resource configuration MUST be customizable via vm-config.json in buildvm directory
+**R18.4**: Resource configuration MUST be customizable via vm-config.json in buildvm directory
 
 ### R19: Dependencies
 
-**R19.1**: Build-time dependencies:
-- qemu-system-x86 (x86_64 support)
-- qemu-system-aarch64 (ARM64 support)
-- qemu-utils (qemu-img)
-- qemu-efi-aarch64 (ARM64 firmware)
-- ovmf (x86_64 firmware)
-- wget (image download)
-- genisoimage (cloud-init ISO)
-- parted (partition management)
-- e2fsprogs (ext4 tools)
-- bc (calculations)
-- xz-utils (compression)
-- virtiofsd (folder sharing)
-- uidmap (user namespaces)
-- podman (container building)
-- jq (JSON parsing in QEMU scripts)
-- gdisk (GPT repair)
+**R19.1**: Build-time dependencies MUST be managed using podman containers
 
 **R19.2**: Runtime dependencies (development):
 - QEMU system emulator
@@ -498,10 +487,7 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 
 **R20.1**: Taskfile.yml MUST define all build and test tasks
 
-**R20.2**: build-config.yaml MUST define platform configurations:
-- Image URLs
-- Target OS
-- Architecture mappings
+**R20.2**: `container/Containerfile` MUST define the guest image contents and enabled guest services.
 
 **R20.3**: vm-config.json (buildvm root) MAY customize development resources
 
@@ -509,10 +495,7 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 
 **R20.5**: .gitignore MUST exclude:
 - Generated disk images
-- VM runtime files (PIDs, sockets, logs)
-- SSH keys
 - Package and release directories
-- Cloud-init ISO
 
 ### R21: Error Handling
 
@@ -551,13 +534,11 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 
 **R23.1**: VM MUST run with minimal privileges where possible
 
-**R23.2**: SSH keys MUST be generated per-build (not reused)
+**R23.2**: Secure Boot MUST be disabled (Alpine kernel not signed)
 
-**R23.3**: Secure Boot MUST be disabled (Alpine kernel not signed)
+**R23.3**: Containers MUST run as root inside VM (isolated from host)
 
-**R23.4**: Containers MUST run as root inside VM (isolated from host)
-
-**R23.5**: SSH password authentication MUST be disabled
+**R23.4**: SSH password authentication MUST be disabled
 
 ### R24: Performance
 
@@ -612,6 +593,12 @@ The system MUST NOT include Kubernetes, Docker Swarm, or other orchestration too
 ### NR7: Persistent Storage Beyond Container Data
 The system MUST NOT provide mechanisms for additional persistent volumes. Only /data directory is persistent.
 
+### NR8: Cloud-Init Build Path
+The active build MUST NOT depend on cloud-init or a temporary initialization VM.
+
+### NR9: Embedded Application Payload
+The VM image MUST NOT include a preloaded application container by default.
+
 ## Future Considerations
 
 ### F1: Separate Init/Runtime Shared Directories
@@ -634,3 +621,6 @@ Create comprehensive documentation for the container loading system.
 
 ### F7: Build Profiles
 Implement named build profiles for different use cases (development, production, minimal).
+
+### F8: Hyper-V Shared Storage
+Implement and document a supported Hyper-V host-sharing mechanism if Windows needs parity with the Linux and macOS shared-folder flow.

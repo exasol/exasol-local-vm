@@ -5,7 +5,6 @@ description="Import SSH keys from shared folder"
 
 depend() {
   need localmount
-  after networking
   before sshd
 }
 
