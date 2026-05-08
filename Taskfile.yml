@@ -205,3 +205,23 @@ tasks:
     cmds:
       - task: stop-vm
       - git clean -Xf .
+
+  build-windows-runner:
+    desc: Build windows vm-launcher executable with embedded disk image
+    dir: /launcher/windows
+    env:
+      GOOS: windows
+      GOARCH: amd64
+    cmds:
+      - cp ../release/windows-x86_64.tar.xz disk.tar.xz
+      - go build -o vm-launcher.exe
+  
+  build-mac-runner:
+    desc: Build mac vm-launcher executable with embedded disk image
+    dir: /launcher/mac
+    env:
+      GOOS: darwin
+      GOARCH: arm64
+    cmds:
+      - cp ../release/macos-arm64.tar.xz disk.tar.xz
+      - go build -o vm-launcher
