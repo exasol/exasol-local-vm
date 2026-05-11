@@ -19,7 +19,7 @@ RUN apk upgrade -aU \
 
 ### Configure podman
 
-COPY --link <<-'EOF' /etc/containers/storage.conf
+COPY --link <<'EOF' /etc/containers/storage.conf
 [storage]
 driver = "overlay"
 runroot = "/run/containers/storage"
@@ -35,7 +35,7 @@ RUN echo 'containers:100000:65536' | tee /etc/subuid /etc/subgid
 ### Add exasol user
 
 RUN setup-user -a -u exasol
-COPY --link --chmod=600 <<-'EOF' /etc/doas.d/99-exasol.conf
+COPY --link --chmod=600 <<'EOF' /etc/doas.d/99-exasol.conf
 permit nopass :wheel
 EOF
 
@@ -49,7 +49,7 @@ EOF
 # Annoyingly we need to rewrite inittab for this
 # I don't really understand exactly how the serial console stuff works. We might
 # have to add some different ones here at some point.
-COPY --link <<-'EOF' /etc/inittab
+COPY --link <<'EOF' /etc/inittab
 # defaults
 
 ::sysinit:/sbin/openrc sysinit
@@ -70,7 +70,7 @@ EOF
 COPY --link init /init
 
 # TODO mount /mnt/host from Hyper-V data disk for windows
-COPY --link <<-'EOF' /etc/fstab
+COPY --link <<'EOF' /etc/fstab
 LABEL=exasol-data   /var        ext4       defaults          0 2
 hostshare           /mnt/host   virtiofs   defaults,nofail   0 0
 EOF
