@@ -19,61 +19,29 @@ RUN apk upgrade -aU \
 
 ### Configure podman
 
-COPY --link <<'EOF' /etc/containers/storage.conf
-[storage]
-driver = "overlay"
-runroot = "/run/containers/storage"
-graphroot = "/var/lib/containers/storage"
-
-[storage.options.overlay]
-mount_program = "/usr/bin/fuse-overlayfs"
-mountopt = "nodev"
-EOF
+COPY --link containers_storage.conf /etc/containers/storage.conf
 
 RUN echo 'containers:100000:65536' | tee /etc/subuid /etc/subgid
 
 ### Add exasol user
 
 RUN setup-user -a -u exasol
-COPY --link --chmod=600 <<'EOF' /etc/doas.d/99-exasol.conf
-permit nopass :wheel
-EOF
+COPY --link --chmod=600 doas_exasol.conf /etc/doas.d/99-exasol.conf
 
 
 ### Enable serial console
 ### Enable autologin for exasol user
 #
-# This isn't technically required as our automation will work over the shared
-# directory and ssh, but it's quite nice for debugging.
-#
-# Annoyingly we need to rewrite inittab for this
 # I don't really understand exactly how the serial console stuff works. We might
-# have to add some different ones here at some point.
-COPY --link <<'EOF' /etc/inittab
-# defaults
-
-::sysinit:/sbin/openrc sysinit
-::sysinit:/sbin/openrc boot
-::wait:/sbin/openrc default
-
-::ctrlaltdel:/sbin/reboot
-::shutdown:/sbin/openrc shutdown
-
-# tty1 is nice to have for some graphical vm interfaces
-# hvc0 is virtio_console, which all hypervisors should support
-tty1::respawn:/sbin/agetty --noclear --autologin exasol tty1
-hvc0::respawn:/sbin/agetty --noclear --autologin exasol hvc0
-EOF
+# have to add some different ttys at some point.
+COPY --link inittab /etc/inittab
 
 ### VM startup scripts
 
 COPY --link init /init
 
 # TODO mount /mnt/host from Hyper-V data disk for windows
-COPY --link <<'EOF' /etc/fstab
-LABEL=exasol-data   /var        ext4       defaults          0 2
-hostshare           /mnt/host   virtiofs   defaults,nofail   0 0
-EOF
+COPY --link fstab /etc/fstab
 
 COPY --link exasol-network /etc/init.d/exasol-network
 COPY --link grow-var-fs.initd.sh /etc/init.d/grow-var-fs
