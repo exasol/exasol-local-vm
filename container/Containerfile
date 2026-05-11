@@ -2,31 +2,20 @@ FROM alpine AS base
 
 ### Install dependencies
 
-RUN apk upgrade -aU
-
-RUN <<-'EOF'
-set -eu
-apk add alpine-base
-
-apk add openssh
-
-# Needed to handle poweroff signal from the vm manager
-apk add acpid
-
-# Needed to auto-grow /var partition
-apk add cloud-utils-growpart e2fsprogs e2fsprogs-extra
-
-# podman needs iptables but it's not pulled in for some reason?
-apk add podman fuse-overlayfs slirp4netns shadow-uidmap iptables
-
-# Needed to read the podman container manifest
-apk add jq
-
-# Needed for autologin on some ttys
-apk add agetty
-
-apk add linux-virt
-EOF
+RUN apk upgrade -aU \
+  && apk add alpine-base \
+  && apk add openssh \
+  # Needed to handle poweroff signal from the vm manager
+  && apk add acpid \
+  # Needed to auto-grow /var partition
+  && apk add cloud-utils-growpart e2fsprogs e2fsprogs-extra \
+  # podman needs iptables but it's not pulled in for some reason?
+  && apk add podman fuse-overlayfs slirp4netns shadow-uidmap iptables \
+  # Needed to read the podman container manifest
+  && apk add jq \
+  # Needed for autologin on some ttys
+  && apk add agetty \
+  && apk add linux-virt
 
 ### Configure podman
 
@@ -41,10 +30,7 @@ mount_program = "/usr/bin/fuse-overlayfs"
 mountopt = "nodev"
 EOF
 
-RUN tee /etc/subuid /etc/subgid <<-'EOF'
-containers:100000:65536
-EOF
-
+RUN echo 'containers:100000:65536' | tee /etc/subuid /etc/subgid
 
 ### Add exasol user
 
@@ -100,14 +86,12 @@ COPY --link load-shared-container.sh /usr/local/bin/load-shared-container.sh
 # https://github.com/alpinelinux/alpine-make-vm-image/blob/ab659ff532b0e27684a08d11df116b9f7665081a/alpine-make-vm-image#L685-L694
 #
 # Adds our custom services
-RUN --mount=type=bind,target=/host/ <<-"EOF"
-set -eu
-/host/rc_add sysinit  devfs dmesg mdev hwdrivers
-/host/rc_add boot     exasol-network import-shared-keys grow-var-fs load-shared-container
-/host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking
-/host/rc_add default  acpid sshd
-/host/rc_add shutdown killprocs savecache mount-ro
-EOF
+RUN --mount=type=bind,target=/host/ true \
+  && /host/rc_add sysinit  devfs dmesg mdev hwdrivers \
+  && /host/rc_add boot     exasol-network import-shared-keys grow-var-fs load-shared-container \
+  && /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking \
+  && /host/rc_add default  acpid sshd \
+  && /host/rc_add shutdown killprocs savecache mount-ro
 
 
 ### Clean up to minimize image
