@@ -9,9 +9,14 @@ IMG_ARCH="${1}"
 shift
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RAW_DISK="$ROOT_DIR/output/${IMG_ARCH}/disk.img"
-ARCH_FILE="$ROOT_DIR/output/${IMG_ARCH}/arch.txt"
-#VFKIT_SCRIPT="$ROOT_DIR/host/run/start-vfkit.sh"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/${IMG_ARCH}}"
+
+RAW_DISK="$OUTPUT_DIR/disk_thin.img"
+KERNEL_FILE="$OUTPUT_DIR/vmlinuz-virt"
+INITRD_FILE="$OUTPUT_DIR/initramfs.img.zst"
+KERNEL_CMDLINE_FILE="$OUTPUT_DIR/kernel-cmdline.txt"
+
+ARCH_FILE="$OUTPUT_DIR/arch.txt"
 VM_CONFIG="$ROOT_DIR/host/run/vm-config.json"
 GVPROXY_VERSION="v0.8.8"
 GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/download/${GVPROXY_VERSION}/gvproxy-darwin"
@@ -38,10 +43,10 @@ RELEASE_FILE="$ROOT_DIR/release/$PACKAGE_NAME.tar.xz"
 
 mkdir -p "$PACKAGE_DIR" "$ROOT_DIR/release"
 cp "$RAW_DISK" "$PACKAGE_DIR/exasol-vm.img"
-# TODO REMOVE cp "$ARCH_FILE" "$PACKAGE_DIR/arch.txt"
 cp "$VM_CONFIG" "$PACKAGE_DIR/vm-config.json"
-# TODO REMOVE cp "$VFKIT_SCRIPT" "$PACKAGE_DIR/start.sh"
-# TODO REMOVE chmod +x "$PACKAGE_DIR/start.sh"
+cp "$KERNEL_FILE" "$PACKAGE_DIR/vmlinuz-virt"
+cp "$INITRD_FILE" "$PACKAGE_DIR/initramfs.img.zst"
+cp "$KERNEL_CMDLINE_FILE" "$PACKAGE_DIR/kernel-cmdline.txt"
 
 curl -fSL -o "$PACKAGE_DIR/gvproxy" "$GVPROXY_URL"
 chmod +x "$PACKAGE_DIR/gvproxy"
