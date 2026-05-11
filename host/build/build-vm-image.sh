@@ -19,7 +19,7 @@ KERNEL_CMDLINE="${KERNEL_CMDLINE:-}"
 
 # Outputs
 KERNEL_FILE="${ARTIFACT_DIR}/vmlinuz-virt"
-INITRAMFS_FILE="${ARTIFACT_DIR}/initramfs.img.zst"
+INITRAMFS_FILE="${ARTIFACT_DIR}/initramfs.img"
 RAW_DISK_FILE="${ARTIFACT_DIR}/disk.img"
 RAW_DISK_THIN_FILE="${ARTIFACT_DIR}/disk_thin.img"
 VHDX_FILE="${ARTIFACT_DIR}/disk.vhdx"
@@ -64,8 +64,7 @@ cp "${IMAGE_KERNEL}" "${KERNEL_FILE}"
 
 pushd "${IMAGE_DIR}"
 find . -xdev -not -path './boot/*' -not -path './var/*' |
-    cpio --quiet -H newc -o |
-    zstdmt -9 \
+    cpio --quiet -H newc -o \
         >"${INITRAMFS_FILE}"
 popd
 

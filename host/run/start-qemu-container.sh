@@ -43,7 +43,7 @@ check_vm_artifacts() {
         "$OUTPUT_DIR/disk.img" \
         "$OUTPUT_DIR/arch.txt" \
         "$OUTPUT_DIR/vmlinuz-virt" \
-        "$OUTPUT_DIR/initramfs.img.zst" \
+        "$OUTPUT_DIR/initramfs.img" \
         "$OUTPUT_DIR/kernel-cmdline.txt"; do
         if [ ! -f "$artifact" ]; then
             echo "Error: required VM artifact is missing: $artifact" >&2

@@ -48,14 +48,12 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 - `arch.txt`: text file with the build architecture
 - `kernel-cmdline.txt`: text file containing the kernel commandline
 - `vmlinuz-virt`: kernel binary
-- `initramfs.img.zst`: compressed iniramfs
+- `initramfs.img`: initramfs
 - `disk_thin.img`: "thin" disk image in raw format
 - `disk.img`: "fat" disk image in raw format
 - `disk.vhdx`: "fat" disk image in vhdx format
 
-**R3.4**: The initramfs MUST be compressed with zstdandard
-
-**R3.5**: The initramfs MUST contain all contenS of the guest image excluding `/boot` and `/var`
+**R3.4**: The initramfs MUST contain all contenS of the guest image excluding `/boot` and `/var`
 
 **R3.6**: The "fat" disk images MUST contain:
 - A boot EFI system partition with the kernel, initrd and commandline packed into a unified kernel image
@@ -407,7 +405,7 @@ The VM is branded as "Exasol VM" for end users, with technical references to Alp
 - `disk.img` (raw disk)
 - `vm-config.json` (default: 2 CPUs, 2GB RAM)
 - `vmlinuz-virt`
-- `initramfs.img.zst`
+- `initramfs.img`
 - `kernel-cmdline.txt`
 - `Containerfile`
 - `start.sh`
