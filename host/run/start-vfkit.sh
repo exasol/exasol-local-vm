@@ -3,13 +3,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISK_IMG="$SCRIPT_DIR/exasol-vm.img"
+KERNEL_FILE="$SCRIPT_DIR/vmlinuz-virt"
+INITRAMFS_FILE="$SCRIPT_DIR/initramfs.img"
+KERNEL_CMDLINE_FILE="$SCRIPT_DIR/kernel-cmdline.txt"
 VM_CONFIG="$SCRIPT_DIR/vm-config.json"
 GVPROXY_BIN="$SCRIPT_DIR/gvproxy"
 VFKIT_PID_FILE="$SCRIPT_DIR/vfkit.pid"
 GVPROXY_PID_FILE="$SCRIPT_DIR/gvproxy.pid"
 VFKIT_SOCK="$SCRIPT_DIR/vfkit.sock"
 GVPROXY_API_SOCK="$SCRIPT_DIR/gvproxy.sock"
-EFI_STORE="$SCRIPT_DIR/efi-variable-store"
 VFKIT_LOG="$SCRIPT_DIR/vfkit.log"
 CONSOLE_LOG="$SCRIPT_DIR/vm-console.log"
 VM_MAC="5a:94:ef:e4:0c:ee"
@@ -20,6 +22,21 @@ SHARED_DIR="${3:-}"
 
 if [ ! -f "$DISK_IMG" ]; then
     echo "Error: disk image not found: $DISK_IMG"
+    exit 1
+fi
+
+if [ ! -f "$KERNEL_FILE" ]; then
+    echo "Error: kernel not found: $KERNEL_FILE"
+    exit 1
+fi
+
+if [ ! -f "$INITRAMFS_FILE" ]; then
+    echo "Error: initramfs not found: $INITRAMFS_FILE"
+    exit 1
+fi
+
+if [ ! -f "$KERNEL_CMDLINE_FILE" ]; then
+    echo "Error: kernel cmdline not found: $KERNEL_CMDLINE_FILE"
     exit 1
 fi
 
@@ -79,7 +96,7 @@ done
 VFKIT_ARGS=(
     --cpus "$VM_CPUS"
     --memory "$VM_MEMORY"
-    --bootloader "efi,variable-store=$EFI_STORE,create"
+    --bootloader "linux,kernel=$KERNEL_FILE,initrd=$INITRAMFS_FILE,cmdline=$(cat "$KERNEL_CMDLINE_FILE")"
     --device "virtio-blk,path=$DISK_IMG"
     --device "virtio-net,unixSocketPath=$VFKIT_SOCK,mac=$VM_MAC"
     --device virtio-rng

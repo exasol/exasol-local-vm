@@ -1,6 +1,3 @@
-
-//go:generate sh -c 'cp "$DISK_IMG" disk.tar.xz'
-
 package main
 
 import (
@@ -23,8 +20,8 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-//go:embed disk.tar.xz
-var disk_img []byte
+//go:embed vm-package.tar.xz
+var vmPackage []byte
 
 func main() {
 	if len(os.Args) < 2 {
@@ -68,10 +65,17 @@ func main() {
 
 func initCmd() {
 	fmt.Println("Initializing VM...")
-	fmt.Println("Extracting disk image...")
+	fmt.Println("Extracting VM package...")
+
+	// Create vm directory
+	vmDir := "vm"
+	if err := os.MkdirAll(vmDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create vm directory: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Create a reader from the embedded data
-	bytesReader := bytes.NewReader(disk_img)
+	bytesReader := bytes.NewReader(vmPackage)
 
 	// Create xz decompressor
 	xzReader, err := xz.NewReader(bytesReader)
@@ -83,48 +87,65 @@ func initCmd() {
 	// Create tar reader
 	tarReader := tar.NewReader(xzReader)
 
-	// Extract the first file from the tar archive (the disk image)
-	header, err := tarReader.Next()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read tar header: %v\n", err)
-		os.Exit(1)
-	}
+	// Extract all files from the archive
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to read tar header: %v\n", err)
+			os.Exit(1)
+		}
 
-	// Create output file in the working directory
-	outputPath := header.Name
-	outFile, err := os.Create(outputPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create output file: %v\n", err)
-		os.Exit(1)
-	}
-	defer outFile.Close()
+		// Construct output path in vm directory
+		// The archive contains mac-arm64/files, we want to extract to vm/files
+		relPath := header.Name
+		// Strip the first directory component (mac-arm64 or mac-x86_64)
+		parts := strings.SplitN(relPath, "/", 2)
+		if len(parts) < 2 {
+			continue // Skip the top-level directory entry
+		}
+		outputPath := filepath.Join(vmDir, parts[1])
 
-	// Copy the disk image data to the output file
-	written, err := io.Copy(outFile, tarReader)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to extract disk image: %v\n", err)
-		os.Exit(1)
-	}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(outputPath, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to create directory %s: %v\n", outputPath, err)
+				os.Exit(1)
+			}
+		case tar.TypeReg:
+			// Ensure parent directory exists
+			parentDir := filepath.Dir(outputPath)
+			if err := os.MkdirAll(parentDir, 0755); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to create parent directory: %v\n", err)
+				os.Exit(1)
+			}
 
-	fmt.Printf("Successfully extracted %s (%d bytes)\n", outputPath, written)
+			outFile, err := os.Create(outputPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to create output file %s: %v\n", outputPath, err)
+				os.Exit(1)
+			}
 
-	// Create vm-config.json with disk image path
-	config := map[string]string{
-		"disk_img": outputPath,
-	}
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				outFile.Close()
+				fmt.Fprintf(os.Stderr, "Failed to extract file %s: %v\n", outputPath, err)
+				os.Exit(1)
+			}
+			outFile.Close()
 
-	configData, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to marshal config: %v\n", err)
-		os.Exit(1)
-	}
+			// Preserve executable permissions if set
+			if header.Mode&0111 != 0 {
+				os.Chmod(outputPath, 0755)
+			}
 
-	if err := os.WriteFile("vm-config.json", configData, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to write vm-config.json: %v\n", err)
-		os.Exit(1)
+			fmt.Printf("Extracted: %s\n", outputPath)
+		}
 	}
 
 	fmt.Println("Successfully initialized VM")
+	fmt.Printf("VM files extracted to: %s/\n", vmDir)
 	fmt.Println("Run 'mac-runner start <cpu_count> <ram_size> [shared_dir]' to start the VM")
 }
 
@@ -133,6 +154,13 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) {
 		fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, shared_dir=%s\n", cpuCountStr, ramSizeStr, sharedDir)
 	} else {
 		fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s\n", cpuCountStr, ramSizeStr)
+	}
+
+	// Check if VM has been initialized
+	vmDir := "vm"
+	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "VM not initialized. Run 'mac-runner init' first.\n")
+		os.Exit(1)
 	}
 
 	// Check if VM is already running
@@ -231,39 +259,85 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) {
 		os.Exit(1)
 	}
 
-	// Read vm-config.json
-	configData, err := os.ReadFile("vm-config.json")
+	// Use files from vm/ directory
+	vmDir := "vm"
+	kernelPath := filepath.Join(vmDir, "vmlinuz-virt")
+	initramfsPath := filepath.Join(vmDir, "initramfs.img")
+	diskPath := filepath.Join(vmDir, "disk_thin.img")
+	cmdlinePath := filepath.Join(vmDir, "kernel-cmdline.txt")
+
+	// Get absolute paths for all VM files
+	kernelPath, err = filepath.Abs(kernelPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read vm-config.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to get absolute path for kernel: %v\n", err)
 		os.Exit(1)
 	}
 
-	var vmConfig map[string]string
-	if err := json.Unmarshal(configData, &vmConfig); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse vm-config.json: %v\n", err)
+	initramfsPath, err = filepath.Abs(initramfsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get absolute path for initramfs: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Get absolute path for disk image
-	diskPath, err := filepath.Abs(vmConfig["disk_img"])
+	diskPath, err = filepath.Abs(diskPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to get absolute path for disk: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Check if disk image exists
+	cmdlinePath, err = filepath.Abs(cmdlinePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get absolute path for cmdline: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check if all files exist
+	if _, err := os.Stat(kernelPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Kernel not found: %s\n", kernelPath)
+		os.Exit(1)
+	}
+	if _, err := os.Stat(initramfsPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Initramfs not found: %s\n", initramfsPath)
+		os.Exit(1)
+	}
 	if _, err := os.Stat(diskPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Disk image not found: %s\n", diskPath)
 		os.Exit(1)
 	}
+	if _, err := os.Stat(cmdlinePath); err != nil {
+		fmt.Fprintf(os.Stderr, "Kernel cmdline not found: %s\n", cmdlinePath)
+		os.Exit(1)
+	}
+
+	// Read kernel command line
+	cmdlineData, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read kernel cmdline: %v\n", err)
+		os.Exit(1)
+	}
+	cmdline := strings.TrimSpace(string(cmdlineData))
 
 	fmt.Println("Creating VM configuration...")
 
-	// Create bootloader (EFI)
-	bootLoader, err := vz.NewEFIBootLoader()
+	// Create bootloader (Linux direct boot)
+	bootLoader, err := vz.NewLinuxBootLoader(kernelPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create EFI bootloader: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to create Linux bootloader: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Set initramfs
+	if err := bootLoader.SetInitialRamdiskPath(initramfsPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set initramfs: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Set kernel command line
+	if cmdline != "" {
+		if err := bootLoader.SetCommandLine(cmdline); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to set kernel cmdline: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Create disk attachment

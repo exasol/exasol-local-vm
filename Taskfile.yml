@@ -36,7 +36,7 @@ tasks:
       - test -f output/{{.IMG_ARCH}}/disk_thin.img
       - test -f output/{{.IMG_ARCH}}/arch.txt
       - test -f output/{{.IMG_ARCH}}/vmlinuz-virt
-      - test -f output/{{.IMG_ARCH}}/initramfs.img.zst
+      - test -f output/{{.IMG_ARCH}}/initramfs.img
       - test -f output/{{.IMG_ARCH}}/kernel-cmdline.txt
     cmds:
       - task: build
@@ -171,6 +171,16 @@ tasks:
     cmds:
       - ./host/package/package-mac.sh "{{.IMG_ARCH}}"
 
+  build-mac-launcher:
+    desc: Build the macOS launcher binary (must be run on macOS)
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [aarch64, x86_64]
+    cmds:
+      - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
+
   package-windows:
     desc: Package the VHDX disk for Windows/Hyper-V users
     run: when_changed
@@ -206,23 +216,3 @@ tasks:
     cmds:
       - task: stop-vm
       - git clean -Xf .
-
-  build-windows-runner:
-    desc: Build windows vm-launcher executable with embedded disk image
-    dir: /launcher/windows
-    env:
-      GOOS: windows
-      GOARCH: amd64
-    cmds:
-      - cp ../release/windows-x86_64.tar.xz disk.tar.xz
-      - go build -o vm-launcher.exe
-  
-  build-mac-runner:
-    desc: Build mac vm-launcher executable with embedded disk image
-    dir: /launcher/mac
-    env:
-      GOOS: darwin
-      GOARCH: arm64
-    cmds:
-      - cp ../release/macos-arm64.tar.xz disk.tar.xz
-      - go build -o vm-launcher
