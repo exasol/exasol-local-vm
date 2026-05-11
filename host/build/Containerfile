@@ -12,5 +12,5 @@ RUN dnf install -y \
     zstd && \
     dnf clean all
 
-COPY --link /build-vm-image.sh /build-vm-image.sh
+COPY /build-vm-image.sh /build-vm-image.sh
 ENTRYPOINT ["/build-vm-image.sh"]
