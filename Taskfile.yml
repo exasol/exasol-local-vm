@@ -6,7 +6,8 @@ tasks:
     run: once
     cmds:
       - sudo apt-get update
-      - sudo apt-get install -y jq podman xz-utils
+      - sudo apt-get install -y jq podman xz-utils qemu-user-static
+      - sudo systemctl restart systemd-binfmt
 
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages for {{.IMG_ARCH}}

@@ -4,54 +4,34 @@ FROM alpine AS base
 
 RUN apk upgrade -aU
 
-RUN <<-'EOF'
-set -eu
-apk add alpine-base
-
-apk add openssh
-
-# Needed to handle poweroff signal from the vm manager
-apk add acpid
-
-# Needed to auto-grow /var partition
-apk add cloud-utils-growpart e2fsprogs e2fsprogs-extra
-
-# podman needs iptables but it's not pulled in for some reason?
-apk add podman fuse-overlayfs slirp4netns shadow-uidmap iptables
-
-# Needed to read the podman container manifest
-apk add jq
-
-# Needed for autologin on some ttys
-apk add agetty
-
-apk add linux-virt
-EOF
+RUN apk add \
+    alpine-base \
+    openssh \
+    acpid \
+    cloud-utils-growpart \
+    e2fsprogs \
+    e2fsprogs-extra \
+    podman \
+    fuse-overlayfs \
+    slirp4netns \
+    shadow-uidmap \
+    iptables \
+    jq \
+    agetty \
+    linux-virt
 
 ### Configure podman
 
-COPY --link <<-'EOF' /etc/containers/storage.conf
-[storage]
-driver = "overlay"
-runroot = "/run/containers/storage"
-graphroot = "/var/lib/containers/storage"
+RUN printf '[storage]\ndriver = "overlay"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\nmountopt = "nodev"\n' > /etc/containers/storage.conf
 
-[storage.options.overlay]
-mount_program = "/usr/bin/fuse-overlayfs"
-mountopt = "nodev"
-EOF
-
-RUN tee /etc/subuid /etc/subgid <<-'EOF'
-containers:100000:65536
-EOF
+RUN echo 'containers:100000:65536' | tee /etc/subuid /etc/subgid
 
 
 ### Add exasol user
 
 RUN setup-user -a -u exasol
-COPY --link --chmod=600 <<-'EOF' /etc/doas.d/99-exasol.conf
-permit nopass :wheel
-EOF
+
+RUN printf 'permit nopass :wheel\n' > /etc/doas.d/99-exasol.conf && chmod 600 /etc/doas.d/99-exasol.conf
 
 
 ### Enable serial console
@@ -63,51 +43,33 @@ EOF
 # Annoyingly we need to rewrite inittab for this
 # I don't really understand exactly how the serial console stuff works. We might
 # have to add some different ones here at some point.
-COPY --link <<-'EOF' /etc/inittab
-# defaults
-
-::sysinit:/sbin/openrc sysinit
-::sysinit:/sbin/openrc boot
-::wait:/sbin/openrc default
-
-::ctrlaltdel:/sbin/reboot
-::shutdown:/sbin/openrc shutdown
-
-# tty1 is nice to have for some graphical vm interfaces
-# hvc0 is virtio_console, which all hypervisors should support
-tty1::respawn:/sbin/agetty --noclear --autologin exasol tty1
-hvc0::respawn:/sbin/agetty --noclear --autologin exasol hvc0
-EOF
+RUN printf '# defaults\n\n::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\n\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n\n# tty1 is nice to have for some graphical vm interfaces\n# hvc0 is virtio_console, which all hypervisors should support\ntty1::respawn:/sbin/agetty --noclear --autologin exasol tty1\nhvc0::respawn:/sbin/agetty --noclear --autologin exasol hvc0\n' > /etc/inittab
 
 ### VM startup scripts
 
-COPY --link init /init
+COPY init /init
 
 # TODO mount /mnt/host from Hyper-V data disk for windows
-COPY --link <<-'EOF' /etc/fstab
-LABEL=exasol-data   /var        ext4       defaults          0 2
-hostshare           /mnt/host   virtiofs   defaults,nofail   0 0
-EOF
+RUN printf 'LABEL=exasol-data   /var        ext4       defaults          0 2\nhostshare           /mnt/host   virtiofs   defaults,nofail   0 0\n' > /etc/fstab
 
-COPY --link exasol-network /etc/init.d/exasol-network
-COPY --link grow-var-fs.initd.sh /etc/init.d/grow-var-fs
-COPY --link import-shared-keys.initd.sh /etc/init.d/import-shared-keys
-COPY --link import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
-COPY --link load-shared-container.initd.sh /etc/init.d/load-shared-container
-COPY --link load-shared-container.sh /usr/local/bin/load-shared-container.sh
+COPY exasol-network /etc/init.d/exasol-network
+COPY grow-var-fs.initd.sh /etc/init.d/grow-var-fs
+COPY import-shared-keys.initd.sh /etc/init.d/import-shared-keys
+COPY import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
+COPY load-shared-container.initd.sh /etc/init.d/load-shared-container
+COPY load-shared-container.sh /usr/local/bin/load-shared-container.sh
 
 # Enables the same services that the default alpine vm image enables:
 # https://github.com/alpinelinux/alpine-make-vm-image/blob/ab659ff532b0e27684a08d11df116b9f7665081a/alpine-make-vm-image#L685-L694
 #
 # Adds our custom services
-RUN --mount=type=bind,target=/host/ <<-"EOF"
-set -eu
-/host/rc_add sysinit  devfs dmesg mdev hwdrivers
-/host/rc_add boot     exasol-network import-shared-keys grow-var-fs load-shared-container
-/host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking
-/host/rc_add default  acpid sshd
-/host/rc_add shutdown killprocs savecache mount-ro
-EOF
+RUN --mount=type=bind,target=/host/ sh -c '\
+    set -eu && \
+    /host/rc_add sysinit  devfs dmesg mdev hwdrivers && \
+    /host/rc_add boot     exasol-network import-shared-keys grow-var-fs load-shared-container && \
+    /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking && \
+    /host/rc_add default  acpid sshd && \
+    /host/rc_add shutdown killprocs savecache mount-ro'
 
 
 ### Clean up to minimize image
