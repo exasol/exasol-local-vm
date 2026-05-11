@@ -18,9 +18,9 @@ RUN apt-get update \
     && apt-get -y --no-install-recommends install curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --link vm-config.json /etc/exasol-nano-vm/vm-config.json
+COPY vm-config.json /etc/exasol-nano-vm/vm-config.json
 
-COPY --link run-qemu.sh /usr/local/bin/run-exasol-vm
+COPY run-qemu.sh /usr/local/bin/run-exasol-vm
 
 RUN chmod +x /usr/local/bin/run-exasol-vm
 

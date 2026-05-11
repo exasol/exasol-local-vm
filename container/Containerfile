@@ -19,14 +19,14 @@ RUN apk upgrade -aU \
 
 ### Configure podman
 
-COPY --link containers_storage.conf /etc/containers/storage.conf
+COPY containers_storage.conf /etc/containers/storage.conf
 
 RUN echo 'containers:100000:65536' | tee /etc/subuid /etc/subgid
 
 ### Add exasol user
 
 RUN setup-user -a -u exasol
-COPY --link --chmod=600 doas_exasol.conf /etc/doas.d/99-exasol.conf
+COPY --chmod=600 doas_exasol.conf /etc/doas.d/99-exasol.conf
 
 
 ### Enable serial console
@@ -34,21 +34,21 @@ COPY --link --chmod=600 doas_exasol.conf /etc/doas.d/99-exasol.conf
 #
 # I don't really understand exactly how the serial console stuff works. We might
 # have to add some different ttys at some point.
-COPY --link inittab /etc/inittab
+COPY inittab /etc/inittab
 
 ### VM startup scripts
 
-COPY --link init /init
+COPY init /init
 
 # TODO mount /mnt/host from Hyper-V data disk for windows
-COPY --link fstab /etc/fstab
+COPY fstab /etc/fstab
 
-COPY --link exasol-network /etc/init.d/exasol-network
-COPY --link grow-var-fs.initd.sh /etc/init.d/grow-var-fs
-COPY --link import-shared-keys.initd.sh /etc/init.d/import-shared-keys
-COPY --link import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
-COPY --link load-shared-container.initd.sh /etc/init.d/load-shared-container
-COPY --link load-shared-container.sh /usr/local/bin/load-shared-container.sh
+COPY exasol-network /etc/init.d/exasol-network
+COPY grow-var-fs.initd.sh /etc/init.d/grow-var-fs
+COPY import-shared-keys.initd.sh /etc/init.d/import-shared-keys
+COPY import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
+COPY load-shared-container.initd.sh /etc/init.d/load-shared-container
+COPY load-shared-container.sh /usr/local/bin/load-shared-container.sh
 
 # Enables the same services that the default alpine vm image enables:
 # https://github.com/alpinelinux/alpine-make-vm-image/blob/ab659ff532b0e27684a08d11df116b9f7665081a/alpine-make-vm-image#L685-L694
