@@ -66,6 +66,18 @@ jobs:
       - name: Test macOS launcher with SSH keys
         run: task test-ssh-keys-mac IMG_ARCH=aarch64
       
+      - name: Upload VM logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-vm-logs
+          path: |
+            vm.log
+            vm-console.log
+            vm-state.json
+          if-no-files-found: warn
+          retention-days: 7
+      
       - name: Verify launcher binary
         run: |
           ls -lh release/mac-runner-*
