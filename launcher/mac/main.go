@@ -29,9 +29,10 @@ var vmPackage []byte
 const (
 	// guestIPv4 is the expected IP for the first VM in Virtualization.framework NAT
 	// The actual IP is detected at runtime by parsing console output
-	guestIPv4    = "192.168.64.2"
-	guestSSHPort = 22
-	hostSSHPort  = 2222
+	guestIPv4       = "192.168.64.2"
+	guestSSHPort    = 22
+	guestDBPort     = 8563  // Exasol database SQL port
+	guestUIPort     = 8443  // Exasol web UI port (HTTPS)
 )
 
 // LoopbackForwarder forwards TCP connections from host to guest
@@ -45,6 +46,7 @@ type LoopbackForwarder struct {
 }
 
 // StartLoopbackForwarder starts a TCP proxy from hostPort to guestHost:guestPort
+// If hostPort is 0, the OS will allocate a free port dynamically
 func StartLoopbackForwarder(ctx context.Context, hostPort int, guestHost string, guestPort int) (*LoopbackForwarder, error) {
 	listener, err := (&net.ListenConfig{}).Listen(
 		ctx,
@@ -64,6 +66,14 @@ func StartLoopbackForwarder(ctx context.Context, hostPort int, guestHost string,
 	go forwarder.acceptLoop(ctx)
 
 	return forwarder, nil
+}
+
+// Port returns the actual host port being listened on
+func (f *LoopbackForwarder) Port() int {
+	if addr, ok := f.listener.Addr().(*net.TCPAddr); ok {
+		return addr.Port
+	}
+	return 0
 }
 
 // Close stops the forwarder and waits for all connections to finish
@@ -356,24 +366,63 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 		return fmt.Errorf("failed to start VM daemon: %w", err)
 	}
 
-	// Release the process so it can run independently
-	process.Release()
+	// Wait for either daemon to fail or vm-state.json to be written
+	stateFile := "vm-state.json"
+	timeout := 60 * time.Second
+	checkInterval := 200 * time.Millisecond
+	deadline := time.Now().Add(timeout)
 
-	// Wait a moment for the daemon to write the PID file
-	time.Sleep(500 * time.Millisecond)
+	// Channel to signal when state file appears
+	stateCh := make(chan bool, 1)
+	// Channel to signal when daemon exits
+	exitCh := make(chan error, 1)
 
-	// Verify the VM started successfully
-	if _, err := os.Stat(pidFile); err != nil {
-		return fmt.Errorf("VM may have failed to start - check vm.log for details")
+	// Monitor state file
+	go func() {
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(stateFile); err == nil {
+				stateCh <- true
+				return
+			}
+			time.Sleep(checkInterval)
+		}
+		stateCh <- false
+	}()
+
+	// Monitor daemon process
+	go func() {
+		state, err := process.Wait()
+		if err != nil {
+			exitCh <- fmt.Errorf("failed to wait for daemon: %w", err)
+			return
+		}
+		if !state.Success() {
+			exitCh <- fmt.Errorf("daemon exited with error (exit code: %d)", state.ExitCode())
+			return
+		}
+		exitCh <- fmt.Errorf("daemon exited unexpectedly")
+	}()
+
+	// Wait for either condition
+	select {
+	case success := <-stateCh:
+		if !success {
+			return fmt.Errorf("timeout waiting for VM to start - check vm.log for details")
+		}
+		// State file exists, release the daemon process
+		process.Release()
+		
+		fmt.Println("VM started successfully in background")
+		if sharedDir != "" {
+			fmt.Printf("Shared folder: %s -> /mnt/host (inside VM)\n", sharedDir)
+		}
+		fmt.Println("Check vm.log for VM output")
+		fmt.Println("Use 'mac-runner stop' to stop the VM")
+		return nil
+
+	case err := <-exitCh:
+		return fmt.Errorf("VM failed to start: %w - check vm.log for details", err)
 	}
-
-	fmt.Println("VM started successfully in background")
-	if sharedDir != "" {
-		fmt.Printf("Shared folder: %s -> /mnt/host (inside VM)\n", sharedDir)
-	}
-	fmt.Println("Check vm.log for VM output")
-	fmt.Println("Use 'mac-runner stop' to stop the VM")
-	return nil
 }
 
 func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
@@ -523,10 +572,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create VirtioFS config: %w", err)
 		}
-		err = sharedDirConfig.SetDirectoryShare(directoryShare)
-		if err != nil {
-			return fmt.Errorf("failed to set directory share: %w", err)
-		}
+		sharedDirConfig.SetDirectoryShare(directoryShare)
 
 		fmt.Printf("VirtioFS shared folder configured: %s -> /mnt/host\n", absSharedDir)
 	}
@@ -622,25 +668,64 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 		fmt.Printf("VM IP address: %s\n", vmIP)
 	}
 
-	// Start SSH port forwarder with discovered IP
+	// Start port forwarders with discovered IP (use port 0 for dynamic allocation)
 	ctx := context.Background()
-	sshForwarder, err := StartLoopbackForwarder(ctx, hostSSHPort, vmIP, guestSSHPort)
+	
+	// SSH forwarder
+	sshForwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestSSHPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to start SSH port forwarder: %v\n", err)
-		fmt.Fprintf(os.Stderr, "SSH will not be accessible on port %d\n", hostSSHPort)
 	} else {
-		fmt.Printf("SSH forwarding: 127.0.0.1:%d -> %s:%d\n", hostSSHPort, vmIP, guestSSHPort)
 		defer sshForwarder.Close()
 	}
 
+	// Database forwarder
+	dbForwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestDBPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to start database port forwarder: %v\n", err)
+	} else {
+		defer dbForwarder.Close()
+	}
+
+	// UI forwarder
+	uiForwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestUIPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to start UI port forwarder: %v\n", err)
+	} else {
+		defer uiForwarder.Close()
+	}
+
+	// Get the actual allocated ports
+	sshPort := 0
+	if sshForwarder != nil {
+		sshPort = sshForwarder.Port()
+		fmt.Printf("SSH forwarding: 127.0.0.1:%d -> %s:%d\n", sshPort, vmIP, guestSSHPort)
+	}
+
+	dbPort := 0
+	if dbForwarder != nil {
+		dbPort = dbForwarder.Port()
+		fmt.Printf("Database forwarding: 127.0.0.1:%d -> %s:%d\n", dbPort, vmIP, guestDBPort)
+	}
+
+	uiPort := 0
+	if uiForwarder != nil {
+		uiPort = uiForwarder.Port()
+		fmt.Printf("UI forwarding: 127.0.0.1:%d -> %s:%d\n", uiPort, vmIP, guestUIPort)
+	}
+
 	// Write vm-state.json with runtime configuration
-	vmState := map[string]string{
+	vmState := map[string]interface{}{
 		"vm_name":   "exasol-nano-vm",
 		"vm_ip":     vmIP,
 		"cpu_count": cpuCountStr,
 		"ram_size":  ramSizeStr,
 		"pid":       fmt.Sprintf("%d", os.Getpid()),
-		"ssh_port":  fmt.Sprintf("%d", hostSSHPort),
+		"ports": map[string]int{
+			"ssh": sshPort,
+			"db":  dbPort,
+			"ui":  uiPort,
+		},
 	}
 	if sharedDir != "" {
 		abs, _ := filepath.Abs(sharedDir)
@@ -657,10 +742,21 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}
 
 	fmt.Println("VM state written to vm-state.json")
-	fmt.Printf("\nSSH access: ssh -p %d exasol@127.0.0.1\n", hostSSHPort)
+	
+	// Display access information
+	fmt.Println("\n=== VM Access Information ===")
+	if sshPort > 0 {
+		fmt.Printf("SSH:      ssh -p %d exasol@127.0.0.1\n", sshPort)
+	}
+	if dbPort > 0 {
+		fmt.Printf("Database: 127.0.0.1:%d\n", dbPort)
+	}
+	if uiPort > 0 {
+		fmt.Printf("Web UI:   https://127.0.0.1:%d\n", uiPort)
+	}
 
 	// Wait for VM to finish (or be interrupted)
-	for {
+	for { // TODO is there a better way to wait for VM to exit, instead of polling state?
 		if vm.State() == vz.VirtualMachineStateStopped {
 			fmt.Println("VM stopped")
 			break
