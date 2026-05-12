@@ -72,8 +72,22 @@ cat "$TEST_KEY.pub" >> "$AUTHORIZED_KEYS"
 echo "==> Starting VM..."
 "$LAUNCHER" start 2 2048 "${VM_DIR}/shared"
 
-# Wait for VM to boot
-sleep 5
+# Read SSH port from vm-state.json
+VM_STATE_FILE="vm-state.json"
+if [ ! -f "$VM_STATE_FILE" ]; then
+    echo "Error: vm-state.json not found" >&2
+    exit 1
+fi
+
+# Extract SSH port using grep and sed (no jq dependency)
+SSH_PORT=$(grep -o '"ssh":[[:space:]]*[0-9]*' "$VM_STATE_FILE" | grep -o '[0-9]*$')
+
+if [ -z "$SSH_PORT" ]; then
+    echo "Error: Could not read SSH port from vm-state.json" >&2
+    exit 1
+fi
+
+echo "==> SSH port: $SSH_PORT"
 
 # Try to connect with the test key (retry for 5 minutes)
 echo "==> Testing SSH connection with test key (will retry for 5 minutes)..."
@@ -82,7 +96,7 @@ ELAPSED=0
 START_TIME=$(date +%s)
 
 while [ $ELAPSED -lt $MAX_WAIT ]; do
-    if ssh -i "$TEST_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 exasol@127.0.0.1 "echo 'SSH key import successful!'" 2>/dev/null; then
+    if ssh -i "$TEST_KEY" -p "$SSH_PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 exasol@127.0.0.1 "echo 'SSH key import successful!'" 2>/dev/null; then
         echo "==> ✓ Test passed: Successfully connected with imported key after ${ELAPSED} seconds"
         SUCCESS=true
         break
