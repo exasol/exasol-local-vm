@@ -6,13 +6,16 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +25,141 @@ import (
 
 //go:embed vm-package.tar.xz
 var vmPackage []byte
+
+const (
+	// guestIPv4 is the expected IP for the first VM in Virtualization.framework NAT
+	// The actual IP is detected at runtime by parsing console output
+	guestIPv4    = "192.168.64.2"
+	guestSSHPort = 22
+	hostSSHPort  = 2222
+)
+
+// LoopbackForwarder forwards TCP connections from host to guest
+type LoopbackForwarder struct {
+	listener   net.Listener
+	guestHost  string
+	guestPort  int
+	closeOnce  sync.Once
+	closeError error
+	wg         sync.WaitGroup
+}
+
+// StartLoopbackForwarder starts a TCP proxy from hostPort to guestHost:guestPort
+func StartLoopbackForwarder(ctx context.Context, hostPort int, guestHost string, guestPort int) (*LoopbackForwarder, error) {
+	listener, err := (&net.ListenConfig{}).Listen(
+		ctx,
+		"tcp",
+		fmt.Sprintf("127.0.0.1:%d", hostPort),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on 127.0.0.1:%d: %w", hostPort, err)
+	}
+
+	forwarder := &LoopbackForwarder{
+		listener:  listener,
+		guestHost: guestHost,
+		guestPort: guestPort,
+	}
+	forwarder.wg.Add(1)
+	go forwarder.acceptLoop(ctx)
+
+	return forwarder, nil
+}
+
+// Close stops the forwarder and waits for all connections to finish
+func (f *LoopbackForwarder) Close() error {
+	f.closeOnce.Do(func() {
+		f.closeError = f.listener.Close()
+		f.wg.Wait()
+	})
+
+	if f.closeError != nil && !errors.Is(f.closeError, net.ErrClosed) {
+		return f.closeError
+	}
+
+	return nil
+}
+
+func (f *LoopbackForwarder) acceptLoop(ctx context.Context) {
+	defer f.wg.Done()
+
+	for {
+		clientConn, err := f.listener.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue
+		}
+
+		f.wg.Add(1)
+		go f.proxyConnection(ctx, clientConn)
+	}
+}
+
+func (f *LoopbackForwarder) proxyConnection(ctx context.Context, clientConn net.Conn) {
+	defer f.wg.Done()
+	defer clientConn.Close()
+
+	guestConn, err := (&net.Dialer{}).DialContext(
+		ctx,
+		"tcp",
+		fmt.Sprintf("%s:%d", f.guestHost, f.guestPort),
+	)
+	if err != nil {
+		return
+	}
+	defer guestConn.Close()
+
+	var copyWG sync.WaitGroup
+	copyWG.Add(2)
+
+	go func() {
+		defer copyWG.Done()
+		io.Copy(guestConn, clientConn)
+		guestConn.Close()
+	}()
+
+	go func() {
+		defer copyWG.Done()
+		io.Copy(clientConn, guestConn)
+		clientConn.Close()
+	}()
+
+	copyWG.Wait()
+}
+
+// waitForVMIP waits for the VM to report its IP address in the console log
+func waitForVMIP(consoleLogPath string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(consoleLogPath)
+		if err != nil {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		
+		// Look for "*** EXASOL_VM_IP=192.168.64.2 ***"
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "EXASOL_VM_IP=") {
+				// Extract IP address
+				parts := strings.Split(line, "EXASOL_VM_IP=")
+				if len(parts) >= 2 {
+					ip := strings.TrimSpace(strings.Trim(parts[1], "*"))
+					if net.ParseIP(ip) != nil {
+						return ip, nil
+					}
+				}
+			}
+		}
+		
+		time.Sleep(500 * time.Millisecond)
+	}
+	
+	return "", fmt.Errorf("timeout waiting for VM IP address after %v", timeout)
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -473,8 +611,27 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	fmt.Println("VM is running with NAT networking")
 	fmt.Printf("VM console output: vm-console.log\n")
 
-	// For now, we don't have easy access to guest IP from VZ NAT
-	vmIP := "NAT (check inside VM)"
+	// Wait for VM to report its IP address
+	fmt.Println("Waiting for VM to report IP address...")
+	vmIP, err := waitForVMIP("vm-console.log", 30*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Falling back to default IP: %s\n", guestIPv4)
+		vmIP = guestIPv4
+	} else {
+		fmt.Printf("VM IP address: %s\n", vmIP)
+	}
+
+	// Start SSH port forwarder with discovered IP
+	ctx := context.Background()
+	sshForwarder, err := StartLoopbackForwarder(ctx, hostSSHPort, vmIP, guestSSHPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to start SSH port forwarder: %v\n", err)
+		fmt.Fprintf(os.Stderr, "SSH will not be accessible on port %d\n", hostSSHPort)
+	} else {
+		fmt.Printf("SSH forwarding: 127.0.0.1:%d -> %s:%d\n", hostSSHPort, vmIP, guestSSHPort)
+		defer sshForwarder.Close()
+	}
 
 	// Write vm-state.json with runtime configuration
 	vmState := map[string]string{
@@ -483,6 +640,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 		"cpu_count": cpuCountStr,
 		"ram_size":  ramSizeStr,
 		"pid":       fmt.Sprintf("%d", os.Getpid()),
+		"ssh_port":  fmt.Sprintf("%d", hostSSHPort),
 	}
 	if sharedDir != "" {
 		abs, _ := filepath.Abs(sharedDir)
@@ -499,20 +657,15 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}
 
 	fmt.Println("VM state written to vm-state.json")
+	fmt.Printf("\nSSH access: ssh -p %d exasol@127.0.0.1\n", hostSSHPort)
 
 	// Wait for VM to finish (or be interrupted)
-	ctx := context.Background()
 	for {
 		if vm.State() == vz.VirtualMachineStateStopped {
 			fmt.Println("VM stopped")
 			break
 		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(1 * time.Second):
-			// Continue checking
-		}
+		time.Sleep(1 * time.Second)
 	}
 	return nil
 }

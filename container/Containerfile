@@ -69,6 +69,7 @@ COPY import-shared-keys.initd.sh /etc/init.d/import-shared-keys
 COPY import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
 COPY load-shared-container.initd.sh /etc/init.d/load-shared-container
 COPY load-shared-container.sh /usr/local/bin/load-shared-container.sh
+COPY report-ip.initd.sh /etc/init.d/report-ip
 
 # Enables the same services that the default alpine vm image enables:
 # https://github.com/alpinelinux/alpine-make-vm-image/blob/ab659ff532b0e27684a08d11df116b9f7665081a/alpine-make-vm-image#L685-L694
@@ -77,7 +78,7 @@ COPY load-shared-container.sh /usr/local/bin/load-shared-container.sh
 RUN --mount=type=bind,target=/host/ sh -c '\
     set -eu && \
     /host/rc_add sysinit  devfs dmesg mdev hwdrivers && \
-    /host/rc_add boot     exasol-network import-shared-keys grow-var-fs load-shared-container && \
+    /host/rc_add boot     exasol-network import-shared-keys grow-var-fs load-shared-container report-ip && \
     /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking && \
     /host/rc_add default  acpid sshd && \
     /host/rc_add shutdown killprocs savecache mount-ro'
