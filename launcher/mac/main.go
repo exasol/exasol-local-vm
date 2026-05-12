@@ -25,53 +25,58 @@ var vmPackage []byte
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: mac-runner <command>")
-		fmt.Println("Available commands: init, start, stop")
+		fmt.Fprintln(os.Stderr, "Usage: mac-runner <command>")
+		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop")
 		os.Exit(1)
 	}
 
+	var err error
 	switch os.Args[1] {
 	case "init":
-		initCmd()
+		err = initCmd()
 	case "start":
 		if len(os.Args) < 4 {
-			fmt.Println("Usage: mac-runner start <cpu_count> <ram_size> [shared_dir]")
+			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size> [shared_dir]")
 			os.Exit(1)
 		}
 		sharedDir := ""
 		if len(os.Args) >= 5 {
 			sharedDir = os.Args[4]
 		}
-		startCmd(os.Args[2], os.Args[3], sharedDir)
+		err = startCmd(os.Args[2], os.Args[3], sharedDir)
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
-			fmt.Fprintf(os.Stderr, "Invalid daemon arguments\n")
+			fmt.Fprintln(os.Stderr, "Invalid daemon arguments")
 			os.Exit(1)
 		}
 		sharedDir := ""
 		if len(os.Args) >= 5 {
 			sharedDir = os.Args[4]
 		}
-		runVMDaemon(os.Args[2], os.Args[3], sharedDir)
+		err = runVMDaemon(os.Args[2], os.Args[3], sharedDir)
 	case "stop":
-		stopCmd()
+		err = stopCmd()
 	default:
-		fmt.Printf("Unknown command: %s\n", os.Args[1])
-		fmt.Println("Available commands: init, start, stop")
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
+		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop")
+		os.Exit(1)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func initCmd() {
+func initCmd() error {
 	fmt.Println("Initializing VM...")
 	fmt.Println("Extracting VM package...")
 
 	// Create vm directory
 	vmDir := "vm"
 	if err := os.MkdirAll(vmDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create vm directory: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create vm directory: %w", err)
 	}
 
 	// Create a reader from the embedded data
@@ -80,8 +85,7 @@ func initCmd() {
 	// Create xz decompressor
 	xzReader, err := xz.NewReader(bytesReader)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create xz reader: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create xz reader: %w", err)
 	}
 
 	// Create tar reader
@@ -94,8 +98,7 @@ func initCmd() {
 			break
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to read tar header: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
 		// Construct output path in vm directory
@@ -111,27 +114,23 @@ func initCmd() {
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(outputPath, 0755); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to create directory %s: %v\n", outputPath, err)
-				os.Exit(1)
+				return fmt.Errorf("failed to create directory %s: %w", outputPath, err)
 			}
 		case tar.TypeReg:
 			// Ensure parent directory exists
 			parentDir := filepath.Dir(outputPath)
 			if err := os.MkdirAll(parentDir, 0755); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to create parent directory: %v\n", err)
-				os.Exit(1)
+				return fmt.Errorf("failed to create parent directory: %w", err)
 			}
 
 			outFile, err := os.Create(outputPath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to create output file %s: %v\n", outputPath, err)
-				os.Exit(1)
+				return fmt.Errorf("failed to create output file %s: %w", outputPath, err)
 			}
 
 			if _, err := io.Copy(outFile, tarReader); err != nil {
 				outFile.Close()
-				fmt.Fprintf(os.Stderr, "Failed to extract file %s: %v\n", outputPath, err)
-				os.Exit(1)
+				return fmt.Errorf("failed to extract file %s: %w", outputPath, err)
 			}
 			outFile.Close()
 
@@ -147,9 +146,10 @@ func initCmd() {
 	fmt.Println("Successfully initialized VM")
 	fmt.Printf("VM files extracted to: %s/\n", vmDir)
 	fmt.Println("Run 'mac-runner start <cpu_count> <ram_size> [shared_dir]' to start the VM")
+	return nil
 }
 
-func startCmd(cpuCountStr, ramSizeStr, sharedDir string) {
+func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 	if sharedDir != "" {
 		fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, shared_dir=%s\n", cpuCountStr, ramSizeStr, sharedDir)
 	} else {
@@ -159,8 +159,7 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) {
 	// Check if VM has been initialized
 	vmDir := "vm"
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "VM not initialized. Run 'mac-runner init' first.\n")
-		os.Exit(1)
+		return fmt.Errorf("VM not initialized. Run 'mac-runner init' first")
 	}
 
 	// Check if VM is already running
@@ -173,8 +172,7 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) {
 				// Check if process exists
 				if process, err := os.FindProcess(pid); err == nil {
 					if err := process.Signal(syscall.Signal(0)); err == nil {
-						fmt.Fprintf(os.Stderr, "VM is already running (PID: %d)\n", pid)
-						os.Exit(1)
+						return fmt.Errorf("VM is already running (PID: %d)", pid)
 					}
 				}
 			}
@@ -186,15 +184,13 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) {
 	// Get the current executable path
 	executable, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get executable path: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
 	// Create log file for daemon output
 	logFile, err := os.OpenFile("vm.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create log file: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create log file: %w", err)
 	}
 	defer logFile.Close()
 
@@ -212,16 +208,14 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) {
 	if sharedDir != "" {
 		abs, err := filepath.Abs(sharedDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to get absolute path for shared directory: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to get absolute path for shared directory: %w", err)
 		}
 		args = append(args, abs)
 	}
 
 	process, err := os.StartProcess(executable, args, attr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start VM daemon: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to start VM daemon: %w", err)
 	}
 
 	// Release the process so it can run independently
@@ -232,8 +226,7 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) {
 
 	// Verify the VM started successfully
 	if _, err := os.Stat(pidFile); err != nil {
-		fmt.Fprintf(os.Stderr, "VM may have failed to start - check vm.log for details\n")
-		os.Exit(1)
+		return fmt.Errorf("VM may have failed to start - check vm.log for details")
 	}
 
 	fmt.Println("VM started successfully in background")
@@ -242,21 +235,20 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) {
 	}
 	fmt.Println("Check vm.log for VM output")
 	fmt.Println("Use 'mac-runner stop' to stop the VM")
+	return nil
 }
 
-func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) {
+func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	// This function runs as a background daemon
 	
 	cpuCount, err := strconv.Atoi(cpuCountStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid cpu_count: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("invalid cpu_count: %w", err)
 	}
 
 	ramSize, err := strconv.ParseUint(ramSizeStr, 10, 64)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid ram_size: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("invalid ram_size: %w", err)
 	}
 
 	// Use files from vm/ directory
@@ -269,108 +261,95 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) {
 	// Get absolute paths for all VM files
 	kernelPath, err = filepath.Abs(kernelPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get absolute path for kernel: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to get absolute path for kernel: %w", err)
 	}
 
 	initramfsPath, err = filepath.Abs(initramfsPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get absolute path for initramfs: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to get absolute path for initramfs: %w", err)
 	}
 
 	diskPath, err = filepath.Abs(diskPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get absolute path for disk: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to get absolute path for disk: %w", err)
 	}
 
 	cmdlinePath, err = filepath.Abs(cmdlinePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get absolute path for cmdline: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to get absolute path for cmdline: %w", err)
 	}
 
 	// Check if all files exist
 	if _, err := os.Stat(kernelPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Kernel not found: %s\n", kernelPath)
-		os.Exit(1)
+		return fmt.Errorf("kernel not found: %s", kernelPath)
 	}
 	if _, err := os.Stat(initramfsPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Initramfs not found: %s\n", initramfsPath)
-		os.Exit(1)
+		return fmt.Errorf("initramfs not found: %s", initramfsPath)
 	}
 	if _, err := os.Stat(diskPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Disk image not found: %s\n", diskPath)
-		os.Exit(1)
+		return fmt.Errorf("disk image not found: %s", diskPath)
 	}
 	if _, err := os.Stat(cmdlinePath); err != nil {
-		fmt.Fprintf(os.Stderr, "Kernel cmdline not found: %s\n", cmdlinePath)
-		os.Exit(1)
+		return fmt.Errorf("kernel cmdline not found: %s", cmdlinePath)
 	}
 
 	// Read kernel command line
 	cmdlineData, err := os.ReadFile(cmdlinePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read kernel cmdline: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to read kernel cmdline: %w", err)
 	}
 	cmdline := strings.TrimSpace(string(cmdlineData))
 
 	fmt.Println("Creating VM configuration...")
 
 	// Create bootloader (Linux direct boot)
-	bootLoader, err := vz.NewLinuxBootLoader(kernelPath)
+	bootLoader, err := vz.NewLinuxBootLoader(
+		kernelPath,
+		vz.WithInitrd(initramfsPath),
+		vz.WithCommandLine(cmdline),
+	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create Linux bootloader: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create Linux bootloader: %w", err)
 	}
 
-	// Set initramfs
-	if err := bootLoader.SetInitialRamdiskPath(initramfsPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to set initramfs: %v\n", err)
-		os.Exit(1)
+	// Create console logging attachment
+	consoleLogPath := "vm-console.log"
+	consoleAttachment, err := vz.NewFileSerialPortAttachment(consoleLogPath, true)
+	if err != nil {
+		return fmt.Errorf("failed to create console log attachment: %w", err)
 	}
 
-	// Set kernel command line
-	if cmdline != "" {
-		if err := bootLoader.SetCommandLine(cmdline); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to set kernel cmdline: %v\n", err)
-			os.Exit(1)
-		}
+	serialPort, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(consoleAttachment)
+	if err != nil {
+		return fmt.Errorf("failed to create console device serial port: %w", err)
 	}
 
 	// Create disk attachment
 	diskAttachment, err := vz.NewDiskImageStorageDeviceAttachment(diskPath, false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create disk attachment: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create disk attachment: %w", err)
 	}
 
 	storageDeviceConfig, err := vz.NewVirtioBlockDeviceConfiguration(diskAttachment)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create storage device config: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create storage device config: %w", err)
 	}
 
 	// Create network device
 	natAttachment, err := vz.NewNATNetworkDeviceAttachment()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create NAT network attachment: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create NAT network attachment: %w", err)
 	}
 
 	networkConfig, err := vz.NewVirtioNetworkDeviceConfiguration(natAttachment)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create network device config: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create network device config: %w", err)
 	}
 
 	// Create entropy device (random number generator)
 	entropyConfig, err := vz.NewVirtioEntropyDeviceConfiguration()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create entropy device config: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create entropy device config: %w", err)
 	}
 
 	// Create VirtioFS shared directory device if provided
@@ -380,41 +359,54 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) {
 		if _, err := os.Stat(sharedDir); os.IsNotExist(err) {
 			fmt.Printf("Creating shared directory: %s\n", sharedDir)
 			if err := os.MkdirAll(sharedDir, 0755); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to create shared directory: %v\n", err)
-				os.Exit(1)
+				return fmt.Errorf("failed to create shared directory: %w", err)
 			}
 		}
 
 		// Get absolute path
 		absSharedDir, err := filepath.Abs(sharedDir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to get absolute path for shared directory: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to get absolute path for shared directory: %w", err)
 		}
 
 		// Create VirtioFS device with tag "hostshare" (matches cloud-init config)
-		sharedDirDevice, err := vz.NewSharedDirectory(absSharedDir, false)
+		sharedDirObj, err := vz.NewSharedDirectory(absSharedDir, false)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to create shared directory device: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to create shared directory device: %w", err)
+		}
+
+		// Wrap in SingleDirectoryShare to implement DirectoryShare interface
+		directoryShare, err := vz.NewSingleDirectoryShare(sharedDirObj)
+		if err != nil {
+			return fmt.Errorf("failed to create directory share: %w", err)
 		}
 
 		sharedDirConfig, err = vz.NewVirtioFileSystemDeviceConfiguration("hostshare")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to create VirtioFS config: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("failed to create VirtioFS config: %w", err)
 		}
-		sharedDirConfig.SetDirectoryShare(sharedDirDevice)
+		err = sharedDirConfig.SetDirectoryShare(directoryShare)
+		if err != nil {
+			return fmt.Errorf("failed to set directory share: %w", err)
+		}
 
 		fmt.Printf("VirtioFS shared folder configured: %s -> /mnt/host\n", absSharedDir)
 	}
 
 	// Create VM configuration
-	vzConfig := vz.NewVirtualMachineConfiguration(
+	vzConfig, err := vz.NewVirtualMachineConfiguration(
 		bootLoader,
 		uint(cpuCount),
 		ramSize*1024*1024, // Convert MB to bytes
 	)
+	if err != nil {
+		return fmt.Errorf("failed to create VM configuration: %w", err)
+	}
+
+	// Set serial port for console logging
+	vzConfig.SetSerialPortsVirtualMachineConfiguration([]*vz.VirtioConsoleDeviceSerialPortConfiguration{
+		serialPort,
+	})
 
 	vzConfig.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{
 		storageDeviceConfig,
@@ -438,18 +430,19 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) {
 	// Validate configuration
 	validated, err := vzConfig.Validate()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to validate VM configuration: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to validate VM configuration: %w", err)
 	}
 	if !validated {
-		fmt.Fprintf(os.Stderr, "VM configuration validation failed\n")
-		os.Exit(1)
+		return fmt.Errorf("VM configuration validation failed")
 	}
 
 	fmt.Println("Starting VM...")
 
 	// Create and start VM
-	vm := vz.NewVirtualMachine(vzConfig)
+	vm, err := vz.NewVirtualMachine(vzConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create VM: %w", err)
+	}
 
 	// Write PID file before starting
 	pidFile := "vm.pid"
@@ -473,12 +466,12 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) {
 
 	// Start the VM
 	if err := vm.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start VM: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to start VM: %w", err)
 	}
 
 	fmt.Println("VM started successfully!")
 	fmt.Println("VM is running with NAT networking")
+	fmt.Printf("VM console output: vm-console.log\n")
 
 	// For now, we don't have easy access to guest IP from VZ NAT
 	vmIP := "NAT (check inside VM)"
@@ -498,13 +491,11 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) {
 
 	stateData, err := json.MarshalIndent(vmState, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to marshal vm-state: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to marshal vm-state: %w", err)
 	}
 
 	if err := os.WriteFile("vm-state.json", stateData, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to write vm-state.json: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to write vm-state.json: %w", err)
 	}
 
 	fmt.Println("VM state written to vm-state.json")
@@ -518,43 +509,41 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) {
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-time.After(1 * time.Second):
 			// Continue checking
 		}
 	}
+	return nil
 }
 
-func stopCmd() {
+func stopCmd() error {
 	fmt.Println("Stopping VM...")
 
 	// Read PID file
 	pidFile := "vm.pid"
 	pidData, err := os.ReadFile(pidFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "VM is not running (no PID file found)\n")
-		os.Exit(1)
+		return fmt.Errorf("VM is not running (no PID file found)")
 	}
 
 	pidStr := strings.TrimSpace(string(pidData))
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid PID in file: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("invalid PID in file: %w", err)
 	}
 
 	// Send SIGTERM to the VM process
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to find VM process: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to find VM process: %w", err)
 	}
 
 	if err := process.Signal(syscall.SIGTERM); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to send stop signal to VM: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to send stop signal to VM: %w", err)
 	}
 
 	fmt.Println("Stop signal sent to VM")
 	fmt.Println("VM should stop gracefully")
+	return nil
 }
