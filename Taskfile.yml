@@ -122,13 +122,6 @@ tasks:
       vars:
         - name: IMG_ARCH
           enum: [aarch64]
-    deps:
-      - task: package-mac
-        vars:
-          IMG_ARCH: "{{.IMG_ARCH}}"
-      - task: build-mac-launcher
-        vars:
-          IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./launcher/mac/tests/test-ssh-keys.sh "{{.IMG_ARCH}}"
 

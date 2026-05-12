@@ -63,6 +63,9 @@ jobs:
       - name: Build macOS ARM64 launcher
         run: task build-mac-launcher IMG_ARCH=aarch64
       
+      - name: Test macOS launcher with SSH keys
+        run: task test-ssh-keys-mac IMG_ARCH=aarch64
+      
       - name: Verify launcher binary
         run: |
           ls -lh release/mac-runner-*
