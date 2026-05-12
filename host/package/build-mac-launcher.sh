@@ -34,8 +34,9 @@ pushd "$LAUNCHER_DIR" > /dev/null
 # Copy the release archive to be embedded
 cp "$RELEASE_FILE" vm-package.tar.xz
 
-# Download Go module dependencies
-echo "Downloading Go dependencies..."
+# Update Go module dependencies and go.sum
+echo "Updating Go dependencies..."
+go mod tidy
 go mod download
 
 # Build the launcher binary
