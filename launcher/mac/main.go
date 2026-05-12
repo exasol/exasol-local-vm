@@ -35,6 +35,19 @@ const (
 	guestUIPort     = 8443  // Exasol web UI port (HTTPS)
 )
 
+// readLastLines reads the last n lines from a file
+func readLastLines(filePath string, n int) ([]string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) <= n {
+		return lines, nil
+	}
+	return lines[len(lines)-n:], nil
+}
+
 // LoopbackForwarder forwards TCP connections from host to guest
 type LoopbackForwarder struct {
 	listener   net.Listener
@@ -343,6 +356,7 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 	defer logFile.Close()
 
 	// Start daemon process in background
+	fmt.Println("Launching VM daemon process...")
 	attr := &os.ProcAttr{
 		Dir: ".",
 		Env: os.Environ(),
@@ -363,8 +377,9 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 
 	process, err := os.StartProcess(executable, args, attr)
 	if err != nil {
-		return fmt.Errorf("failed to start VM daemon: %w", err)
+		return fmt.Errorf("failed to start VM daemon process: %w", err)
 	}
+	fmt.Printf("Daemon process started (PID: %d), waiting for VM initialization...\n", process.Pid)
 
 	// Wait for either daemon to fail or vm-state.json to be written
 	stateFile := "vm-state.json"
@@ -376,6 +391,41 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 	stateCh := make(chan bool, 1)
 	// Channel to signal when daemon exits
 	exitCh := make(chan error, 1)
+	// Channel to signal when log tailer should stop
+	stopTailCh := make(chan bool, 1)
+
+	// Tail vm.log and forward to stderr for real-time visibility
+	go func() {
+		// Give the log file a moment to be written by the daemon
+		time.Sleep(100 * time.Millisecond)
+		
+		var lastSize int64 = 0
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-stopTailCh:
+				return
+			case <-ticker.C:
+				if fileInfo, err := os.Stat("vm.log"); err == nil {
+					if fileInfo.Size() > lastSize {
+						file, err := os.Open("vm.log")
+						if err == nil {
+							file.Seek(lastSize, 0)
+							buf := make([]byte, fileInfo.Size()-lastSize)
+							n, _ := file.Read(buf)
+							if n > 0 {
+								os.Stderr.Write(buf[:n])
+							}
+							lastSize = fileInfo.Size()
+							file.Close()
+						}
+					}
+				}
+			}
+		}
+	}()
 
 	// Monitor state file
 	go func() {
@@ -397,7 +447,12 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 			return
 		}
 		if !state.Success() {
-			exitCh <- fmt.Errorf("daemon exited with error (exit code: %d)", state.ExitCode())
+			// Read last lines of vm.log for context
+			var logContext string
+			if lines, err := readLastLines("vm.log", 20); err == nil && len(lines) > 0 {
+				logContext = "\n\nLast 20 lines from vm.log:\n" + strings.Join(lines, "\n")
+			}
+			exitCh <- fmt.Errorf("daemon exited with error (exit code: %d)%s", state.ExitCode(), logContext)
 			return
 		}
 		exitCh <- fmt.Errorf("daemon exited unexpectedly")
@@ -406,8 +461,14 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 	// Wait for either condition
 	select {
 	case success := <-stateCh:
+		stopTailCh <- true // Stop log tailer
 		if !success {
-			return fmt.Errorf("timeout waiting for VM to start - check vm.log for details")
+			// Read last lines of vm.log for context
+			var logContext string
+			if lines, err := readLastLines("vm.log", 20); err == nil && len(lines) > 0 {
+				logContext = "\n\nLast 20 lines from vm.log:\n" + strings.Join(lines, "\n")
+			}
+			return fmt.Errorf("timeout waiting for VM to start (60s)%s", logContext)
 		}
 		// State file exists, release the daemon process
 		process.Release()
@@ -421,12 +482,16 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 		return nil
 
 	case err := <-exitCh:
-		return fmt.Errorf("VM failed to start: %w - check vm.log for details", err)
+		stopTailCh <- true // Stop log tailer
+		return fmt.Errorf("VM failed to start: %w", err)
 	}
 }
 
 func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	// This function runs as a background daemon
+	
+	fmt.Printf("[%s] VM daemon started\n", time.Now().Format("15:04:05"))
+	fmt.Printf("[%s] Parsing configuration: CPU=%s, RAM=%s MB\n", time.Now().Format("15:04:05"), cpuCountStr, ramSizeStr)
 	
 	cpuCount, err := strconv.Atoi(cpuCountStr)
 	if err != nil {
@@ -437,6 +502,8 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	if err != nil {
 		return fmt.Errorf("invalid ram_size: %w", err)
 	}
+	
+	fmt.Printf("[%s] Configuration parsed: %d CPUs, %d MB RAM\n", time.Now().Format("15:04:05"), cpuCount, ramSize)
 
 	// Use files from vm/ directory
 	vmDir := "vm"
@@ -467,6 +534,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}
 
 	// Check if all files exist
+	fmt.Printf("[%s] Verifying VM files...\n", time.Now().Format("15:04:05"))
 	if _, err := os.Stat(kernelPath); err != nil {
 		return fmt.Errorf("kernel not found: %s", kernelPath)
 	}
@@ -479,6 +547,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	if _, err := os.Stat(cmdlinePath); err != nil {
 		return fmt.Errorf("kernel cmdline not found: %s", cmdlinePath)
 	}
+	fmt.Printf("[%s] All VM files verified\n", time.Now().Format("15:04:05"))
 
 	// Read kernel command line
 	cmdlineData, err := os.ReadFile(cmdlinePath)
@@ -487,9 +556,11 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}
 	cmdline := strings.TrimSpace(string(cmdlineData))
 
-	fmt.Println("Creating VM configuration...")
+	fmt.Printf("[%s] Creating VM configuration...\n", time.Now().Format("15:04:05"))
+	fmt.Printf("[%s] Kernel cmdline: %s\n", time.Now().Format("15:04:05"), cmdline)
 
 	// Create bootloader (Linux direct boot)
+	fmt.Printf("[%s] Creating Linux bootloader...\n", time.Now().Format("15:04:05"))
 	bootLoader, err := vz.NewLinuxBootLoader(
 		kernelPath,
 		vz.WithInitrd(initramfsPath),
@@ -498,9 +569,11 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create Linux bootloader: %w", err)
 	}
+	fmt.Printf("[%s] Bootloader configured\n", time.Now().Format("15:04:05"))
 
 	// Create console logging attachment
 	consoleLogPath := "vm-console.log"
+	fmt.Printf("[%s] Configuring console logging to %s...\n", time.Now().Format("15:04:05"), consoleLogPath)
 	consoleAttachment, err := vz.NewFileSerialPortAttachment(consoleLogPath, true)
 	if err != nil {
 		return fmt.Errorf("failed to create console log attachment: %w", err)
@@ -510,8 +583,10 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create console device serial port: %w", err)
 	}
+	fmt.Printf("[%s] Console logging configured\n", time.Now().Format("15:04:05"))
 
 	// Create disk attachment
+	fmt.Printf("[%s] Attaching disk: %s...\n", time.Now().Format("15:04:05"), diskPath)
 	diskAttachment, err := vz.NewDiskImageStorageDeviceAttachment(diskPath, false)
 	if err != nil {
 		return fmt.Errorf("failed to create disk attachment: %w", err)
@@ -521,8 +596,10 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create storage device config: %w", err)
 	}
+	fmt.Printf("[%s] Disk attached\n", time.Now().Format("15:04:05"))
 
 	// Create network device
+	fmt.Printf("[%s] Configuring NAT networking...\n", time.Now().Format("15:04:05"))
 	natAttachment, err := vz.NewNATNetworkDeviceAttachment()
 	if err != nil {
 		return fmt.Errorf("failed to create NAT network attachment: %w", err)
@@ -532,19 +609,23 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create network device config: %w", err)
 	}
+	fmt.Printf("[%s] Network configured\n", time.Now().Format("15:04:05"))
 
 	// Create entropy device (random number generator)
+	fmt.Printf("[%s] Configuring entropy device...\n", time.Now().Format("15:04:05"))
 	entropyConfig, err := vz.NewVirtioEntropyDeviceConfiguration()
 	if err != nil {
 		return fmt.Errorf("failed to create entropy device config: %w", err)
 	}
+	fmt.Printf("[%s] Entropy device configured\n", time.Now().Format("15:04:05"))
 
 	// Create VirtioFS shared directory device if provided
 	var sharedDirConfig *vz.VirtioFileSystemDeviceConfiguration
 	if sharedDir != "" {
+		fmt.Printf("[%s] Configuring VirtioFS shared directory: %s...\n", time.Now().Format("15:04:05"), sharedDir)
 		// Ensure shared directory exists
 		if _, err := os.Stat(sharedDir); os.IsNotExist(err) {
-			fmt.Printf("Creating shared directory: %s\n", sharedDir)
+			fmt.Printf("[%s] Creating shared directory: %s\n", time.Now().Format("15:04:05"), sharedDir)
 			if err := os.MkdirAll(sharedDir, 0755); err != nil {
 				return fmt.Errorf("failed to create shared directory: %w", err)
 			}
@@ -574,7 +655,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 		}
 		sharedDirConfig.SetDirectoryShare(directoryShare)
 
-		fmt.Printf("VirtioFS shared folder configured: %s -> /mnt/host\n", absSharedDir)
+		fmt.Printf("[%s] VirtioFS shared folder configured: %s -> /mnt/host\n", time.Now().Format("15:04:05"), absSharedDir)
 	}
 
 	// Create VM configuration
@@ -612,6 +693,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}
 
 	// Validate configuration
+	fmt.Printf("[%s] Validating VM configuration...\n", time.Now().Format("15:04:05"))
 	validated, err := vzConfig.Validate()
 	if err != nil {
 		return fmt.Errorf("failed to validate VM configuration: %w", err)
@@ -619,14 +701,17 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	if !validated {
 		return fmt.Errorf("VM configuration validation failed")
 	}
+	fmt.Printf("[%s] VM configuration validated\n", time.Now().Format("15:04:05"))
 
-	fmt.Println("Starting VM...")
+	fmt.Printf("[%s] Starting VM...\n", time.Now().Format("15:04:05"))
 
 	// Create and start VM
+	fmt.Printf("[%s] Creating virtual machine instance...\n", time.Now().Format("15:04:05"))
 	vm, err := vz.NewVirtualMachine(vzConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create VM: %w", err)
 	}
+	fmt.Printf("[%s] Virtual machine instance created\n", time.Now().Format("15:04:05"))
 
 	// Write PID file before starting
 	pidFile := "vm.pid"
@@ -649,11 +734,12 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}()
 
 	// Start the VM
+	fmt.Printf("[%s] Starting virtual machine (this may take a few seconds)...\n", time.Now().Format("15:04:05"))
 	if err := vm.Start(); err != nil {
 		return fmt.Errorf("failed to start VM: %w", err)
 	}
 
-	fmt.Println("VM started successfully!")
+	fmt.Printf("[%s] VM started successfully!\n", time.Now().Format("15:04:05"))
 	fmt.Println("VM is running with NAT networking")
 	fmt.Printf("VM console output: vm-console.log\n")
 

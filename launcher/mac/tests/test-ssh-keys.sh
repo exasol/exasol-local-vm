@@ -37,6 +37,16 @@ cleanup() {
   echo ""
   echo "==> Cleaning up..."
 
+  # If test failed, display vm.log for debugging
+  if [ "$exit_code" -ne 0 ] && [ -f "vm.log" ]; then
+    echo ""
+    echo "==> VM Log (vm.log) for debugging:"
+    echo "===================================="
+    cat vm.log
+    echo "===================================="
+    echo ""
+  fi
+
   # Stop the VM if it's running
   echo "==> Stopping VM..."
   "$LAUNCHER" stop || true
