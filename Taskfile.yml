@@ -112,6 +112,22 @@ tasks:
     cmds:
       - ./host/test/test-ssh-keys.sh "{{.IMG_ARCH}}"
 
+  test-ssh-keys-mac:
+    desc: Test SSH key import feature using Mac launcher (macOS only)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [aarch64]
+    deps:
+      - task: package-mac
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - task: build-mac-launcher
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    cmds:
+      - ./launcher/mac/tests/test-ssh-keys.sh "{{.IMG_ARCH}}"
+
   test-container:
     desc: Test container REST server and data persistence (requires running VM with container)
     requires:
