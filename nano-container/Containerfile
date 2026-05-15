@@ -1,0 +1,20 @@
+FROM ubuntu:24.04
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bash ca-certificates xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+# build.sh downloads the per-arch .run to ./nano.run and verifies its SHA256
+# against nano-version.env before invoking podman build. The COPY here uses a
+# stable filename so the Containerfile is version-agnostic.
+COPY nano.run /tmp/exasol-db.run
+RUN chmod +x /tmp/exasol-db.run \
+ && /tmp/exasol-db.run --noexec --target /opt/exasol-nano \
+ && rm /tmp/exasol-db.run
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENV EXANANO_EXADIR=/var/lib/exanano
+EXPOSE 8563 8443
+ENTRYPOINT ["/entrypoint.sh"]

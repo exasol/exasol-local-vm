@@ -142,6 +142,15 @@ tasks:
     cmds:
       - ./build-packaged-container.sh "{{.IMG_ARCH}}" shared
 
+  build-nano-container:
+    desc: Build the Exasol Nano DB container for {{.IMG_ARCH}}
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    cmds:
+      - ./nano-container/build.sh "{{.IMG_ARCH}}"
+
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
     run: when_changed
