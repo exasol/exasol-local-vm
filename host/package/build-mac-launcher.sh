@@ -51,3 +51,32 @@ popd > /dev/null
 chmod +x "$LAUNCHER_OUTPUT"
 
 echo "==> Launcher binary: $LAUNCHER_OUTPUT"
+
+# Sign the launcher (required)
+if [ -z "${MACOS_SIGN_KEYCHAIN:-}" ] || [ -z "${MACOS_SIGN_IDENTITY:-}" ]; then
+  echo "Error: Code signing is required but credentials are not set" >&2
+  echo "Please set MACOS_SIGN_KEYCHAIN and MACOS_SIGN_IDENTITY environment variables" >&2
+  exit 1
+fi
+
+echo "==> Signing macOS launcher with virtualization entitlement..."
+
+codesign \
+  --force \
+  --timestamp \
+  --options runtime \
+  --keychain "${MACOS_SIGN_KEYCHAIN}" \
+  --entitlements "$ROOT_DIR/launcher/mac/entitlements.plist" \
+  --sign "${MACOS_SIGN_IDENTITY}" \
+  "${LAUNCHER_OUTPUT}"
+
+echo "==> Verifying virtualization entitlement..."
+codesign -d --entitlements :- "${LAUNCHER_OUTPUT}" 2>&1 | tee /tmp/launcher.entitlements
+if grep -q '<key>com.apple.security.virtualization</key>' /tmp/launcher.entitlements; then
+  echo "✓ Virtualization entitlement verified"
+else
+  echo "✗ Virtualization entitlement missing!" >&2
+  exit 1
+fi
+
+echo "==> Signed launcher binary: $LAUNCHER_OUTPUT"
