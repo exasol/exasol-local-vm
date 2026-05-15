@@ -2,10 +2,20 @@ name: Build Packages
 
 on:
   workflow_dispatch:
+  workflow_call:
+    outputs:
+      linux-packages-artifact:
+        description: "Name of the Linux packages artifact"
+        value: ${{ jobs.build-linux-packages.outputs.artifact-name }}
+      mac-launcher-artifact:
+        description: "Name of the macOS launcher artifact"
+        value: ${{ jobs.build-mac-launcher.outputs.artifact-name }}
 
 jobs:
   build-linux-packages:
     runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-id }}
     
     steps:
       - name: Checkout repository
@@ -24,6 +34,7 @@ jobs:
         run: task package
       
       - name: Upload release artifacts
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: release-packages
@@ -36,6 +47,8 @@ jobs:
   build-mac-launcher:
     runs-on: macos-latest
     needs: build-linux-packages
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-id }}
     
     steps:
       - name: Checkout repository
@@ -75,6 +88,31 @@ jobs:
           MACOS_SIGN_IDENTITY: ${{ steps.macos-signing.outputs.signing-identity }}
         run: task build-mac-launcher IMG_ARCH=aarch64
       
+      - name: Package macOS launcher for notarization
+        if: ${{ secrets.IOS_APPSTORECONNECTAPI_ISSUERID != '' }}
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent release/mac-runner-aarch64 dist/mac-runner-aarch64.zip
+          shasum -a 256 dist/mac-runner-aarch64.zip > dist/mac-runner-aarch64.zip.sha256
+      
+      - name: Notarize macOS launcher
+        if: ${{ secrets.IOS_APPSTORECONNECTAPI_ISSUERID != '' }}
+        env:
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.IOS_APPSTORECONNECTAPI_ISSUERID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.IOS_APPSTORECONNECTAPI_KEYID }}
+          MACOS_NOTARY_KEY: ${{ secrets.IOS_APPSTORECONNECTAPI_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          KEY_PATH="$(mktemp /tmp/notary-key.XXXXXX.p8)"
+          trap 'rm -f "$KEY_PATH"' EXIT
+          printf '%s' "$MACOS_NOTARY_KEY" > "$KEY_PATH"
+          xcrun notarytool submit \
+            dist/mac-runner-aarch64.zip \
+            --issuer "$MACOS_NOTARY_ISSUER_ID" \
+            --key-id "$MACOS_NOTARY_KEY_ID" \
+            --key "$KEY_PATH" \
+            --wait
+      
       - name: Test macOS launcher with SSH keys
         run: task test-ssh-keys-mac IMG_ARCH=aarch64
       
@@ -92,12 +130,18 @@ jobs:
       
       - name: Verify launcher binary
         run: |
-          ls -lh release/mac-runner-*
+          ls -lh release/mac-runner-* || true
+          ls -lh dist/mac-runner-* 2>/dev/null || echo "No notarized artifacts (notarization secrets not configured)"
           file release/mac-runner-*
       
       - name: Upload macOS launcher
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: mac-launcher
-          path: release/mac-runner-*
+          path: |
+            release/mac-runner-*
+            dist/mac-runner-aarch64.zip
+            dist/mac-runner-aarch64.zip.sha256
+          if-no-files-found: ignore
           retention-days: 7
