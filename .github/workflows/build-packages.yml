@@ -60,7 +60,19 @@ jobs:
       - name: List downloaded artifacts
         run: ls -lh release/
       
+      - name: Setup macOS signing certificate
+        id: macos-signing
+        if: ${{ secrets.IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED != '' }}
+        uses: ./.github/actions/setup-macos-signing
+        with:
+          p12-key: ${{ secrets.IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED }}
+          p12-password: ${{ secrets.IOS_PKCS12_IDENTITY_CERTIFICATE_PASSWORD }}
+          application-cert: ${{ secrets.IOS_CER_DEVELOPERID_APPLICATION_BASE64_ENCODED }}
+      
       - name: Build macOS ARM64 launcher
+        env:
+          MACOS_SIGN_KEYCHAIN: ${{ steps.macos-signing.outputs.keychain-path }}
+          MACOS_SIGN_IDENTITY: ${{ steps.macos-signing.outputs.signing-identity }}
         run: task build-mac-launcher IMG_ARCH=aarch64
       
       - name: Test macOS launcher with SSH keys
