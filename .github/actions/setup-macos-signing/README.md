@@ -25,6 +25,28 @@ Base64-encoded Developer ID Application certificate (.cer)
 base64 -i DeveloperID_Application.cer | pbcopy
 ```
 
+## Notarization Secrets (Optional)
+
+For Apple notarization (removes "unverified developer" warnings), add these additional secrets:
+
+### `IOS_APPSTORECONNECTAPI_ISSUERID`
+The Issuer ID from App Store Connect API
+
+### `IOS_APPSTORECONNECTAPI_KEYID`
+The Key ID from App Store Connect API
+
+### `IOS_APPSTORECONNECTAPI_AUTHKEY`
+The contents of the .p8 private key file from App Store Connect
+
+**To obtain these:**
+1. Go to [App Store Connect](https://appstoreconnect.apple.com/)
+2. Navigate to **Users and Access** → **Keys** (under Integrations)
+3. Click **Generate API Key** or select existing key
+4. Choose **App Manager** or **Developer** role
+5. Download the `.p8` file (can only download once!)
+6. Note the **Issuer ID** (at top of page) and **Key ID** (in the key row)
+7. For the auth key secret, paste the entire contents of the .p8 file
+
 ## Getting the Certificates
 
 1. Enroll in the [Apple Developer Program](https://developer.apple.com/programs/)
@@ -60,12 +82,10 @@ You should see:
 <true/>
 ```
 
-## Optional Notarization
+## Notarization
 
-For distribution outside of GitHub releases, you may want to notarize the binary with Apple. This requires additional secrets:
+The build workflow automatically notarizes the launcher binary with Apple if the notarization secrets are configured. This removes "unverified developer" warnings when users download and run the launcher.
 
-- `MACOS_NOTARY_ISSUER_ID` - App Store Connect API issuer ID
-- `MACOS_NOTARY_KEY_ID` - App Store Connect API key ID  
-- `MACOS_NOTARY_KEY` - App Store Connect API authentication key (.p8)
+Notarization happens after signing and produces a `.zip` file that contains the notarized binary. Both the raw binary and the notarized zip are included in the build artifacts.
 
-See [Apple's notarization documentation](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution) for details.
+See [Apple's notarization documentation](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution) for more details.

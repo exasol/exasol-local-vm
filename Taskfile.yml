@@ -225,3 +225,8 @@ tasks:
     cmds:
       - task: stop-vm
       - git clean -Xf .
+
+  ci-build-mac-launcher:
+    desc: Run Build Packages workflow on current branch and download macOS launcher
+    cmds:
+      - ./host/github/ci-build-mac-launcher.sh
