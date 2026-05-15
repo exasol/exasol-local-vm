@@ -79,7 +79,10 @@ if [ "$HAS_MANIFEST" = "true" ]; then
   CONTAINER_PORTS=$(jq -r '.ports // [] | join(", ")' "$MANIFEST_FILE" 2>/dev/null)
   
   ARGS=$(jq -r '.args[]' "$MANIFEST_FILE" 2>/dev/null | tr '\n' ' ')
-  
+
+  # Read shmSize (e.g. "1g") - used for --shm-size flag
+  SHM_SIZE=$(jq -r '.shmSize // ""' "$MANIFEST_FILE" 2>/dev/null)
+
   # Parse mounts from manifest
   MOUNT_COUNT=$(jq -r '.mounts | length // 0' "$MANIFEST_FILE" 2>/dev/null)
   
@@ -243,6 +246,13 @@ fi
 # Container runtime log file
 CONTAINER_LOG_FILE="$LOG_DIR/container-runtime-$(date +%Y%m%d-%H%M%S).log"
 
+# Build --shm-size flag if specified in manifest
+SHM_FLAG=""
+if [ -n "${SHM_SIZE:-}" ] && [ "$SHM_SIZE" != "null" ]; then
+  SHM_FLAG="--shm-size $SHM_SIZE"
+  log_msg "Shared memory size: $SHM_SIZE"
+fi
+
 # Run the container with args (as root with proper cgroup2 support)
 # NOTE: No --cpus or --memory limits are set intentionally.
 # This allows the container to automatically use all VM resources.
@@ -252,6 +262,7 @@ log_msg "Starting container (ports: $CONTAINER_PORTS)..."
 if podman run -d \
   --name "$CONTAINER_NAME" \
   --network host \
+  $SHM_FLAG \
   $VOLUME_FLAGS \
   --log-driver k8s-file \
   --log-opt path="$CONTAINER_LOG_FILE" \
