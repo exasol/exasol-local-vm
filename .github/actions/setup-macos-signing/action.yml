@@ -63,6 +63,10 @@ runs:
         security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
         security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
         security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        
+        # Add keychain to search list so codesign can find it
+        security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed s/\"//g)
+        
         security import /tmp/signing_certificate.p12 \
           -k "$KEYCHAIN_PATH" \
           -P "${{ inputs.p12-password }}" \
