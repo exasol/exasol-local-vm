@@ -19,6 +19,37 @@ OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/$IMG_ARCH}"
 
 mkdir -p "$OUTPUT_DIR"
 
+### Stage the pre-built nano-container tarball into the guest's build context.
+#
+# container/Containerfile expects a file named `container.tar.gz` alongside
+# it (loaded into the guest's podman storage at build time so the resulting
+# disk ships with the image pre-loaded). The tarball is produced by
+# `task build-nano-container` (which `task build` depends on).
+NANO_CONTAINER_DIR="$ROOT_DIR/output/nano-container"
+NANO_CONTAINER_STAGED="$ROOT_DIR/container/container.tar.gz"
+
+shopt -s nullglob
+NANO_TARBALL_CANDIDATES=("$NANO_CONTAINER_DIR"/exasol-nano-*-"${IMG_ARCH}".tar.gz)
+shopt -u nullglob
+
+if [ "${#NANO_TARBALL_CANDIDATES[@]}" -eq 0 ]; then
+    echo "Error: no nano-container tarball found under $NANO_CONTAINER_DIR for $IMG_ARCH" >&2
+    echo "Run: task build-nano-container IMG_ARCH=$IMG_ARCH" >&2
+    exit 1
+fi
+if [ "${#NANO_TARBALL_CANDIDATES[@]}" -gt 1 ]; then
+    echo "Error: multiple nano-container tarballs match for $IMG_ARCH:" >&2
+    printf '  %s\n' "${NANO_TARBALL_CANDIDATES[@]}" >&2
+    echo "Remove the stale ones from $NANO_CONTAINER_DIR and retry." >&2
+    exit 1
+fi
+NANO_TARBALL="${NANO_TARBALL_CANDIDATES[0]}"
+
+echo "==> Staging nano-container tarball into guest build context"
+echo "    ==> $NANO_TARBALL -> $NANO_CONTAINER_STAGED"
+cp -f "$NANO_TARBALL" "$NANO_CONTAINER_STAGED"
+trap 'rm -f "$NANO_CONTAINER_STAGED"' EXIT
+
 # TODO Potentially add explicit cache-busting instead of --pull=newer?
 # Having e.g. a motd file with a version number for the vm image would be enough
 # as we can bump it before a release.

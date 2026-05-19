@@ -124,7 +124,14 @@ fi
 
 # Determine if we should try to load/reload a container
 SKIP_LOAD=false
-if [ "$HAS_MANIFEST" = "true" ]; then
+if [ "$HAS_MANIFEST" != "true" ]; then
+  # No manifest at all. The container image may have been pre-loaded at VM
+  # build time (baked into /var/lib/containers/storage). Fall through to
+  # the "run a pre-loaded image" path below — never attempt to load a
+  # tarball that doesn't exist.
+  log_msg "No manifest available; assuming image is pre-loaded in podman storage"
+  SKIP_LOAD=true
+elif [ "$HAS_MANIFEST" = "true" ]; then
   # Check if containerFile is specified
   if [ -z "$CONTAINER_FILE" ] || [ "$CONTAINER_FILE" = "null" ]; then
     log_msg "No containerFile specified in manifest"

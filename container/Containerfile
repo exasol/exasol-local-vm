@@ -39,6 +39,12 @@ graphroot = "/var/lib/containers/storage"
 [storage.options.overlay]
 mount_program = "/usr/bin/fuse-overlayfs"
 mountopt = "nodev"
+# Skip lchown calls that the build-time user namespace cannot satisfy.
+# Required when podman load runs inside `podman build` (nested user
+# namespaces don't have arbitrary GIDs like 42/shadow mapped). Safe at
+# runtime: container processes don't depend on file ownership matching
+# the host's GID space.
+ignore_chown_errors = "true"
 EOF
 
 RUN tee /etc/subuid /etc/subgid <<-'EOF'
@@ -108,6 +114,20 @@ set -eu
 /host/rc_add default  acpid sshd
 /host/rc_add shutdown killprocs savecache mount-ro
 EOF
+
+
+### Pre-load the Exasol Nano DB container image
+#
+# The host-side build (host/build/build-artifacts.sh) stages the matching
+# nano-container tarball as ./container.tar.gz before invoking `podman build`.
+# We load it into the guest's podman storage at build time so the disk image
+# ships with the image already unpacked under /var/lib/containers/storage.
+# At runtime, the guest's load-shared-container service can `podman run` the
+# image directly without paying the `podman load` cost on first boot.
+
+COPY container.tar.gz /tmp/container.tar.gz
+RUN podman load -i /tmp/container.tar.gz \
+ && rm /tmp/container.tar.gz
 
 
 ### Clean up to minimize image
