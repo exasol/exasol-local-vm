@@ -3,6 +3,19 @@ name: Build Packages
 on:
   workflow_dispatch:
   workflow_call:
+    secrets:
+      IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED:
+        required: true
+      IOS_PKCS12_IDENTITY_CERTIFICATE_PASSWORD:
+        required: true
+      IOS_CER_DEVELOPERID_APPLICATION_BASE64_ENCODED:
+        required: true
+      IOS_APPSTORECONNECTAPI_ISSUERID:
+        required: true
+      IOS_APPSTORECONNECTAPI_KEYID:
+        required: true
+      IOS_APPSTORECONNECTAPI_AUTHKEY:
+        required: true
     outputs:
       linux-packages-artifact:
         description: "Name of the Linux packages artifact"
@@ -75,7 +88,6 @@ jobs:
       
       - name: Setup macOS signing certificate
         id: macos-signing
-        if: ${{ secrets.IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED != '' }}
         uses: ./.github/actions/setup-macos-signing
         with:
           p12-key: ${{ secrets.IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED }}
@@ -89,14 +101,12 @@ jobs:
         run: task build-mac-launcher IMG_ARCH=aarch64
       
       - name: Package macOS launcher for notarization
-        if: ${{ secrets.IOS_APPSTORECONNECTAPI_ISSUERID != '' }}
         run: |
           mkdir -p dist
           ditto -c -k --keepParent release/mac-runner-aarch64 dist/mac-runner-aarch64.zip
           shasum -a 256 dist/mac-runner-aarch64.zip > dist/mac-runner-aarch64.zip.sha256
       
       - name: Notarize macOS launcher
-        if: ${{ secrets.IOS_APPSTORECONNECTAPI_ISSUERID != '' }}
         env:
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.IOS_APPSTORECONNECTAPI_ISSUERID }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.IOS_APPSTORECONNECTAPI_KEYID }}
@@ -105,7 +115,44 @@ jobs:
           set -euo pipefail
           KEY_PATH="$(mktemp /tmp/notary-key.XXXXXX.p8)"
           trap 'rm -f "$KEY_PATH"' EXIT
-          printf '%s' "$MACOS_NOTARY_KEY" > "$KEY_PATH"
+          
+          # Try to decode as base64 first
+          if echo "$MACOS_NOTARY_KEY" | base64 -d > "$KEY_PATH" 2>/dev/null && grep -q "BEGIN PRIVATE KEY" "$KEY_PATH"; then
+            echo "✓ Decoded base64-encoded key"
+          else
+            # Use as raw text
+            printf '%s' "$MACOS_NOTARY_KEY" > "$KEY_PATH"
+          fi
+          
+          # Validate the key format
+          if ! grep -q "BEGIN PRIVATE KEY" "$KEY_PATH"; then
+            echo "Error: Key file does not contain valid PEM format" >&2
+            echo "Expected '-----BEGIN PRIVATE KEY-----' header" >&2
+            exit 1
+          fi
+          
+          if ! grep -q "END PRIVATE KEY" "$KEY_PATH"; then
+            echo "Error: Key file missing '-----END PRIVATE KEY-----' footer" >&2
+            exit 1
+          fi
+          
+          echo "✓ Key format validated"
+          
+          # Validate notarization credentials
+          if [ -z "$MACOS_NOTARY_ISSUER_ID" ]; then
+            echo "Error: MACOS_NOTARY_ISSUER_ID is empty" >&2
+            exit 1
+          fi
+          echo "  MACOS_NOTARY_ISSUER_ID length: ${#MACOS_NOTARY_ISSUER_ID}"
+          
+          if [ -z "$MACOS_NOTARY_KEY_ID" ]; then
+            echo "Error: MACOS_NOTARY_KEY_ID is empty" >&2
+            exit 1
+          fi
+          echo "  MACOS_NOTARY_KEY_ID length: ${#MACOS_NOTARY_KEY_ID}"
+          
+          echo "✓ Notarization credentials validated"
+          
           xcrun notarytool submit \
             dist/mac-runner-aarch64.zip \
             --issuer "$MACOS_NOTARY_ISSUER_ID" \
@@ -113,8 +160,16 @@ jobs:
             --key "$KEY_PATH" \
             --wait
       
-      - name: Test macOS launcher with SSH keys
-        run: task test-ssh-keys-mac IMG_ARCH=aarch64
+      - name: Staple notarization ticket
+        run: |
+          set -euo pipefail
+          echo "Stapling notarization ticket to zip..."
+          xcrun stapler staple dist/mac-runner-aarch64.zip
+          echo "✓ Notarization ticket stapled"
+          
+          echo "Validating stapled notarization..."
+          xcrun stapler validate dist/mac-runner-aarch64.zip
+          echo "✓ Stapled notarization validated"
       
       - name: Upload VM logs on failure
         if: failure()
@@ -128,11 +183,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       
-      - name: Verify launcher binary
+      - name: Verify notarized artifacts
         run: |
-          ls -lh release/mac-runner-* || true
-          ls -lh dist/mac-runner-* 2>/dev/null || echo "No notarized artifacts (notarization secrets not configured)"
-          file release/mac-runner-*
+          echo "Notarized zip:"
+          ls -lh dist/mac-runner-aarch64.zip
+          ls -lh dist/mac-runner-aarch64.zip.sha256
+          echo ""
+          echo "Checksum:"
+          cat dist/mac-runner-aarch64.zip.sha256
       
       - name: Upload macOS launcher
         id: upload
@@ -140,8 +198,6 @@ jobs:
         with:
           name: mac-launcher
           path: |
-            release/mac-runner-*
             dist/mac-runner-aarch64.zip
             dist/mac-runner-aarch64.zip.sha256
-          if-no-files-found: ignore
           retention-days: 7
