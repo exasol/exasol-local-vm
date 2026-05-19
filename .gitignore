@@ -7,3 +7,6 @@ shared/*
 !shared/README.md
 /package/
 release/
+
+# Staged at build time by host/build/build-artifacts.sh, removed on exit.
+container/container.tar.gz

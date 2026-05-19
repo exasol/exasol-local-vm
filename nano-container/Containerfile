@@ -1,17 +1,19 @@
-FROM ubuntu:24.04
+# Multi-stage to keep the .run out of any shipped layer (nested podman-load
+# in the VM build can't always read large files in a layer diff).
+# Alpine works because the AppDir bundles its own glibc + linker.
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends bash ca-certificates xz-utils \
- && rm -rf /var/lib/apt/lists/*
-
-# build.sh downloads the per-arch .run to ./nano.run and verifies its SHA256
-# against nano-version.env before invoking podman build. The COPY here uses a
-# stable filename so the Containerfile is version-agnostic.
+FROM alpine:3.20 AS extract
+# xz: the .run is Makeself + xz-compressed. bash: needed by .run's scripts.
+RUN apk add --no-cache bash xz
 COPY nano.run /tmp/exasol-db.run
 RUN chmod +x /tmp/exasol-db.run \
  && /tmp/exasol-db.run --noexec --target /opt/exasol-nano \
  && rm /tmp/exasol-db.run
 
+
+FROM alpine:3.20
+RUN apk add --no-cache bash
+COPY --from=extract /opt/exasol-nano /opt/exasol-nano
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
