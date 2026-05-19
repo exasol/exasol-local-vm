@@ -15,6 +15,10 @@ tasks:
       vars:
         - name: IMG_ARCH
           enum: [x86_64, aarch64]
+    deps:
+      - task: build-nano-container
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./host/build/build-artifacts.sh "{{.IMG_ARCH}}"
 
