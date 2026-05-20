@@ -59,10 +59,11 @@ jobs:
       - name: Install system dependencies
         run: task install-deps
       
-      - name: Build all packages
+      # Note: In the future we should build all the packages at this step.
+      - name: Build mac package
         env:
           GH_TOKEN: ${{ secrets.EXASOL_NANO_TOKEN }}
-        run: task package
+        run: task package-mac IMG_ARCH=aarch64
       
       - name: Upload release artifacts
         id: upload

@@ -12,13 +12,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/${IMG_ARCH}}"
 
 RAW_DISK="$OUTPUT_DIR/disk.img"  # Use fat image with ESP for UEFI boot
-KERNEL_FILE="$OUTPUT_DIR/vmlinuz-virt"
-INITRD_FILE="$OUTPUT_DIR/initramfs.img"
-KERNEL_CMDLINE_FILE="$OUTPUT_DIR/kernel-cmdline.txt"
 
 ARCH_FILE="$OUTPUT_DIR/arch.txt"
-GVPROXY_VERSION="v0.8.8"
-GVPROXY_URL="https://github.com/containers/gvisor-tap-vsock/releases/download/${GVPROXY_VERSION}/gvproxy-darwin"
 
 if [ ! -f "$RAW_DISK" ]; then
     echo "Error: $RAW_DISK not found. Run 'task build' first."
@@ -46,9 +41,6 @@ cp "$RAW_DISK" "$PACKAGE_DIR/disk.img"
 # Note: Using UEFI boot with fat disk image
 # Kernel, initramfs, and cmdline are bundled in the ESP partition as a UKI
 # Modern ARM64 kernels have EFI stub and require UEFI boot
-
-curl -fSL -o "$PACKAGE_DIR/gvproxy" "$GVPROXY_URL"
-chmod +x "$PACKAGE_DIR/gvproxy"
 
 # Create the release archive first (without launcher)
 tar -C "$ROOT_DIR/package" -cf - "$PACKAGE_NAME" | xz -6 -v > "$RELEASE_FILE"
