@@ -123,14 +123,34 @@ jobs:
             --dir release/
           
           echo "Downloaded artifacts:"
-          ls -lh release/
+          ls -lhR release/
+          echo ""
+          echo "Checking for mac-arm64.tar.xz:"
+          if [ -f release/mac-arm64.tar.xz ]; then
+            echo "✓ Found: release/mac-arm64.tar.xz ($(du -h release/mac-arm64.tar.xz | cut -f1))"
+          else
+            echo "✗ Missing: release/mac-arm64.tar.xz" >&2
+            exit 1
+          fi
       
       - name: Install Task
         run: |
           brew install go-task
       
       - name: List downloaded artifacts
-        run: ls -lh release/
+        run: |
+          echo "Checking release directory contents:"
+          ls -lh release/ || echo "release/ directory not found or empty"
+          echo ""
+          echo "Checking for required mac-arm64.tar.xz:"
+          if [ -f release/mac-arm64.tar.xz ]; then
+            echo "✓ Found: release/mac-arm64.tar.xz"
+            echo "  Size: $(du -h release/mac-arm64.tar.xz | cut -f1)"
+          else
+            echo "✗ ERROR: release/mac-arm64.tar.xz not found!" >&2
+            echo "This file is required for embedding in the launcher" >&2
+            exit 1
+          fi
       
       - name: Setup macOS signing certificate
         id: macos-signing

@@ -507,69 +507,53 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 
 	// Use files from vm/ directory
 	vmDir := "vm"
-	kernelPath := filepath.Join(vmDir, "vmlinuz-virt")
-	initramfsPath := filepath.Join(vmDir, "initramfs.img")
-	diskPath := filepath.Join(vmDir, "disk_thin.img")
-	cmdlinePath := filepath.Join(vmDir, "kernel-cmdline.txt")
+	diskPath := filepath.Join(vmDir, "disk.img") // Use fat image with ESP for UEFI boot
 
-	// Get absolute paths for all VM files
-	kernelPath, err = filepath.Abs(kernelPath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path for kernel: %w", err)
-	}
-
-	initramfsPath, err = filepath.Abs(initramfsPath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path for initramfs: %w", err)
-	}
-
+	// Get absolute path for disk
 	diskPath, err = filepath.Abs(diskPath)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path for disk: %w", err)
 	}
 
-	cmdlinePath, err = filepath.Abs(cmdlinePath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path for cmdline: %w", err)
-	}
-
-	// Check if all files exist
-	fmt.Printf("[%s] Verifying VM files...\n", time.Now().Format("15:04:05"))
-	if _, err := os.Stat(kernelPath); err != nil {
-		return fmt.Errorf("kernel not found: %s", kernelPath)
-	}
-	if _, err := os.Stat(initramfsPath); err != nil {
-		return fmt.Errorf("initramfs not found: %s", initramfsPath)
-	}
+	// Check if disk exists
+	fmt.Printf("[%s] Verifying VM disk...\n", time.Now().Format("15:04:05"))
 	if _, err := os.Stat(diskPath); err != nil {
-		return fmt.Errorf("disk image not found: %s", diskPath)
+		return fmt.Errorf("disk image not found: %s (need fat image with ESP for UEFI boot)", diskPath)
 	}
-	if _, err := os.Stat(cmdlinePath); err != nil {
-		return fmt.Errorf("kernel cmdline not found: %s", cmdlinePath)
-	}
-	fmt.Printf("[%s] All VM files verified\n", time.Now().Format("15:04:05"))
-
-	// Read kernel command line
-	cmdlineData, err := os.ReadFile(cmdlinePath)
-	if err != nil {
-		return fmt.Errorf("failed to read kernel cmdline: %w", err)
-	}
-	cmdline := strings.TrimSpace(string(cmdlineData))
+	fmt.Printf("[%s] VM disk verified\n", time.Now().Format("15:04:05"))
 
 	fmt.Printf("[%s] Creating VM configuration...\n", time.Now().Format("15:04:05"))
-	fmt.Printf("[%s] Kernel cmdline: %s\n", time.Now().Format("15:04:05"), cmdline)
 
-	// Create bootloader (Linux direct boot)
-	fmt.Printf("[%s] Creating Linux bootloader...\n", time.Now().Format("15:04:05"))
-	bootLoader, err := vz.NewLinuxBootLoader(
-		kernelPath,
-		vz.WithInitrd(initramfsPath),
-		vz.WithCommandLine(cmdline),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create Linux bootloader: %w", err)
+	// Create EFI variable store for UEFI NVRAM
+	// Modern ARM64 kernels have EFI stub and can't be used with NewLinuxBootLoader
+	// Use UEFI boot instead - disk.img contains ESP with UKI
+	efiVariableStorePath := "efi-nvram.bin"
+	var variableStore *vz.EFIVariableStore
+	
+	// Check if variable store already exists
+	if _, err := os.Stat(efiVariableStorePath); err == nil {
+		// Load existing variable store
+		fmt.Printf("[%s] Loading existing EFI variable store from %s...\n", time.Now().Format("15:04:05"), efiVariableStorePath)
+		variableStore, err = vz.NewEFIVariableStore(efiVariableStorePath)
+		if err != nil {
+			return fmt.Errorf("failed to load EFI variable store: %w", err)
+		}
+	} else {
+		// Create new variable store
+		fmt.Printf("[%s] Creating new EFI variable store at %s...\n", time.Now().Format("15:04:05"), efiVariableStorePath)
+		variableStore, err = vz.NewEFIVariableStore(efiVariableStorePath, vz.WithCreatingEFIVariableStore())
+		if err != nil {
+			return fmt.Errorf("failed to create EFI variable store: %w", err)
+		}
 	}
-	fmt.Printf("[%s] Bootloader configured\n", time.Now().Format("15:04:05"))
+
+	// Create UEFI bootloader with variable store
+	fmt.Printf("[%s] Creating EFI bootloader...\n", time.Now().Format("15:04:05"))
+	bootLoader, err := vz.NewEFIBootLoader(vz.WithEFIVariableStore(variableStore))
+	if err != nil {
+		return fmt.Errorf("failed to create EFI bootloader: %w", err)
+	}
+	fmt.Printf("[%s] EFI bootloader configured with variable store\n", time.Now().Format("15:04:05"))
 
 	// Create console logging attachment
 	consoleLogPath := "vm-console.log"
