@@ -13,6 +13,9 @@ on:
         required: false
   workflow_call:
     secrets:
+      # A Classic github personal access token that can download releases from the private repository exasol-labs/exasol-nano.
+      EXASOL_NANO_TOKEN:
+        required: true
       IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED:
         required: true
       IOS_PKCS12_IDENTITY_CERTIFICATE_PASSWORD:
@@ -54,6 +57,8 @@ jobs:
         run: task install-deps
       
       - name: Build all packages
+        env:
+          GH_TOKEN: ${{ secrets.EXASOL_NANO_TOKEN }}
         run: task package
       
       - name: Upload release artifacts
