@@ -2,7 +2,34 @@
 set -euo pipefail
 
 # Script to trigger Build Packages workflow and download macOS launcher
-# Usage: ./ci-build-mac-launcher.sh
+# Usage: ./ci-build-mac-launcher.sh [--skip-linux-build] [--use-run-id RUN_ID]
+#
+# Options:
+#   --skip-linux-build    Skip building Linux packages (reuse from previous run)
+#   --use-run-id RUN_ID   Use Linux packages from specific run ID
+
+SKIP_LINUX_BUILD="false"
+PREVIOUS_RUN_ID=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --skip-linux-build)
+      SKIP_LINUX_BUILD="true"
+      shift
+      ;;
+    --use-run-id)
+      PREVIOUS_RUN_ID="$2"
+      SKIP_LINUX_BUILD="true"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--skip-linux-build] [--use-run-id RUN_ID]"
+      exit 1
+      ;;
+  esac
+done
 
 # Check if gh CLI is installed
 if ! command -v gh &> /dev/null; then
@@ -52,7 +79,23 @@ echo ""
 
 # Trigger workflow
 echo "Triggering 'Build Packages' workflow on branch: $BRANCH"
-gh workflow run build-packages.yml --ref "$BRANCH"
+if [ "$SKIP_LINUX_BUILD" = "true" ]; then
+  echo "  - Skipping Linux build (using previous artifacts)"
+  if [ -n "$PREVIOUS_RUN_ID" ]; then
+    echo "  - Using run ID: $PREVIOUS_RUN_ID"
+    gh workflow run build-packages.yml \
+      --ref "$BRANCH" \
+      --field skip-linux-build=true \
+      --field previous-run-id="$PREVIOUS_RUN_ID"
+  else
+    echo "  - Will use latest successful run"
+    gh workflow run build-packages.yml \
+      --ref "$BRANCH" \
+      --field skip-linux-build=true
+  fi
+else
+  gh workflow run build-packages.yml --ref "$BRANCH"
+fi
 
 echo "Waiting for workflow to start..."
 sleep 5
@@ -111,8 +154,15 @@ echo ""
 ls -lh ci-downloads/
 echo ""
 
-if [ -f ci-downloads/mac-runner-aarch64 ]; then
-  echo "✓ Binary: ci-downloads/mac-runner-aarch64"
+if [ -f ci-downloads/mac-runner-aarch64.zip ]; then
+  echo "✓ Notarized zip: ci-downloads/mac-runner-aarch64.zip"
+fi
+
+if [ "$SKIP_LINUX_BUILD" != "true" ]; then
+  echo ""
+  echo "💡 Tip: To skip rebuilding Linux packages next time (faster):"
+  echo "   $0 --skip-linux-build"
+  echo "   This will reuse Linux packages from run $RUN_ID"
 fi
 
 if [ -f ci-downloads/mac-runner-aarch64.zip ]; then
