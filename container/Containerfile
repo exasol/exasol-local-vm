@@ -77,16 +77,13 @@ RUN --mount=type=bind,target=/host/ sh -c '\
 #
 # The host-side build (host/build/build-artifacts.sh) stages the matching
 # nano-container tarball as ./container.tar.gz before invoking `podman build`.
-# We load it into the guest's podman storage at build time so the disk image
-# ships with the image already unpacked under /var/lib/containers/storage.
-# At runtime, the guest's load-shared-container service can `podman run` the
-# image directly without paying the `podman load` cost on first boot.
 #
-# Use --root to run as rootful podman (avoids user namespace issues in CI).
+# Originally we loaded it into podman storage at build time, but this requires
+# nested podman which fails in restricted CI environments. Instead, we now
+# include the tarball in the image and let the VM load it on first boot.
+# This is slightly slower on first boot but more reliable across environments.
 
-COPY container.tar.gz /tmp/container.tar.gz
-RUN podman --root /var/lib/containers/storage load -i /tmp/container.tar.gz \
- && rm /tmp/container.tar.gz
+COPY container.tar.gz /opt/exasol-nano-container.tar.gz
 
 
 ### Clean up to minimize image

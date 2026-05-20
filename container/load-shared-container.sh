@@ -229,6 +229,28 @@ if [ "$SKIP_LOAD" = "false" ]; then
   fi
 fi  # End of SKIP_LOAD check
 
+# Check if any images exist in podman storage
+IMAGE_COUNT=$(podman images --format "{{.Repository}}" 2>/dev/null | wc -l)
+if [ "$IMAGE_COUNT" -eq 0 ]; then
+  log_msg "No container images found in podman storage"
+  
+  # Try to load from embedded tarball (included in VM image at build time)
+  EMBEDDED_TARBALL="/opt/exasol-nano-container.tar.gz"
+  if [ -f "$EMBEDDED_TARBALL" ]; then
+    log_msg "Loading container image from embedded tarball: $EMBEDDED_TARBALL"
+    if podman load < "$EMBEDDED_TARBALL" 2>&1; then
+      log_msg "Successfully loaded embedded container image"
+    else
+      log_msg "Error: Failed to load embedded container image"
+      exit 1
+    fi
+  else
+    log_msg "Error: No embedded tarball found at $EMBEDDED_TARBALL"
+    log_msg "The VM image may not have been built correctly"
+    exit 1
+  fi
+fi
+
 # Get the image name
 IMAGE_NAME=$(podman images --format "{{.Repository}}:{{.Tag}}" | head -n 1)
 if [ -z "$IMAGE_NAME" ]; then

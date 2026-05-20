@@ -61,8 +61,6 @@ BASE_BUILD_ARGS=(
     --pull=newer
     --arch="${IMG_ARCH}"
     --iidfile="${OUTPUT_DIR}/base_image_id"
-    --security-opt=label=disable
-    --security-opt=seccomp=unconfined
 )
 # The converter needs to be built for the same architecture as the target image
 # to have access to the correct efi stub for that architecture to boot the
