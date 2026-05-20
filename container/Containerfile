@@ -81,9 +81,11 @@ RUN --mount=type=bind,target=/host/ sh -c '\
 # ships with the image already unpacked under /var/lib/containers/storage.
 # At runtime, the guest's load-shared-container service can `podman run` the
 # image directly without paying the `podman load` cost on first boot.
+#
+# Use --root to run as rootful podman (avoids user namespace issues in CI).
 
 COPY container.tar.gz /tmp/container.tar.gz
-RUN podman load -i /tmp/container.tar.gz \
+RUN podman --root /var/lib/containers/storage load -i /tmp/container.tar.gz \
  && rm /tmp/container.tar.gz
 
 
