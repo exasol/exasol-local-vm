@@ -11,7 +11,7 @@ shift
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/output/${IMG_ARCH}}"
 
-RAW_DISK="$OUTPUT_DIR/disk_thin.img"
+RAW_DISK="$OUTPUT_DIR/disk.img"  # Use fat image with ESP for UEFI boot
 KERNEL_FILE="$OUTPUT_DIR/vmlinuz-virt"
 INITRD_FILE="$OUTPUT_DIR/initramfs.img"
 KERNEL_CMDLINE_FILE="$OUTPUT_DIR/kernel-cmdline.txt"
@@ -41,10 +41,11 @@ PACKAGE_DIR="$ROOT_DIR/package/$PACKAGE_NAME"
 RELEASE_FILE="$ROOT_DIR/release/$PACKAGE_NAME.tar.xz"
 
 mkdir -p "$PACKAGE_DIR" "$ROOT_DIR/release"
-cp "$RAW_DISK" "$PACKAGE_DIR/disk_thin.img"
-cp "$KERNEL_FILE" "$PACKAGE_DIR/vmlinuz-virt"
-cp "$INITRD_FILE" "$PACKAGE_DIR/initramfs.img"
-cp "$KERNEL_CMDLINE_FILE" "$PACKAGE_DIR/kernel-cmdline.txt"
+cp "$RAW_DISK" "$PACKAGE_DIR/disk.img"
+
+# Note: Using UEFI boot with fat disk image
+# Kernel, initramfs, and cmdline are bundled in the ESP partition as a UKI
+# Modern ARM64 kernels have EFI stub and require UEFI boot
 
 curl -fSL -o "$PACKAGE_DIR/gvproxy" "$GVPROXY_URL"
 chmod +x "$PACKAGE_DIR/gvproxy"
