@@ -206,17 +206,6 @@ jobs:
             --key "$KEY_PATH" \
             --wait
       
-      - name: Staple notarization ticket
-        run: |
-          set -euo pipefail
-          echo "Stapling notarization ticket to zip..."
-          xcrun stapler staple dist/mac-runner-aarch64.zip
-          echo "✓ Notarization ticket stapled"
-          
-          echo "Validating stapled notarization..."
-          xcrun stapler validate dist/mac-runner-aarch64.zip
-          echo "✓ Stapled notarization validated"
-      
       - name: Upload VM logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
