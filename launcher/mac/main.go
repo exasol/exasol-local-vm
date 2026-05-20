@@ -197,25 +197,17 @@ func main() {
 		err = initCmd()
 	case "start":
 		if len(os.Args) < 4 {
-			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size> [shared_dir]")
+			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size>")
 			os.Exit(1)
 		}
-		sharedDir := ""
-		if len(os.Args) >= 5 {
-			sharedDir = os.Args[4]
-		}
-		err = startCmd(os.Args[2], os.Args[3], sharedDir)
+		err = startCmd(os.Args[2], os.Args[3])
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "Invalid daemon arguments")
 			os.Exit(1)
 		}
-		sharedDir := ""
-		if len(os.Args) >= 5 {
-			sharedDir = os.Args[4]
-		}
-		err = runVMDaemon(os.Args[2], os.Args[3], sharedDir)
+		err = runVMDaemon(os.Args[2], os.Args[3])
 	case "stop":
 		err = stopCmd()
 	default:
@@ -304,18 +296,23 @@ func initCmd() error {
 		}
 	}
 
+	// Create shared directory for host-guest file sharing
+	sharedDir := "vm-shared"
+	if err := os.MkdirAll(sharedDir, 0755); err != nil {
+		return fmt.Errorf("failed to create shared directory: %w", err)
+	}
+	fmt.Printf("Created shared directory: %s/\n", sharedDir)
+
 	fmt.Println("Successfully initialized VM")
 	fmt.Printf("VM files extracted to: %s/\n", vmDir)
-	fmt.Println("Run 'mac-runner start <cpu_count> <ram_size> [shared_dir]' to start the VM")
+	fmt.Printf("Shared folder: %s/ -> /mnt/host (inside VM)\n", sharedDir)
+	fmt.Println("Run 'mac-runner start <cpu_count> <ram_size>' to start the VM")
 	return nil
 }
 
-func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
-	if sharedDir != "" {
-		fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, shared_dir=%s\n", cpuCountStr, ramSizeStr, sharedDir)
-	} else {
-		fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s\n", cpuCountStr, ramSizeStr)
-	}
+func startCmd(cpuCountStr, ramSizeStr string) error {
+	sharedDir := "vm-shared"
+	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, shared_dir=%s\n", cpuCountStr, ramSizeStr, sharedDir)
 
 	// Check if VM has been initialized
 	vmDir := "vm"
@@ -367,13 +364,6 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}
 
 	args := []string{executable, "__daemon__", cpuCountStr, ramSizeStr}
-	if sharedDir != "" {
-		abs, err := filepath.Abs(sharedDir)
-		if err != nil {
-			return fmt.Errorf("failed to get absolute path for shared directory: %w", err)
-		}
-		args = append(args, abs)
-	}
 
 	process, err := os.StartProcess(executable, args, attr)
 	if err != nil {
@@ -474,9 +464,7 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 		process.Release()
 		
 		fmt.Println("VM started successfully in background")
-		if sharedDir != "" {
-			fmt.Printf("Shared folder: %s -> /mnt/host (inside VM)\n", sharedDir)
-		}
+		fmt.Printf("Shared folder: %s/ -> /mnt/host (inside VM)\n", sharedDir)
 		fmt.Println("Check vm.log for VM output")
 		fmt.Println("Use 'mac-runner stop' to stop the VM")
 		return nil
@@ -487,8 +475,9 @@ func startCmd(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}
 }
 
-func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
+func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	// This function runs as a background daemon
+	sharedDir := "vm-shared"
 	
 	fmt.Printf("[%s] VM daemon started\n", time.Now().Format("15:04:05"))
 	fmt.Printf("[%s] Parsing configuration: CPU=%s, RAM=%s MB\n", time.Now().Format("15:04:05"), cpuCountStr, ramSizeStr)
@@ -603,44 +592,42 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 	}
 	fmt.Printf("[%s] Entropy device configured\n", time.Now().Format("15:04:05"))
 
-	// Create VirtioFS shared directory device if provided
-	var sharedDirConfig *vz.VirtioFileSystemDeviceConfiguration
-	if sharedDir != "" {
-		fmt.Printf("[%s] Configuring VirtioFS shared directory: %s...\n", time.Now().Format("15:04:05"), sharedDir)
-		// Ensure shared directory exists
-		if _, err := os.Stat(sharedDir); os.IsNotExist(err) {
-			fmt.Printf("[%s] Creating shared directory: %s\n", time.Now().Format("15:04:05"), sharedDir)
-			if err := os.MkdirAll(sharedDir, 0755); err != nil {
-				return fmt.Errorf("failed to create shared directory: %w", err)
-			}
+	// Create VirtioFS shared directory device
+	fmt.Printf("[%s] Configuring VirtioFS shared directory: %s...\n", time.Now().Format("15:04:05"), sharedDir)
+	// Ensure shared directory exists
+	if _, err := os.Stat(sharedDir); os.IsNotExist(err) {
+		fmt.Printf("[%s] Creating shared directory: %s\n", time.Now().Format("15:04:05"), sharedDir)
+		if err := os.MkdirAll(sharedDir, 0755); err != nil {
+			return fmt.Errorf("failed to create shared directory: %w", err)
 		}
-
-		// Get absolute path
-		absSharedDir, err := filepath.Abs(sharedDir)
-		if err != nil {
-			return fmt.Errorf("failed to get absolute path for shared directory: %w", err)
-		}
-
-		// Create VirtioFS device with tag "hostshare" (matches cloud-init config)
-		sharedDirObj, err := vz.NewSharedDirectory(absSharedDir, false)
-		if err != nil {
-			return fmt.Errorf("failed to create shared directory device: %w", err)
-		}
-
-		// Wrap in SingleDirectoryShare to implement DirectoryShare interface
-		directoryShare, err := vz.NewSingleDirectoryShare(sharedDirObj)
-		if err != nil {
-			return fmt.Errorf("failed to create directory share: %w", err)
-		}
-
-		sharedDirConfig, err = vz.NewVirtioFileSystemDeviceConfiguration("hostshare")
-		if err != nil {
-			return fmt.Errorf("failed to create VirtioFS config: %w", err)
-		}
-		sharedDirConfig.SetDirectoryShare(directoryShare)
-
-		fmt.Printf("[%s] VirtioFS shared folder configured: %s -> /mnt/host\n", time.Now().Format("15:04:05"), absSharedDir)
 	}
+
+	// Get absolute path
+	absSharedDir, err := filepath.Abs(sharedDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for shared directory: %w", err)
+	}
+
+	// Create VirtioFS device with tag "hostshare" (matches cloud-init config)
+	sharedDirObj, err := vz.NewSharedDirectory(absSharedDir, false)
+	if err != nil {
+		return fmt.Errorf("failed to create shared directory device: %w", err)
+	}
+
+	// Wrap in SingleDirectoryShare to implement DirectoryShare interface
+	directoryShare, err := vz.NewSingleDirectoryShare(sharedDirObj)
+	if err != nil {
+		return fmt.Errorf("failed to create directory share: %w", err)
+	}
+
+	var sharedDirConfig *vz.VirtioFileSystemDeviceConfiguration
+	sharedDirConfig, err = vz.NewVirtioFileSystemDeviceConfiguration("hostshare")
+	if err != nil {
+		return fmt.Errorf("failed to create VirtioFS config: %w", err)
+	}
+	sharedDirConfig.SetDirectoryShare(directoryShare)
+
+	fmt.Printf("[%s] VirtioFS shared folder configured: %s -> /mnt/host\n", time.Now().Format("15:04:05"), absSharedDir)
 
 	// Create VM configuration
 	vzConfig, err := vz.NewVirtualMachineConfiguration(
@@ -669,12 +656,10 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 		entropyConfig,
 	})
 
-	// Add shared directory if configured
-	if sharedDirConfig != nil {
-		vzConfig.SetDirectorySharingDevicesVirtualMachineConfiguration([]vz.DirectorySharingDeviceConfiguration{
-			sharedDirConfig,
-		})
-	}
+	// Add shared directory
+	vzConfig.SetDirectorySharingDevicesVirtualMachineConfiguration([]vz.DirectorySharingDeviceConfiguration{
+		sharedDirConfig,
+	})
 
 	// Validate configuration
 	fmt.Printf("[%s] Validating VM configuration...\n", time.Now().Format("15:04:05"))
@@ -797,10 +782,8 @@ func runVMDaemon(cpuCountStr, ramSizeStr, sharedDir string) error {
 			"ui":  uiPort,
 		},
 	}
-	if sharedDir != "" {
-		abs, _ := filepath.Abs(sharedDir)
-		vmState["shared_dir"] = abs
-	}
+	abs, _ := filepath.Abs(sharedDir)
+	vmState["shared_dir"] = abs
 
 	stateData, err := json.MarshalIndent(vmState, "", "  ")
 	if err != nil {
