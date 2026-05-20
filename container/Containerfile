@@ -22,18 +22,7 @@ RUN apk add \
 
 ### Configure podman
 
-RUN printf '[storage]\ndriver = "overlay"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\nmountopt = "nodev"\n' > /etc/containers/storage.conf
-
-[storage.options.overlay]
-mount_program = "/usr/bin/fuse-overlayfs"
-mountopt = "nodev"
-# Skip lchown calls that the build-time user namespace cannot satisfy.
-# Required when podman load runs inside `podman build` (nested user
-# namespaces don't have arbitrary GIDs like 42/shadow mapped). Safe at
-# runtime: container processes don't depend on file ownership matching
-# the host's GID space.
-ignore_chown_errors = "true"
-EOF
+RUN printf '[storage]\ndriver = "overlay"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\nmountopt = "nodev"\nignore_chown_errors = "true"\n' > /etc/containers/storage.conf
 
 RUN echo 'containers:100000:65536' | tee /etc/subuid /etc/subgid
 
