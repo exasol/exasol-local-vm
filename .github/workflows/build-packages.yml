@@ -2,6 +2,15 @@ name: Build Packages
 
 on:
   workflow_dispatch:
+    inputs:
+      skip-linux-build:
+        description: 'Skip building Linux packages (use existing artifact)'
+        type: boolean
+        default: false
+      previous-run-id:
+        description: 'Previous workflow run ID to download Linux packages from (leave empty to use latest successful run)'
+        type: string
+        required: false
   workflow_call:
     secrets:
       IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED:
@@ -26,6 +35,7 @@ on:
 
 jobs:
   build-linux-packages:
+    if: ${{ !inputs.skip-linux-build }}
     runs-on: ubuntu-latest
     outputs:
       artifact-name: ${{ steps.upload.outputs.artifact-id }}
@@ -60,6 +70,7 @@ jobs:
   build-mac-launcher:
     runs-on: macos-latest
     needs: build-linux-packages
+    if: always()
     outputs:
       artifact-name: ${{ steps.upload.outputs.artifact-id }}
     
@@ -73,11 +84,46 @@ jobs:
           go-version: '1.22'
           cache-dependency-path: launcher/mac/go.sum
       
-      - name: Download release packages
+      - name: Download release packages from current run
+        if: ${{ !inputs.skip-linux-build }}
         uses: actions/download-artifact@v4
         with:
           name: release-packages
           path: release/
+      
+      - name: Download release packages from previous run
+        if: ${{ inputs.skip-linux-build }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          
+          RUN_ID="${{ inputs.previous-run-id }}"
+          
+          if [ -z "$RUN_ID" ]; then
+            echo "Finding latest successful workflow run on branch: ${{ github.ref_name }}..."
+            RUN_ID=$(gh run list \
+              --workflow build-packages.yml \
+              --branch "${{ github.ref_name }}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')
+            
+            if [ -z "$RUN_ID" ]; then
+              echo "Error: No successful previous run found on branch ${{ github.ref_name }}" >&2
+              exit 1
+            fi
+            echo "Using run ID: $RUN_ID"
+          fi
+          
+          echo "Downloading release-packages artifact from run $RUN_ID..."
+          gh run download "$RUN_ID" \
+            --name release-packages \
+            --dir release/
+          
+          echo "Downloaded artifacts:"
+          ls -lh release/
       
       - name: Install Task
         run: |
