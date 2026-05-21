@@ -19,6 +19,16 @@ tasks:
     cmds:
       - ./nano-container/build.sh "{{.IMG_ARCH}}"
 
+  stage-init-assets:
+    desc: Stage nano-container tarball into launcher/assets/init for {{.IMG_ARCH}}
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    cmds:
+      - ./launcher/assets/stage-init-assets.sh "{{.IMG_ARCH}}"
+
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages for {{.IMG_ARCH}}
     run: when_changed
@@ -198,6 +208,9 @@ tasks:
         - name: IMG_ARCH
           enum: [aarch64, x86_64]
     cmds:
+      - task: stage-init-assets
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
       - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
 
   package-windows:

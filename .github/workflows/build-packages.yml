@@ -111,7 +111,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: release-packages
-          path: release/
+          path: .
       
       - name: Download release packages from previous run
         if: ${{ inputs.skip-linux-build }}
@@ -142,10 +142,14 @@ jobs:
           echo "Downloading release-packages artifact from run $RUN_ID..."
           gh run download "$RUN_ID" \
             --name release-packages \
-            --dir release/
+            --dir .
           
           echo "Downloaded artifacts:"
-          ls -lhR release/
+          echo "=== Release packages ==="
+          ls -lh release/
+          echo ""
+          echo "=== Nano-container tarballs ==="
+          ls -lh output/nano-container/
           echo ""
           echo "Checking for mac-arm64.tar.xz:"
           if [ -f release/mac-arm64.tar.xz ]; then
@@ -161,8 +165,11 @@ jobs:
       
       - name: List downloaded artifacts
         run: |
-          echo "Checking release directory contents:"
+          echo "=== Release directory contents ==="
           ls -lh release/ || echo "release/ directory not found or empty"
+          echo ""
+          echo "=== Nano-container tarballs ==="
+          ls -lh output/nano-container/ || echo "output/nano-container/ directory not found or empty"
           echo ""
           echo "Checking for required mac-arm64.tar.xz:"
           if [ -f release/mac-arm64.tar.xz ]; then

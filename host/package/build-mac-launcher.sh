@@ -17,22 +17,25 @@ case "$ARCH" in
     *) echo "Error: unknown architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-RELEASE_FILE="${RELEASE_FILE:-$ROOT_DIR/release/$PACKAGE_NAME.tar.xz}"
+VM_ARTIFACTS_TARBALL="${RELEASE_FILE:-$ROOT_DIR/release/$PACKAGE_NAME.tar.xz}"
 
-if [ ! -f "$RELEASE_FILE" ]; then
-    echo "Error: Release file not found: $RELEASE_FILE" >&2
+if [ ! -f "$VM_ARTIFACTS_TARBALL" ]; then
+    echo "Error: Release file not found: $VM_ARTIFACTS_TARBALL" >&2
     echo "Run 'task package-mac IMG_ARCH=$IMG_ARCH' first to create the archive." >&2
     exit 1
 fi
 
 echo "==> Building macOS launcher for $ARCH..."
-echo "    Release archive: $RELEASE_FILE"
+echo "    Release archive: $VM_ARTIFACTS_TARBALL"
 
 LAUNCHER_DIR="$ROOT_DIR/launcher/mac"
 pushd "$LAUNCHER_DIR" > /dev/null
 
 # Copy the release archive to be embedded
-cp "$RELEASE_FILE" vm-package.tar.xz
+cp "$VM_ARTIFACTS_TARBALL" vm-package.tar.xz
+
+# TODO compress /launcher/assets/init into a tarball in /launcher/mac and embed that alongside the vm artifacts.
+# Then, when we run the laucher's init command, uncmpress that into shared/init
 
 # Update Go module dependencies and go.sum
 echo "Updating Go dependencies..."
@@ -43,7 +46,7 @@ go mod download
 LAUNCHER_OUTPUT="$ROOT_DIR/release/mac-runner-$ARCH"
 GOOS=darwin GOARCH="$GOARCH" go build -o "$LAUNCHER_OUTPUT" .
 
-# Clean up generated file
+# Clean up generated files
 rm -f vm-package.tar.xz
 
 popd > /dev/null
