@@ -1,0 +1,8 @@
+{
+    "container-name": "exasol-nano-db",
+    "tarball-name": "exasol-nano-db.tar.gz",
+    "ports": {
+        "db": 8563,
+        "ui": 8443
+    }
+}
