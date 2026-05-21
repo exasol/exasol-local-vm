@@ -54,11 +54,8 @@ RUN printf 'LABEL=exasol-data   /var        ext4       defaults          0 2\nho
 
 COPY exasol-network /etc/init.d/exasol-network
 COPY grow-var-fs.initd.sh /etc/init.d/grow-var-fs
-COPY import-shared-keys.initd.sh /etc/init.d/import-shared-keys
-COPY import-shared-keys.sh /usr/local/bin/import-shared-keys.sh
-COPY load-shared-container.initd.sh /etc/init.d/load-shared-container
-COPY load-shared-container.sh /usr/local/bin/load-shared-container.sh
 COPY report-ip.initd.sh /etc/init.d/report-ip
+COPY run-host-init.initd.sh /etc/init.d/run-host-init
 
 # Enables the same services that the default alpine vm image enables:
 # https://github.com/alpinelinux/alpine-make-vm-image/blob/ab659ff532b0e27684a08d11df116b9f7665081a/alpine-make-vm-image#L685-L694
@@ -67,23 +64,11 @@ COPY report-ip.initd.sh /etc/init.d/report-ip
 RUN --mount=type=bind,target=/host/ sh -c '\
     set -eu && \
     /host/rc_add sysinit  devfs dmesg mdev hwdrivers && \
-    /host/rc_add boot     exasol-network import-shared-keys grow-var-fs load-shared-container report-ip && \
+    /host/rc_add boot     exasol-network grow-var-fs report-ip && \
     /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking && \
+    /host/rc_add boot     run-host-init && \
     /host/rc_add default  acpid sshd && \
     /host/rc_add shutdown killprocs savecache mount-ro'
-
-
-### Pre-load the Exasol Nano DB container image
-#
-# The host-side build (host/build/build-artifacts.sh) stages the matching
-# nano-container tarball as ./container.tar.gz before invoking `podman build`.
-#
-# Originally we loaded it into podman storage at build time, but this requires
-# nested podman which fails in restricted CI environments. Instead, we now
-# include the tarball in the image and let the VM load it on first boot.
-# This is slightly slower on first boot but more reliable across environments.
-
-COPY container.tar.gz /opt/exasol-nano-container.tar.gz
 
 
 ### Clean up to minimize image
