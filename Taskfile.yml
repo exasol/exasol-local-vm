@@ -9,6 +9,16 @@ tasks:
       - sudo apt-get install -y jq podman xz-utils qemu-user-static
       - sudo systemctl restart systemd-binfmt
 
+  build-nano-container:
+    desc: Build the Exasol Nano DB container tarball for {{.IMG_ARCH}}
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    cmds:
+      - ./nano-container/build.sh "{{.IMG_ARCH}}"
+
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages for {{.IMG_ARCH}}
     run: when_changed
@@ -16,10 +26,6 @@ tasks:
       vars:
         - name: IMG_ARCH
           enum: [x86_64, aarch64]
-    deps:
-      - task: build-nano-container
-        vars:
-          IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
       - ./host/build/build-artifacts.sh "{{.IMG_ARCH}}"
 
@@ -155,15 +161,6 @@ tasks:
     dir: examples/demo-container
     cmds:
       - ./build-packaged-container.sh "{{.IMG_ARCH}}" shared
-
-  build-nano-container:
-    desc: Build the Exasol Nano DB container for {{.IMG_ARCH}}
-    requires:
-      vars:
-        - name: IMG_ARCH
-          enum: [x86_64, aarch64]
-    cmds:
-      - ./nano-container/build.sh "{{.IMG_ARCH}}"
 
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}

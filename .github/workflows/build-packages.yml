@@ -56,7 +56,16 @@ jobs:
       - name: Install system dependencies
         run: task install-deps
       
-      # Note: In the future we should build all the packages at this step.
+      - name: Build nano-container for x86_64
+        env:
+          GH_TOKEN: ${{ secrets.EXASOL_NANO_TOKEN }}
+        run: task build-nano-container IMG_ARCH=x86_64
+      
+      - name: Build nano-container for aarch64
+        env:
+          GH_TOKEN: ${{ secrets.EXASOL_NANO_TOKEN }}
+        run: task build-nano-container IMG_ARCH=aarch64
+      
       - name: Build mac package
         env:
           GH_TOKEN: ${{ secrets.EXASOL_NANO_TOKEN }}
@@ -67,11 +76,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-packages
-          path: release/
+          path: |
+            release/
+            output/nano-container/
           retention-days: 7
       
       - name: List generated artifacts
-        run: ls -lh release/
+        run: |
+          echo "=== Release packages ==="
+          ls -lh release/
+          echo ""
+          echo "=== Nano-container tarballs ==="
+          ls -lh output/nano-container/
 
   build-mac-launcher:
     runs-on: macos-latest
