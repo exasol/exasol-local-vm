@@ -38,6 +38,12 @@ const (
 	guestUIPort     = 8443  // Exasol web UI port (HTTPS)
 )
 
+// InitOutput represents the JSON output from the VM init scripts
+type InitOutput struct {
+	IP    string         `json:"ip"`
+	Ports map[string]int `json:"ports"`
+}
+
 // readLastLines reads the last n lines from a file
 func readLastLines(filePath string, n int) ([]string, error) {
 	data, err := os.ReadFile(filePath)
@@ -157,6 +163,14 @@ func (f *LoopbackForwarder) proxyConnection(ctx context.Context, clientConn net.
 
 // waitForVMIP waits for the VM to report its IP address in the console log
 func waitForVMIP(consoleLogPath string, timeout time.Duration) (string, error) {
+	initOutput, err := waitForInitOutput(consoleLogPath, timeout)
+	if err != nil {
+		return "", err
+	}
+	return initOutput.IP, nil
+}
+
+func waitForInitOutput(consoleLogPath string, timeout time.Duration) (*InitOutput, error) {
 	deadline := time.Now().Add(timeout)
 	
 	for time.Now().Before(deadline) {
@@ -166,25 +180,46 @@ func waitForVMIP(consoleLogPath string, timeout time.Duration) (string, error) {
 			continue
 		}
 		
-		// Look for "*** EXASOL_VM_IP=192.168.64.2 ***"
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			if strings.Contains(line, "EXASOL_VM_IP=") {
-				// Extract IP address
-				parts := strings.Split(line, "EXASOL_VM_IP=")
-				if len(parts) >= 2 {
-					ip := strings.TrimSpace(strings.Trim(parts[1], "*"))
-					if net.ParseIP(ip) != nil {
-						return ip, nil
-					}
-				}
-			}
+		// Look for "=== INIT OUTPUT START ===" and "=== INIT OUTPUT END ==="
+		content := string(data)
+		startMarker := "=== INIT OUTPUT START ==="
+		endMarker := "=== INIT OUTPUT END ==="
+		
+		startIdx := strings.Index(content, startMarker)
+		if startIdx == -1 {
+			time.Sleep(500 * time.Millisecond)
+			continue
 		}
 		
-		time.Sleep(500 * time.Millisecond)
+		endIdx := strings.Index(content[startIdx:], endMarker)
+		if endIdx == -1 {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		
+		// Extract JSON between markers
+		jsonStart := startIdx + len(startMarker)
+		jsonEnd := startIdx + endIdx
+		jsonStr := strings.TrimSpace(content[jsonStart:jsonEnd])
+		
+		// Parse JSON
+		var initOutput InitOutput
+		if err := json.Unmarshal([]byte(jsonStr), &initOutput); err != nil {
+			return nil, fmt.Errorf("failed to parse init output JSON: %w", err)
+		}
+		
+		// Validate the output
+		if initOutput.IP == "" {
+			return nil, fmt.Errorf("init output missing IP address")
+		}
+		if net.ParseIP(initOutput.IP) == nil {
+			return nil, fmt.Errorf("invalid IP address in init output: %s", initOutput.IP)
+		}
+		
+		return &initOutput, nil
 	}
 	
-	return "", fmt.Errorf("timeout waiting for VM IP address after %v", timeout)
+	return nil, fmt.Errorf("timeout waiting for VM init output after %v", timeout)
 }
 
 func main() {
@@ -723,62 +758,47 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	fmt.Println("VM is running with NAT networking")
 	fmt.Printf("VM console output: vm-console.log\n")
 
-	// Wait for VM to report its IP address
-	fmt.Println("Waiting for VM to report IP address...")
-	vmIP, err := waitForVMIP("vm-console.log", 30*time.Second)
+	// Wait for VM to output init configuration
+	fmt.Println("Waiting for VM initialization...")
+	initOutput, err := waitForInitOutput("vm-console.log", 5*time.Minute)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Falling back to default IP: %s\n", guestIPv4)
-		vmIP = guestIPv4
-	} else {
-		fmt.Printf("VM IP address: %s\n", vmIP)
+		return fmt.Errorf("VM initialization failed: %w", err)
 	}
-
-	// Start port forwarders with discovered IP (use port 0 for dynamic allocation)
-	ctx := context.Background()
 	
-	// SSH forwarder
-	sshForwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestSSHPort)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to start SSH port forwarder: %v\n", err)
-	} else {
-		defer sshForwarder.Close()
-	}
+	fmt.Printf("VM IP address: %s\n", initOutput.IP)
+	fmt.Printf("VM ports: %+v\n", initOutput.Ports)
 
-	// Database forwarder
-	dbForwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestDBPort)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to start database port forwarder: %v\n", err)
-	} else {
-		defer dbForwarder.Close()
-	}
+	vmIP := initOutput.IP
 
-	// UI forwarder
-	uiForwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestUIPort)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to start UI port forwarder: %v\n", err)
-	} else {
-		defer uiForwarder.Close()
+	// Start port forwarders dynamically for all ports in init output
+	ctx := context.Background()
+	forwarders := make(map[string]*LoopbackForwarder)
+	hostPorts := make(map[string]int)
+	
+	for portName, guestPort := range initOutput.Ports {
+		if guestPort == 0 {
+			fmt.Fprintf(os.Stderr, "Warning: Skipping port forwarding for %s (port is 0)\n", portName)
+			continue
+		}
+		
+		forwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestPort)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
+			continue
+		}
+		
+		forwarders[portName] = forwarder
+		hostPort := forwarder.Port()
+		hostPorts[portName] = hostPort
+		fmt.Printf("%s forwarding: 127.0.0.1:%d -> %s:%d\n", portName, hostPort, vmIP, guestPort)
 	}
-
-	// Get the actual allocated ports
-	sshPort := 0
-	if sshForwarder != nil {
-		sshPort = sshForwarder.Port()
-		fmt.Printf("SSH forwarding: 127.0.0.1:%d -> %s:%d\n", sshPort, vmIP, guestSSHPort)
-	}
-
-	dbPort := 0
-	if dbForwarder != nil {
-		dbPort = dbForwarder.Port()
-		fmt.Printf("Database forwarding: 127.0.0.1:%d -> %s:%d\n", dbPort, vmIP, guestDBPort)
-	}
-
-	uiPort := 0
-	if uiForwarder != nil {
-		uiPort = uiForwarder.Port()
-		fmt.Printf("UI forwarding: 127.0.0.1:%d -> %s:%d\n", uiPort, vmIP, guestUIPort)
-	}
+	
+	// Ensure forwarders are closed on exit
+	defer func() {
+		for _, forwarder := range forwarders {
+			forwarder.Close()
+		}
+	}()
 
 	// Write vm-state.json with runtime configuration
 	vmState := map[string]interface{}{
@@ -787,11 +807,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 		"cpu_count": cpuCountStr,
 		"ram_size":  ramSizeStr,
 		"pid":       fmt.Sprintf("%d", os.Getpid()),
-		"ports": map[string]int{
-			"ssh": sshPort,
-			"db":  dbPort,
-			"ui":  uiPort,
-		},
+		"ports":     hostPorts,
 	}
 	abs, _ := filepath.Abs(sharedDir)
 	vmState["shared_dir"] = abs
@@ -809,13 +825,13 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	
 	// Display access information
 	fmt.Println("\n=== VM Access Information ===")
-	if sshPort > 0 {
+	if sshPort, ok := hostPorts["ssh"]; ok && sshPort > 0 {
 		fmt.Printf("SSH:      ssh -p %d exasol@127.0.0.1\n", sshPort)
 	}
-	if dbPort > 0 {
+	if dbPort, ok := hostPorts["db"]; ok && dbPort > 0 {
 		fmt.Printf("Database: 127.0.0.1:%d\n", dbPort)
 	}
-	if uiPort > 0 {
+	if uiPort, ok := hostPorts["ui"]; ok && uiPort > 0 {
 		fmt.Printf("Web UI:   https://127.0.0.1:%d\n", uiPort)
 	}
 

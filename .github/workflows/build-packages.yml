@@ -56,11 +56,6 @@ jobs:
       - name: Install system dependencies
         run: task install-deps
       
-      - name: Build nano-container for x86_64
-        env:
-          GH_TOKEN: ${{ secrets.EXASOL_NANO_TOKEN }}
-        run: task build-nano-container IMG_ARCH=x86_64
-      
       - name: Build nano-container for aarch64
         env:
           GH_TOKEN: ${{ secrets.EXASOL_NANO_TOKEN }}
