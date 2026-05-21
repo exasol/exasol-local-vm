@@ -26,6 +26,9 @@ import (
 //go:embed vm-package.tar.xz
 var vmPackage []byte
 
+//go:embed init-assets.tar.xz
+var initAssets []byte
+
 const (
 	// guestIPv4 is the expected IP for the first VM in Virtualization.framework NAT
 	// The actual IP is detected at runtime by parsing console output
@@ -222,6 +225,61 @@ func main() {
 	}
 }
 
+// extractTarXZ extracts a tar.xz archive to the specified output directory.
+// pathTransform is an optional function to transform archive paths before extracting.
+func extractTarXZ(data []byte, outputDir string, pathTransform func(string) string) error {
+	xzReader, err := xz.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to create xz reader: %w", err)
+	}
+
+	tarReader := tar.NewReader(xzReader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read tar header: %w", err)
+		}
+
+		// Apply path transformation if provided
+		outputPath := header.Name
+		if pathTransform != nil {
+			outputPath = pathTransform(header.Name)
+			if outputPath == "" {
+				continue // Skip this entry
+			}
+		}
+		outputPath = filepath.Join(outputDir, outputPath)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(outputPath, 0755); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", outputPath, err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+				return fmt.Errorf("failed to create parent directory for %s: %w", outputPath, err)
+			}
+			outFile, err := os.Create(outputPath)
+			if err != nil {
+				return fmt.Errorf("failed to create file %s: %w", outputPath, err)
+			}
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				outFile.Close()
+				return fmt.Errorf("failed to write file %s: %w", outputPath, err)
+			}
+			outFile.Close()
+			if header.Mode&0111 != 0 {
+				os.Chmod(outputPath, 0755)
+			}
+			fmt.Printf("Extracted: %s\n", outputPath)
+		}
+	}
+	return nil
+}
+
 func initCmd() error {
 	fmt.Println("Initializing VM...")
 	fmt.Println("Extracting VM package...")
@@ -232,68 +290,15 @@ func initCmd() error {
 		return fmt.Errorf("failed to create vm directory: %w", err)
 	}
 
-	// Create a reader from the embedded data
-	bytesReader := bytes.NewReader(vmPackage)
-
-	// Create xz decompressor
-	xzReader, err := xz.NewReader(bytesReader)
-	if err != nil {
-		return fmt.Errorf("failed to create xz reader: %w", err)
-	}
-
-	// Create tar reader
-	tarReader := tar.NewReader(xzReader)
-
-	// Extract all files from the archive
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read tar header: %w", err)
-		}
-
-		// Construct output path in vm directory
-		// The archive contains mac-arm64/files, we want to extract to vm/files
-		relPath := header.Name
-		// Strip the first directory component (mac-arm64 or mac-x86_64)
-		parts := strings.SplitN(relPath, "/", 2)
+	// Extract VM package, stripping the first directory component (mac-arm64 or mac-x86_64)
+	if err := extractTarXZ(vmPackage, vmDir, func(path string) string {
+		parts := strings.SplitN(path, "/", 2)
 		if len(parts) < 2 {
-			continue // Skip the top-level directory entry
+			return "" // Skip the top-level directory entry
 		}
-		outputPath := filepath.Join(vmDir, parts[1])
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(outputPath, 0755); err != nil {
-				return fmt.Errorf("failed to create directory %s: %w", outputPath, err)
-			}
-		case tar.TypeReg:
-			// Ensure parent directory exists
-			parentDir := filepath.Dir(outputPath)
-			if err := os.MkdirAll(parentDir, 0755); err != nil {
-				return fmt.Errorf("failed to create parent directory: %w", err)
-			}
-
-			outFile, err := os.Create(outputPath)
-			if err != nil {
-				return fmt.Errorf("failed to create output file %s: %w", outputPath, err)
-			}
-
-			if _, err := io.Copy(outFile, tarReader); err != nil {
-				outFile.Close()
-				return fmt.Errorf("failed to extract file %s: %w", outputPath, err)
-			}
-			outFile.Close()
-
-			// Preserve executable permissions if set
-			if header.Mode&0111 != 0 {
-				os.Chmod(outputPath, 0755)
-			}
-
-			fmt.Printf("Extracted: %s\n", outputPath)
-		}
+		return parts[1]
+	}); err != nil {
+		return fmt.Errorf("failed to extract VM package: %w", err)
 	}
 
 	// Create shared directory for host-guest file sharing
@@ -302,6 +307,12 @@ func initCmd() error {
 		return fmt.Errorf("failed to create shared directory: %w", err)
 	}
 	fmt.Printf("Created shared directory: %s/\n", sharedDir)
+
+	// Extract init assets to vm-shared
+	fmt.Println("Extracting init assets...")
+	if err := extractTarXZ(initAssets, sharedDir, nil); err != nil {
+		return fmt.Errorf("failed to extract init assets: %w", err)
+	}
 
 	fmt.Println("Successfully initialized VM")
 	fmt.Printf("VM files extracted to: %s/\n", vmDir)

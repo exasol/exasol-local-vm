@@ -34,8 +34,9 @@ pushd "$LAUNCHER_DIR" > /dev/null
 # Copy the release archive to be embedded
 cp "$VM_ARTIFACTS_TARBALL" vm-package.tar.xz
 
-# TODO compress /launcher/assets/init into a tarball in /launcher/mac and embed that alongside the vm artifacts.
-# Then, when we run the laucher's init command, uncmpress that into shared/init
+# Compress launcher/assets/init directory to be embedded
+echo "==> Creating init assets tarball..."
+tar -C "$ROOT_DIR/launcher/assets" -cf - init | xz -6 > init-assets.tar.xz
 
 # Update Go module dependencies and go.sum
 echo "Updating Go dependencies..."
@@ -48,6 +49,7 @@ GOOS=darwin GOARCH="$GOARCH" go build -o "$LAUNCHER_OUTPUT" .
 
 # Clean up generated files
 rm -f vm-package.tar.xz
+rm -f init-assets.tar.xz
 
 popd > /dev/null
 
