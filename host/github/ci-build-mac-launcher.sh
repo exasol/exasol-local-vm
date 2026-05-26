@@ -31,6 +31,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Fail if ci-downloads directory already exists and is not empty to avoid overwriting
+if [ -d "ci-downloads" ] && [ "$(ls -A ci-downloads)" ]; then
+  echo "Error: ci-downloads directory already exists and is not empty"
+  exit 1
+fi
+
 # Check if gh CLI is installed
 if ! command -v gh &> /dev/null; then
   echo "Error: GitHub CLI (gh) is not installed"
