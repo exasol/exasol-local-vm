@@ -50,7 +50,7 @@ RUN printf '# defaults\n\n::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc
 COPY init /init
 
 # TODO mount /mnt/host from Hyper-V data disk for windows
-RUN printf 'LABEL=exasol-data   /var        ext4       defaults          0 2\nhostshare           /mnt/host   virtiofs   defaults,nofail   0 0\n' > /etc/fstab
+RUN printf 'LABEL=exasol-data   /var        ext4       defaults          0 2\nhostshare           /mnt/host   virtiofs   defaults          0 0\n' > /etc/fstab
 
 COPY exasol-network /etc/init.d/exasol-network
 COPY format-data-disk.initd.sh /etc/init.d/format-data-disk

@@ -680,7 +680,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	// Create EFI variable store for UEFI NVRAM
 	// Modern ARM64 kernels have EFI stub and can't be used with NewLinuxBootLoader
 	// Use UEFI boot instead - disk.img contains ESP with UKI
-	efiVariableStorePath := "efi-nvram.bin"
+	efiVariableStorePath := filepath.Join(vmDir, "efi-nvram.bin")
 	var variableStore *vz.EFIVariableStore
 	
 	// Check if variable store already exists
@@ -708,7 +708,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	}
 	fmt.Printf("[%s] EFI bootloader configured with variable store\n", time.Now().Format("15:04:05"))
 
-	// Create console logging attachment
+	// Create console logging attachment for hvc0 (VirtIO console)
 	consoleLogPath := "vm-console.log"
 	fmt.Printf("[%s] Configuring console logging to %s...\n", time.Now().Format("15:04:05"), consoleLogPath)
 	consoleAttachment, err := vz.NewFileSerialPortAttachment(consoleLogPath, true)
@@ -716,9 +716,11 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 		return fmt.Errorf("failed to create console log attachment: %w", err)
 	}
 
+	// VirtIO console device - matches kernel console=hvc0
+	// Captures kernel boot messages, OpenRC output, and init script output
 	serialPort, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(consoleAttachment)
 	if err != nil {
-		return fmt.Errorf("failed to create console device serial port: %w", err)
+		return fmt.Errorf("failed to create serial port: %w", err)
 	}
 	fmt.Printf("[%s] Console logging configured\n", time.Now().Format("15:04:05"))
 
@@ -1083,8 +1085,6 @@ func resizeDataDiskCmd(newSizeStr string) error {
 
 	fmt.Printf("Data disk successfully resized to %dGB\n", newSizeGB)
 	fmt.Println("Restart the VM for changes to take effect:")
-	fmt.Println("  mac-runner start <cpu_count> <ram_size>")
-	fmt.Println("")
 	fmt.Println("The VM will automatically expand the filesystem on next boot.")
 	return nil
 }

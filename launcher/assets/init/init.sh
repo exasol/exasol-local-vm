@@ -67,6 +67,10 @@ if [ -f "$INIT_OUTPUT_FILE" ]; then
   echo "=== INIT OUTPUT START ==="
   jq '.' "$INIT_OUTPUT_FILE"
   echo "=== INIT OUTPUT END ==="
+  
+  # Copy to shared directory for verification
+  cp "$INIT_OUTPUT_FILE" "$EXASOL_VM_HOST_SHARED_DIR/vm-init-output.json"
+  log_msg "Init output saved to $EXASOL_VM_HOST_SHARED_DIR/vm-init-output.json"
 else
   log_msg "Warning: Init output file not found at $INIT_OUTPUT_FILE"
 fi

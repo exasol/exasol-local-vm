@@ -32,13 +32,18 @@ start() {
     export EXASOL_VM_INIT_DIR="/mnt/host/init"
     export EXASOL_VM_HOST_SHARED_DIR="/mnt/host"
     
-    sh "$INIT_SCRIPT"
-    local result=$?
+    # Run init script and capture output to both console and log file
+    # This allows the launcher to see the output markers in console log
+    # while also keeping a persistent log for debugging
+    INIT_LOG="/mnt/host/init.log"
+    sh "$INIT_SCRIPT" 2>&1 | tee "$INIT_LOG"
+    local result=${PIPESTATUS[0]}
     
     if [ $result -eq 0 ]; then
         eend 0
     else
         eerror "Init script failed with exit code $result"
+        eerror "Check $INIT_LOG for details"
         eend $result
     fi
 }
