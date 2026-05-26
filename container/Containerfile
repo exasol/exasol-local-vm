@@ -53,6 +53,7 @@ COPY init /init
 RUN printf 'LABEL=exasol-data   /var        ext4       defaults          0 2\nhostshare           /mnt/host   virtiofs   defaults,nofail   0 0\n' > /etc/fstab
 
 COPY exasol-network /etc/init.d/exasol-network
+COPY format-data-disk.initd.sh /etc/init.d/format-data-disk
 COPY grow-var-fs.initd.sh /etc/init.d/grow-var-fs
 COPY report-ip.initd.sh /etc/init.d/report-ip
 COPY run-host-init.initd.sh /etc/init.d/run-host-init
@@ -64,7 +65,7 @@ COPY run-host-init.initd.sh /etc/init.d/run-host-init
 RUN --mount=type=bind,target=/host/ sh -c '\
     set -eu && \
     /host/rc_add sysinit  devfs dmesg mdev hwdrivers && \
-    /host/rc_add boot     exasol-network grow-var-fs report-ip && \
+    /host/rc_add boot     exasol-network format-data-disk grow-var-fs report-ip && \
     /host/rc_add boot     cgroups modules hwclock swap hostname sysctl bootmisc syslog seedrng localmount networking && \
     /host/rc_add boot     run-host-init && \
     /host/rc_add default  acpid sshd && \

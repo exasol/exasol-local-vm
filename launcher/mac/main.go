@@ -102,6 +102,30 @@ func generateSSHKeyPair(privateKeyPath, publicKeyPath string) error {
 	return nil
 }
 
+// createSparseDataDisk creates a sparse raw disk image for VM data storage
+// The VM will format it on first boot if needed
+func createSparseDataDisk(path string, sizeGB int) error {
+	// Create sparse file (allocates inode, not blocks)
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("failed to create disk file: %w", err)
+	}
+	defer f.Close()
+
+	// Set logical size without allocating space
+	// Sparse files only allocate blocks as data is written
+	sizeBytes := int64(sizeGB) * 1024 * 1024 * 1024
+	if err := f.Truncate(sizeBytes); err != nil {
+		return fmt.Errorf("failed to set disk size: %w", err)
+	}
+
+	// Note: The file is created as a raw disk image without any filesystem.
+	// The VM will detect this on first boot and format it as ext4 with the
+	// label "exasol-data" automatically via an init script.
+
+	return nil
+}
+
 // LoopbackForwarder forwards TCP connections from host to guest
 type LoopbackForwarder struct {
 	listener   net.Listener
@@ -269,15 +293,37 @@ func waitForInitOutput(consoleLogPath string, timeout time.Duration) (*InitOutpu
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: mac-runner <command>")
-		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop")
+		fmt.Fprintln(os.Stderr, "Usage: mac-runner <command> [options]")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Commands:")
+		fmt.Fprintln(os.Stderr, "  init [--data-size SIZE]  Initialize VM (SIZE in GB, default: 50)")
+		fmt.Fprintln(os.Stderr, "  start <cpu> <ram>        Start VM with CPU count and RAM size (MB)")
+		fmt.Fprintln(os.Stderr, "  stop                     Stop running VM")
+		fmt.Fprintln(os.Stderr, "  resize-data <size>       Resize data disk to SIZE GB (VM must be stopped)")
 		os.Exit(1)
 	}
 
 	var err error
 	switch os.Args[1] {
 	case "init":
-		err = initCmd()
+		// Parse optional --data-size flag
+		dataSizeGB := 50 // default
+		for i := 2; i < len(os.Args); i++ {
+			if os.Args[i] == "--data-size" {
+				if i+1 >= len(os.Args) {
+					fmt.Fprintln(os.Stderr, "Error: --data-size requires a value")
+					os.Exit(1)
+				}
+				size, parseErr := strconv.Atoi(os.Args[i+1])
+				if parseErr != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid data size: %v\n", parseErr)
+					os.Exit(1)
+				}
+				dataSizeGB = size
+				break
+			}
+		}
+		err = initCmd(dataSizeGB)
 	case "start":
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size>")
@@ -293,6 +339,12 @@ func main() {
 		err = runVMDaemon(os.Args[2], os.Args[3])
 	case "stop":
 		err = stopCmd()
+	case "resize-data":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: mac-runner resize-data <new_size_gb>")
+			os.Exit(1)
+		}
+		err = resizeDataDiskCmd(os.Args[2])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
 		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop")
@@ -360,7 +412,7 @@ func extractTarXZ(data []byte, outputDir string, pathTransform func(string) stri
 	return nil
 }
 
-func initCmd() error {
+func initCmd(dataSizeGB int) error {
 	fmt.Println("Initializing VM...")
 	fmt.Println("Extracting VM package...")
 
@@ -405,6 +457,15 @@ func initCmd() error {
 	
 	fmt.Printf("SSH private key: %s\n", privateKeyPath)
 	fmt.Printf("SSH public key added to: %s\n", publicKeyPath)
+
+	// Create sparse data disk for /var
+	dataDiskPath := filepath.Join(vmDir, "data.img")
+	fmt.Printf("Creating %dGB sparse data disk...\n", dataSizeGB)
+	if err := createSparseDataDisk(dataDiskPath, dataSizeGB); err != nil {
+		return fmt.Errorf("failed to create data disk: %w", err)
+	}
+	fmt.Printf("Data disk created: %s (sparse, grows on demand)\n", dataDiskPath)
+	fmt.Println("Note: Disk will be formatted as ext4 by VM on first boot")
 
 	fmt.Println("Successfully initialized VM")
 	fmt.Printf("VM files extracted to: %s/\n", vmDir)
@@ -661,18 +722,43 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	}
 	fmt.Printf("[%s] Console logging configured\n", time.Now().Format("15:04:05"))
 
-	// Create disk attachment
-	fmt.Printf("[%s] Attaching disk: %s...\n", time.Now().Format("15:04:05"), diskPath)
+	// Create storage devices list
+	storageDevices := []vz.StorageDeviceConfiguration{}
+
+	// Check for separate data disk first (attach as first device if exists)
+	dataDiskPath := filepath.Join(vmDir, "data.img")
+	if absDataDiskPath, err := filepath.Abs(dataDiskPath); err == nil {
+		if _, err := os.Stat(absDataDiskPath); err == nil {
+			fmt.Printf("[%s] Attaching data disk: %s...\n", time.Now().Format("15:04:05"), dataDiskPath)
+			
+			dataDiskAttachment, err := vz.NewDiskImageStorageDeviceAttachment(absDataDiskPath, false)
+			if err != nil {
+				return fmt.Errorf("failed to create data disk attachment: %w", err)
+			}
+			
+			dataStorageConfig, err := vz.NewVirtioBlockDeviceConfiguration(dataDiskAttachment)
+			if err != nil {
+				return fmt.Errorf("failed to create data storage device config: %w", err)
+			}
+			
+			storageDevices = append(storageDevices, dataStorageConfig)
+			fmt.Printf("[%s] Data disk attached as first device (for /var)\n", time.Now().Format("15:04:05"))
+		}
+	}
+
+	// Attach boot disk
+	fmt.Printf("[%s] Attaching boot disk: %s...\n", time.Now().Format("15:04:05"), diskPath)
 	diskAttachment, err := vz.NewDiskImageStorageDeviceAttachment(diskPath, false)
 	if err != nil {
-		return fmt.Errorf("failed to create disk attachment: %w", err)
+		return fmt.Errorf("failed to create boot disk attachment: %w", err)
 	}
 
 	storageDeviceConfig, err := vz.NewVirtioBlockDeviceConfiguration(diskAttachment)
 	if err != nil {
 		return fmt.Errorf("failed to create storage device config: %w", err)
 	}
-	fmt.Printf("[%s] Disk attached\n", time.Now().Format("15:04:05"))
+	storageDevices = append(storageDevices, storageDeviceConfig)
+	fmt.Printf("[%s] Boot disk attached\n", time.Now().Format("15:04:05"))
 
 	// Create network device
 	fmt.Printf("[%s] Configuring NAT networking...\n", time.Now().Format("15:04:05"))
@@ -747,9 +833,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 		serialPort,
 	})
 
-	vzConfig.SetStorageDevicesVirtualMachineConfiguration([]vz.StorageDeviceConfiguration{
-		storageDeviceConfig,
-	})
+	vzConfig.SetStorageDevicesVirtualMachineConfiguration(storageDevices)
 
 	vzConfig.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{
 		networkConfig,
@@ -939,5 +1023,68 @@ func stopCmd() error {
 
 	fmt.Println("Stop signal sent to VM")
 	fmt.Println("VM should stop gracefully")
+	return nil
+}
+
+func resizeDataDiskCmd(newSizeStr string) error {
+	// Check if VM is running
+	pidFile := "vm.pid"
+	if _, err := os.Stat(pidFile); err == nil {
+		pidData, _ := os.ReadFile(pidFile)
+		if len(pidData) > 0 {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+			if err == nil {
+				if process, err := os.FindProcess(pid); err == nil {
+					if err := process.Signal(syscall.Signal(0)); err == nil {
+						return fmt.Errorf("VM is currently running (PID: %d). Stop the VM first with 'mac-runner stop'", pid)
+					}
+				}
+			}
+		}
+	}
+
+	// Parse and validate new size
+	newSizeGB, err := strconv.Atoi(newSizeStr)
+	if err != nil {
+		return fmt.Errorf("invalid size: %w", err)
+	}
+
+	// Check if data disk exists
+	vmDir := "vm"
+	dataDiskPath := filepath.Join(vmDir, "data.img")
+	if _, err := os.Stat(dataDiskPath); os.IsNotExist(err) {
+		return fmt.Errorf("data disk not found: %s. Initialize VM first with 'mac-runner init'", dataDiskPath)
+	}
+
+	// Get current size
+	fileInfo, err := os.Stat(dataDiskPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat data disk: %w", err)
+	}
+	currentSizeGB := fileInfo.Size() / (1024 * 1024 * 1024)
+
+	// Check if new size is actually larger
+	if int64(newSizeGB) <= currentSizeGB {
+		return fmt.Errorf("new size (%dGB) must be larger than current size (%dGB). Shrinking is not supported", newSizeGB, currentSizeGB)
+	}
+
+	// Resize the sparse file
+	fmt.Printf("Resizing data disk from %dGB to %dGB...\n", currentSizeGB, newSizeGB)
+	f, err := os.OpenFile(dataDiskPath, os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open disk: %w", err)
+	}
+	defer f.Close()
+
+	newSizeBytes := int64(newSizeGB) * 1024 * 1024 * 1024
+	if err := f.Truncate(newSizeBytes); err != nil {
+		return fmt.Errorf("failed to resize disk: %w", err)
+	}
+
+	fmt.Printf("Data disk successfully resized to %dGB\n", newSizeGB)
+	fmt.Println("Restart the VM for changes to take effect:")
+	fmt.Println("  mac-runner start <cpu_count> <ram_size>")
+	fmt.Println("")
+	fmt.Println("The VM will automatically expand the filesystem on next boot.")
 	return nil
 }
