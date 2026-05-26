@@ -4,8 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	_ "embed"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +25,7 @@ import (
 
 	"github.com/Code-Hex/vz/v3"
 	"github.com/ulikunitz/xz"
+	"golang.org/x/crypto/ssh"
 )
 
 //go:embed vm-package.tar.xz
@@ -55,6 +60,46 @@ func readLastLines(filePath string, n int) ([]string, error) {
 		return lines, nil
 	}
 	return lines[len(lines)-n:], nil
+}
+
+// generateSSHKeyPair generates an ED25519 SSH key pair and returns the private key path
+func generateSSHKeyPair(privateKeyPath, publicKeyPath string) error {
+	// Generate ED25519 key pair
+	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to generate ED25519 key: %w", err)
+	}
+
+	// Marshal private key to OpenSSH format
+	privKeyBytes, err := x509.MarshalPKCS8PrivateKey(privKey)
+	if err != nil {
+		return fmt.Errorf("failed to marshal private key: %w", err)
+	}
+
+	privKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privKeyBytes,
+	})
+
+	// Write private key to file with restrictive permissions
+	if err := os.WriteFile(privateKeyPath, privKeyPEM, 0600); err != nil {
+		return fmt.Errorf("failed to write private key: %w", err)
+	}
+
+	// Convert public key to SSH authorized_keys format
+	sshPubKey, err := ssh.NewPublicKey(pubKey)
+	if err != nil {
+		return fmt.Errorf("failed to convert public key to SSH format: %w", err)
+	}
+
+	authorizedKey := ssh.MarshalAuthorizedKey(sshPubKey)
+
+	// Write public key to authorized_keys file
+	if err := os.WriteFile(publicKeyPath, authorizedKey, 0644); err != nil {
+		return fmt.Errorf("failed to write public key: %w", err)
+	}
+
+	return nil
 }
 
 // LoopbackForwarder forwards TCP connections from host to guest
@@ -348,6 +393,18 @@ func initCmd() error {
 	if err := extractTarXZ(initAssets, sharedDir, nil); err != nil {
 		return fmt.Errorf("failed to extract init assets: %w", err)
 	}
+
+	// Generate SSH key pair for VM access
+	fmt.Println("Generating SSH key pair...")
+	privateKeyPath := "vm-ssh-key"
+	publicKeyPath := filepath.Join(sharedDir, "authorized_keys")
+	
+	if err := generateSSHKeyPair(privateKeyPath, publicKeyPath); err != nil {
+		return fmt.Errorf("failed to generate SSH key pair: %w", err)
+	}
+	
+	fmt.Printf("SSH private key: %s\n", privateKeyPath)
+	fmt.Printf("SSH public key added to: %s\n", publicKeyPath)
 
 	fmt.Println("Successfully initialized VM")
 	fmt.Printf("VM files extracted to: %s/\n", vmDir)
@@ -811,6 +868,14 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	}
 	abs, _ := filepath.Abs(sharedDir)
 	vmState["shared_dir"] = abs
+	
+	// Add SSH private key path if it exists
+	privateKeyPath := "vm-ssh-key"
+	if absKeyPath, err := filepath.Abs(privateKeyPath); err == nil {
+		if _, err := os.Stat(absKeyPath); err == nil {
+			vmState["ssh_private_key"] = absKeyPath
+		}
+	}
 
 	stateData, err := json.MarshalIndent(vmState, "", "  ")
 	if err != nil {
