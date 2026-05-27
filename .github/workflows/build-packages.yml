@@ -118,20 +118,35 @@ jobs:
           RUN_ID="${{ inputs.previous-run-id }}"
           
           if [ -z "$RUN_ID" ]; then
-            echo "Finding latest successful workflow run on branch: ${{ github.ref_name }}..."
-            RUN_ID=$(gh run list \
+            echo "Finding latest workflow run with successful build-linux-packages job on branch: ${{ github.ref_name }}..."
+            
+            # Get list of successful runs and check each one for build-linux-packages job
+            RUN_IDS=$(gh run list \
               --workflow build-packages.yml \
               --branch "${{ github.ref_name }}" \
               --status success \
-              --limit 1 \
+              --limit 20 \
               --json databaseId \
-              --jq '.[0].databaseId')
+              --jq '.[].databaseId')
+            
+            for candidate_run_id in $RUN_IDS; do
+              echo "Checking run $candidate_run_id for build-linux-packages job..."
+              BUILD_JOB_STATUS=$(gh run view "$candidate_run_id" \
+                --json jobs \
+                --jq '.jobs[] | select(.name == "build-linux-packages") | .conclusion')
+              
+              if [ "$BUILD_JOB_STATUS" = "success" ]; then
+                RUN_ID="$candidate_run_id"
+                echo "✓ Found run $RUN_ID with successful build-linux-packages job"
+                break
+              fi
+            done
             
             if [ -z "$RUN_ID" ]; then
-              echo "Error: No successful previous run found on branch ${{ github.ref_name }}" >&2
+              echo "Error: No successful run with build-linux-packages job found on branch ${{ github.ref_name }}" >&2
+              echo "You need to run the workflow without skip-linux-build at least once first" >&2
               exit 1
             fi
-            echo "Using run ID: $RUN_ID"
           fi
           
           echo "Downloading release-packages artifact from run $RUN_ID..."

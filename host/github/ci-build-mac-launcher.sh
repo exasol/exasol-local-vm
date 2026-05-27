@@ -83,6 +83,39 @@ fi
 echo "✓ All commits are pushed"
 echo ""
 
+# Validate previous run if skipping Linux build
+if [ "$SKIP_LINUX_BUILD" = "true" ] && [ -z "$PREVIOUS_RUN_ID" ]; then
+  echo "Validating that a previous run with Linux packages exists..."
+  
+  # Get list of successful runs and check for build-linux-packages job
+  RUN_IDS=$(gh run list \
+    --workflow=build-packages.yml \
+    --branch="$BRANCH" \
+    --status=success \
+    --limit=20 \
+    --json databaseId \
+    --jq '.[].databaseId' 2>/dev/null || echo "")
+  
+  FOUND_VALID_RUN=""
+  for candidate_run_id in $RUN_IDS; do
+    BUILD_JOB_STATUS=$(gh run view "$candidate_run_id" \
+      --json jobs \
+      --jq '.jobs[] | select(.name == "build-linux-packages") | .conclusion' 2>/dev/null || echo "")
+    
+    if [ "$BUILD_JOB_STATUS" = "success" ]; then
+      FOUND_VALID_RUN="$candidate_run_id"
+      echo "✓ Found valid previous run: $FOUND_VALID_RUN"
+      break
+    fi
+  done
+  
+  if [ -z "$FOUND_VALID_RUN" ]; then
+    echo "Error: No previous successful run with Linux packages found on branch: $BRANCH"
+    echo "You need to run the workflow without --skip-linux-build at least once first"
+    exit 1
+  fi
+fi
+
 # Trigger workflow
 echo "Triggering 'Build Packages' workflow on branch: $BRANCH"
 if [ "$SKIP_LINUX_BUILD" = "true" ]; then
@@ -94,7 +127,7 @@ if [ "$SKIP_LINUX_BUILD" = "true" ]; then
       --field skip-linux-build=true \
       --field previous-run-id="$PREVIOUS_RUN_ID"
   else
-    echo "  - Will use latest successful run"
+    echo "  - Will use latest run with Linux packages (workflow will auto-detect)"
     gh workflow run build-packages.yml \
       --ref "$BRANCH" \
       --field skip-linux-build=true
