@@ -17,7 +17,6 @@ fi
 
 AUTHORIZED_KEYS="authorized_keys"
 SHARED_KEYS="$EXASOL_VM_HOST_SHARED_DIR/$AUTHORIZED_KEYS"
-USER_KEYS="$HOME/.ssh/authorized_keys"
 
 log_msg() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [SSH] $1"
@@ -32,27 +31,48 @@ fi
 
 log_msg "Found SSH keys at $SHARED_KEYS"
 
-# Create .ssh directory if it doesn't exist
-mkdir -p "$HOME/.ssh"
-chmod 700 "$HOME/.ssh"
-
-# SECURITY: Clear existing keys - only keys in shared folder will have access
-true > "$USER_KEYS"
-
-# Import all keys from shared folder
-while IFS= read -r key; do
-  # Skip empty lines and comments
-  [ -z "$key" ] && continue
-  echo "$key" | grep -q "^#" && continue
+# Function to set up SSH keys for a user
+setup_user_keys() {
+  local user_home="$1"
+  local user_name=$(basename "$user_home")
+  local user_ssh_dir="$user_home/.ssh"
+  local user_keys="$user_ssh_dir/authorized_keys"
   
-  # Add key
-  echo "$key" >> "$USER_KEYS"
-  log_msg "Added SSH key: ${key%% *}..."
-done < "$SHARED_KEYS"
+  log_msg "Setting up SSH keys for user: $user_name"
+  
+  # Create .ssh directory if it doesn't exist
+  mkdir -p "$user_ssh_dir"
+  chmod 700 "$user_ssh_dir"
+  
+  # SECURITY: Clear existing keys - only keys in shared folder will have access
+  true > "$user_keys"
+  
+  # Import all keys from shared folder
+  local key_count=0
+  while IFS= read -r key; do
+    # Skip empty lines and comments
+    [ -z "$key" ] && continue
+    echo "$key" | grep -q "^#" && continue
+    
+    # Add key
+    echo "$key" >> "$user_keys"
+    key_count=$((key_count + 1))
+  done < "$SHARED_KEYS"
+  
+  # Set correct permissions
+  chmod 600 "$user_keys"
+  chmod 700 "$user_ssh_dir"
+  
+  log_msg "Added $key_count SSH key(s) for $user_name"
+}
 
-# Set correct permissions
-chmod 600 "$USER_KEYS"
-chmod 700 "$HOME/.ssh"
+# Set up SSH keys for all users in /home (excluding root)
+for user_home in /home/*; do
+  # Skip if no directories found or if it's not a directory
+  [ ! -d "$user_home" ] && continue
+  
+  setup_user_keys "$user_home"
+done
 
 # Update init output file with SSH port
 if [ -n "${INIT_OUTPUT_FILE:-}" ]; then

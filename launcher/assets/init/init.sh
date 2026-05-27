@@ -1,7 +1,7 @@
 
 #!/bin/sh
 # Run all initialization scripts in order
-set -eu
+set -u  # Only exit on undefined variables, not on command failures
 
 # Validate required environment variables
 if [ -z "${EXASOL_VM_INIT_DIR:-}" ]; then
@@ -41,25 +41,36 @@ log_msg() {
   logger -t init "$1"
 }
 
+# Function to run an init script with error handling
+run_init_script() {
+  local script_name="$1"
+  local description="$2"
+  local script_path="$DIR/$script_name"
+  
+  if [ -f "$script_path" ]; then
+    log_msg "Running $description..."
+    if sh "$script_path"; then
+      log_msg "$description completed successfully"
+    else
+      log_msg "WARNING: $description failed with exit code $?"
+      FAILED_SCRIPTS="${FAILED_SCRIPTS}${script_name} "
+      OVERALL_SUCCESS=false
+    fi
+  else
+    log_msg "$description script not found, skipping"
+  fi
+}
+
 log_msg "=== Starting VM initialization ==="
 
-# Run SSH key initialization first
-if [ -f "$DIR/init-ssh.sh" ]; then
-  log_msg "Running SSH key initialization..."
-  sh "$DIR/init-ssh.sh"
-fi
+# Track failures
+FAILED_SCRIPTS=""
+OVERALL_SUCCESS=true
 
-# Run database/container initialization
-if [ -f "$DIR/init-db.sh" ]; then
-  log_msg "Running database initialization..."
-  sh "$DIR/init-db.sh"
-fi
-
-# Run IP initialization
-if [ -f "$DIR/init-ip.sh" ]; then
-  log_msg "Running IP initialization..."
-  sh "$DIR/init-ip.sh"
-fi
+# Run initialization scripts in order
+run_init_script "init-ssh.sh" "SSH key initialization"
+run_init_script "init-db.sh" "database initialization"
+run_init_script "init-ip.sh" "IP initialization"
 
 # Print the init output file for the launcher to read
 if [ -f "$INIT_OUTPUT_FILE" ]; then
@@ -75,4 +86,15 @@ else
   log_msg "Warning: Init output file not found at $INIT_OUTPUT_FILE"
 fi
 
-log_msg "=== VM initialization complete ==="
+# Report on initialization results
+if [ "$OVERALL_SUCCESS" = "true" ]; then
+  log_msg "=== VM initialization complete - ALL SCRIPTS SUCCEEDED ==="
+  exit 0
+else
+  log_msg "=== VM initialization complete - SOME SCRIPTS FAILED ==="
+  log_msg "Failed scripts: $FAILED_SCRIPTS"
+  log_msg "Partial initialization data may be available in vm-init-output.json"
+  # Exit with success anyway to allow VM to continue booting
+  # The launcher will detect missing data in the init output
+  exit 0
+fi
