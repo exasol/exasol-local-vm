@@ -40,9 +40,19 @@ setup_user_keys() {
   
   log_msg "Setting up SSH keys for user: $user_name"
   
+  # Get user's UID and GID
+  local user_uid=$(stat -c '%u' "$user_home" 2>/dev/null || echo "")
+  local user_gid=$(stat -c '%g' "$user_home" 2>/dev/null || echo "")
+  
+  if [ -z "$user_uid" ] || [ -z "$user_gid" ]; then
+    log_msg "Warning: Could not determine ownership for $user_home, skipping"
+    return
+  fi
+  
   # Create .ssh directory if it doesn't exist
   mkdir -p "$user_ssh_dir"
   chmod 700 "$user_ssh_dir"
+  chown "$user_uid:$user_gid" "$user_ssh_dir"
   
   # SECURITY: Clear existing keys - only keys in shared folder will have access
   true > "$user_keys"
@@ -59,9 +69,9 @@ setup_user_keys() {
     key_count=$((key_count + 1))
   done < "$SHARED_KEYS"
   
-  # Set correct permissions
+  # Set correct permissions and ownership
   chmod 600 "$user_keys"
-  chmod 700 "$user_ssh_dir"
+  chown "$user_uid:$user_gid" "$user_keys"
   
   log_msg "Added $key_count SSH key(s) for $user_name"
 }

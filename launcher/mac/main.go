@@ -69,14 +69,20 @@ func generateSSHKeyPair(privateKeyPath, publicKeyPath string) error {
 		return fmt.Errorf("failed to generate ED25519 key: %w", err)
 	}
 
-	// Marshal private key to OpenSSH format (newer format supported by all modern SSH clients)
-	privKeyBytes, err := ssh.MarshalPrivateKey(privKey, "")
+	// Convert to ssh.Signer to get proper OpenSSH format
+	signer, err := ssh.NewSignerFromKey(privKey)
+	if err != nil {
+		return fmt.Errorf("failed to create signer: %w", err)
+	}
+
+	// Marshal private key to OpenSSH format
+	privKeyPEM, err := ssh.MarshalPrivateKey(signer, "")
 	if err != nil {
 		return fmt.Errorf("failed to marshal private key: %w", err)
 	}
 
 	// Write private key to file with restrictive permissions
-	if err := os.WriteFile(privateKeyPath, pem.EncodeToMemory(privKeyBytes), 0600); err != nil {
+	if err := os.WriteFile(privateKeyPath, pem.EncodeToMemory(privKeyPEM), 0600); err != nil {
 		return fmt.Errorf("failed to write private key: %w", err)
 	}
 
