@@ -363,7 +363,8 @@ func startCmd(cpuCount, ramSize, sharedDir string) {
 		"ram_size":  ramSize,
 	}
 	if sharedDir != "" {
-		vmState["shared_dir"] = sharedDir
+		// Use relative path for shared directory
+		vmState["shared_dir"] = "./" + filepath.Base(sharedDir)
 		vmState["vhd_path"] = vhdPath
 	}
 

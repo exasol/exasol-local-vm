@@ -952,15 +952,13 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 		"pid":       fmt.Sprintf("%d", os.Getpid()),
 		"ports":     hostPorts,
 	}
-	abs, _ := filepath.Abs(sharedDir)
-	vmState["shared_dir"] = abs
+	// Use relative path for shared directory
+	vmState["shared_dir"] = "./" + filepath.Base(sharedDir)
 	
-	// Add SSH private key path if it exists
+	// Add SSH private key path if it exists (relative path)
 	privateKeyPath := "vm-ssh-key"
-	if absKeyPath, err := filepath.Abs(privateKeyPath); err == nil {
-		if _, err := os.Stat(absKeyPath); err == nil {
-			vmState["ssh_private_key"] = absKeyPath
-		}
+	if _, err := os.Stat(privateKeyPath); err == nil {
+		vmState["ssh_private_key"] = "./" + privateKeyPath
 	}
 
 	stateData, err := json.MarshalIndent(vmState, "", "  ")
