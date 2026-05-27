@@ -16,7 +16,8 @@ fi
 log_msg "Getting VM IP address"
 
 # Get the IP address of the default route interface
-VM_IP=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+' 2>/dev/null || true)
+# Use awk instead of grep -P (Perl regex) for BusyBox compatibility
+VM_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1 || true)
 
 if [ -z "$VM_IP" ]; then
   log_msg "Warning: Could not determine VM IP address"

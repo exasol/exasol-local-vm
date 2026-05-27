@@ -36,20 +36,23 @@ if [ ! -f "$DB_CONFIG_FILE" ]; then
   exit 1
 fi
 
-DB_CONTAINER_TARBALL=$(jq -r '.tarball-name' "$DB_CONFIG_FILE")
-DB_CONTAINER_NAME=$(jq -r '.container-name' "$DB_CONFIG_FILE")
+DB_CONTAINER_TARBALL_NAME=$(jq -r '.tarball_name' "$DB_CONFIG_FILE")
+DB_CONTAINER_NAME=$(jq -r '.container_name' "$DB_CONFIG_FILE")
 DB_PORT=$(jq -r '.ports.db' "$DB_CONFIG_FILE")
 UI_PORT=$(jq -r '.ports.ui' "$DB_CONFIG_FILE")
 
 # Validate that required fields were present in config
-if [ -z "$DB_CONTAINER_TARBALL" ] || [ "$DB_CONTAINER_TARBALL" = "null" ]; then
-  echo "Error: tarball-name not found in $DB_CONFIG_FILE" >&2
+if [ -z "$DB_CONTAINER_TARBALL_NAME" ] || [ "$DB_CONTAINER_TARBALL_NAME" = "null" ]; then
+  echo "Error: tarball_name not found in $DB_CONFIG_FILE" >&2
   exit 1
 fi
 if [ -z "$DB_CONTAINER_NAME" ] || [ "$DB_CONTAINER_NAME" = "null" ]; then
-  echo "Error: containerName not found in $DB_CONFIG_FILE" >&2
+  echo "Error: container_name not found in $DB_CONFIG_FILE" >&2
   exit 1
 fi
+
+# Construct full path to tarball
+DB_CONTAINER_TARBALL="$EXASOL_VM_INIT_DIR/$DB_CONTAINER_TARBALL_NAME"
 if [ -z "$DB_PORT" ] || [ "$DB_PORT" = "null" ]; then
   echo "Error: ports.db not found in $DB_CONFIG_FILE" >&2
   exit 1
@@ -78,14 +81,13 @@ mkdir -p "$LOG_DIR" 2>/dev/null || true
 
 log_msg "Starting container initialization"
 
-# Require tarball in shared directory
-if [ -z "$DB_CONTAINER_TARBALL" ]; then
-  log_msg "Error: No container tarball found in $EXASOL_VM_HOST_SHARED_DIR"
-  log_msg "Expected pattern: $DB_CONTAINER_COMPRESSED_GLOB"
+# Check if tarball exists
+if [ ! -f "$DB_CONTAINER_TARBALL" ]; then
+  log_msg "Error: Container tarball not found: $DB_CONTAINER_TARBALL"
   exit 1
 fi
 
-log_msg "Found container tarball: $DB_CONTAINER_TARBALL"
+log_msg "Found container tarball: $DB_CONTAINER_TARBALL_NAME"
 
 # Calculate checksum
 CURRENT_SHA=$(sha256sum "$DB_CONTAINER_TARBALL" | cut -d' ' -f1)
@@ -137,7 +139,8 @@ if [ "$RELOAD_NEEDED" = "true" ]; then
     
     # Extract the loaded image name from podman load output
     # Output format: "Loaded image: docker.io/library/exasol-nano:tag" or similar
-    LOADED_IMAGE=$(echo "$LOAD_OUTPUT" | grep -oP 'Loaded image.*:\s*\K.*' | tr -d '[:space:]')
+    # Use sed instead of grep -P for BusyBox compatibility
+    LOADED_IMAGE=$(echo "$LOAD_OUTPUT" | sed -n 's/.*Loaded image[^:]*:[[:space:]]*//p' | tr -d '[:space:]')
     if [ -z "$LOADED_IMAGE" ]; then
       log_msg "Error: Could not determine loaded image name from output"
       exit 1

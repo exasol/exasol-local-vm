@@ -19,9 +19,9 @@ if [ ! -f "$DB_CONFIG_FILE" ]; then
     exit 1
 fi
 
-TARBALL_NAME=$(jq -r '."tarball-name"' "$DB_CONFIG_FILE")
+TARBALL_NAME=$(jq -r '.tarball_name' "$DB_CONFIG_FILE")
 if [ -z "$TARBALL_NAME" ] || [ "$TARBALL_NAME" = "null" ]; then
-    echo "Error: tarball-name not found in $DB_CONFIG_FILE" >&2
+    echo "Error: tarball_name not found in $DB_CONFIG_FILE" >&2
     exit 1
 fi
 
