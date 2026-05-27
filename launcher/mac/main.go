@@ -36,10 +36,10 @@ var initAssets []byte
 const (
 	// guestIPv4 is the expected IP for the first VM in Virtualization.framework NAT
 	// The actual IP is detected at runtime by parsing console output
-	guestIPv4       = "192.168.64.2"
-	guestSSHPort    = 22
-	guestDBPort     = 8563  // Exasol database SQL port
-	guestUIPort     = 8443  // Exasol web UI port (HTTPS)
+	guestIPv4    = "192.168.64.2"
+	guestSSHPort = 22
+	guestDBPort  = 8563 // Exasol database SQL port
+	guestUIPort  = 8443 // Exasol web UI port (HTTPS)
 )
 
 // InitOutput represents the JSON output from the VM init scripts
@@ -235,42 +235,42 @@ func waitForVMIP(consoleLogPath string, timeout time.Duration) (string, error) {
 
 func waitForInitOutput(consoleLogPath string, timeout time.Duration) (*InitOutput, error) {
 	deadline := time.Now().Add(timeout)
-	
+
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(consoleLogPath)
 		if err != nil {
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
-		
+
 		// Look for "=== INIT OUTPUT START ===" and "=== INIT OUTPUT END ==="
 		content := string(data)
 		startMarker := "=== INIT OUTPUT START ==="
 		endMarker := "=== INIT OUTPUT END ==="
-		
+
 		startIdx := strings.Index(content, startMarker)
 		if startIdx == -1 {
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
-		
+
 		endIdx := strings.Index(content[startIdx:], endMarker)
 		if endIdx == -1 {
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
-		
+
 		// Extract JSON between markers
 		jsonStart := startIdx + len(startMarker)
 		jsonEnd := startIdx + endIdx
 		jsonStr := strings.TrimSpace(content[jsonStart:jsonEnd])
-		
+
 		// Parse JSON
 		var initOutput InitOutput
 		if err := json.Unmarshal([]byte(jsonStr), &initOutput); err != nil {
 			return nil, fmt.Errorf("failed to parse init output JSON: %w", err)
 		}
-		
+
 		// Validate the output
 		if initOutput.IP == "" {
 			return nil, fmt.Errorf("init output missing IP address")
@@ -278,10 +278,10 @@ func waitForInitOutput(consoleLogPath string, timeout time.Duration) (*InitOutpu
 		if net.ParseIP(initOutput.IP) == nil {
 			return nil, fmt.Errorf("invalid IP address in init output: %s", initOutput.IP)
 		}
-		
+
 		return &initOutput, nil
 	}
-	
+
 	return nil, fmt.Errorf("timeout waiting for VM init output after %v", timeout)
 }
 
@@ -291,7 +291,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  init [--data-size SIZE]  Initialize VM (SIZE in GB, default: 50)")
-		fmt.Fprintln(os.Stderr, "  start <cpu> <ram>        Start VM with CPU count and RAM size (MB)")
+		fmt.Fprintln(os.Stderr, "  start <cpu> <ram> <db-shm-mb>  Start VM with CPU count, RAM size (MB), and DB shared memory size (MB)")
 		fmt.Fprintln(os.Stderr, "  stop                     Stop running VM")
 		fmt.Fprintln(os.Stderr, "  resize-data <size>       Resize data disk to SIZE GB (VM must be stopped)")
 		os.Exit(1)
@@ -319,18 +319,18 @@ func main() {
 		}
 		err = initCmd(dataSizeGB)
 	case "start":
-		if len(os.Args) < 4 {
-			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size>")
+		if len(os.Args) < 5 {
+			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size> <db_shm_size_mb>")
 			os.Exit(1)
 		}
-		err = startCmd(os.Args[2], os.Args[3])
+		err = startCmd(os.Args[2], os.Args[3], os.Args[4])
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
-		if len(os.Args) < 4 {
+		if len(os.Args) < 5 {
 			fmt.Fprintln(os.Stderr, "Invalid daemon arguments")
 			os.Exit(1)
 		}
-		err = runVMDaemon(os.Args[2], os.Args[3])
+		err = runVMDaemon(os.Args[2], os.Args[3], os.Args[4])
 	case "stop":
 		err = stopCmd()
 	case "resize-data":
@@ -406,6 +406,36 @@ func extractTarXZ(data []byte, outputDir string, pathTransform func(string) stri
 	return nil
 }
 
+func writeDBShmConfig(sharedDir string, dbShmSizeMB uint64) error {
+	dbConfigPath := filepath.Join(sharedDir, "init", "db-config.json")
+	data, err := os.ReadFile(dbConfigPath)
+	if err != nil {
+		return fmt.Errorf("failed to read DB config %s: %w", dbConfigPath, err)
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return fmt.Errorf("failed to parse DB config %s: %w", dbConfigPath, err)
+	}
+
+	config["db_shm_size_mb"] = dbShmSizeMB
+
+	updated, err := json.MarshalIndent(config, "", "    ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal DB config: %w", err)
+	}
+	updated = append(updated, '\n')
+
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(dbConfigPath); err == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.WriteFile(dbConfigPath, updated, mode); err != nil {
+		return fmt.Errorf("failed to write DB config %s: %w", dbConfigPath, err)
+	}
+	return nil
+}
+
 func initCmd(dataSizeGB int) error {
 	fmt.Println("Initializing VM...")
 	fmt.Println("Extracting VM package...")
@@ -444,11 +474,11 @@ func initCmd(dataSizeGB int) error {
 	fmt.Println("Generating SSH key pair...")
 	privateKeyPath := "vm-ssh-key"
 	publicKeyPath := filepath.Join(sharedDir, "authorized_keys")
-	
+
 	if err := generateSSHKeyPair(privateKeyPath, publicKeyPath); err != nil {
 		return fmt.Errorf("failed to generate SSH key pair: %w", err)
 	}
-	
+
 	fmt.Printf("SSH private key: %s\n", privateKeyPath)
 	fmt.Printf("SSH public key added to: %s\n", publicKeyPath)
 
@@ -464,13 +494,13 @@ func initCmd(dataSizeGB int) error {
 	fmt.Println("Successfully initialized VM")
 	fmt.Printf("VM files extracted to: %s/\n", vmDir)
 	fmt.Printf("Shared folder: %s/ -> /mnt/host (inside VM)\n", sharedDir)
-	fmt.Println("Run 'mac-runner start <cpu_count> <ram_size>' to start the VM")
+	fmt.Println("Run 'mac-runner start <cpu_count> <ram_size> <db_shm_size_mb>' to start the VM")
 	return nil
 }
 
-func startCmd(cpuCountStr, ramSizeStr string) error {
+func startCmd(cpuCountStr, ramSizeStr, dbShmSizeStr string) error {
 	sharedDir := "vm-shared"
-	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, shared_dir=%s\n", cpuCountStr, ramSizeStr, sharedDir)
+	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, db_shm_size=%s, shared_dir=%s\n", cpuCountStr, ramSizeStr, dbShmSizeStr, sharedDir)
 
 	// Check if VM has been initialized
 	vmDir := "vm"
@@ -513,15 +543,15 @@ func startCmd(cpuCountStr, ramSizeStr string) error {
 	// Start daemon process in background
 	fmt.Println("Launching VM daemon process...")
 	attr := &os.ProcAttr{
-		Dir: ".",
-		Env: os.Environ(),
+		Dir:   ".",
+		Env:   os.Environ(),
 		Files: []*os.File{nil, logFile, logFile}, // stdin=nil, stdout/stderr to log
 		Sys: &syscall.SysProcAttr{
 			Setsid: true, // Create new session to detach from terminal
 		},
 	}
 
-	args := []string{executable, "__daemon__", cpuCountStr, ramSizeStr}
+	args := []string{executable, "__daemon__", cpuCountStr, ramSizeStr, dbShmSizeStr}
 
 	process, err := os.StartProcess(executable, args, attr)
 	if err != nil {
@@ -546,11 +576,11 @@ func startCmd(cpuCountStr, ramSizeStr string) error {
 	go func() {
 		// Give the log file a moment to be written by the daemon
 		time.Sleep(100 * time.Millisecond)
-		
+
 		var lastSize int64 = 0
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-stopTailCh:
@@ -620,7 +650,7 @@ func startCmd(cpuCountStr, ramSizeStr string) error {
 		}
 		// State file exists, release the daemon process
 		process.Release()
-		
+
 		fmt.Println("VM started successfully in background")
 		fmt.Printf("Shared folder: %s/ -> /mnt/host (inside VM)\n", sharedDir)
 		fmt.Println("Check vm.log for VM output")
@@ -633,13 +663,13 @@ func startCmd(cpuCountStr, ramSizeStr string) error {
 	}
 }
 
-func runVMDaemon(cpuCountStr, ramSizeStr string) error {
+func runVMDaemon(cpuCountStr, ramSizeStr, dbShmSizeStr string) error {
 	// This function runs as a background daemon
 	sharedDir := "vm-shared"
-	
+
 	fmt.Printf("[%s] VM daemon started\n", time.Now().Format("15:04:05"))
-	fmt.Printf("[%s] Parsing configuration: CPU=%s, RAM=%s MB\n", time.Now().Format("15:04:05"), cpuCountStr, ramSizeStr)
-	
+	fmt.Printf("[%s] Parsing configuration: CPU=%s, RAM=%s MB, DB_SHM=%s MB\n", time.Now().Format("15:04:05"), cpuCountStr, ramSizeStr, dbShmSizeStr)
+
 	cpuCount, err := strconv.Atoi(cpuCountStr)
 	if err != nil {
 		return fmt.Errorf("invalid cpu_count: %w", err)
@@ -649,8 +679,21 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid ram_size: %w", err)
 	}
-	
-	fmt.Printf("[%s] Configuration parsed: %d CPUs, %d MB RAM\n", time.Now().Format("15:04:05"), cpuCount, ramSize)
+
+	dbShmSize, err := strconv.ParseUint(dbShmSizeStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid db_shm_size: %w", err)
+	}
+	if dbShmSize == 0 {
+		return fmt.Errorf("invalid db_shm_size: must be greater than 0")
+	}
+
+	fmt.Printf("[%s] Configuration parsed: %d CPUs, %d MB RAM, %d MB DB shared memory\n", time.Now().Format("15:04:05"), cpuCount, ramSize, dbShmSize)
+
+	if err := writeDBShmConfig(sharedDir, dbShmSize); err != nil {
+		return err
+	}
+	fmt.Printf("[%s] DB shared memory configuration written\n", time.Now().Format("15:04:05"))
 
 	// Use files from vm/ directory
 	vmDir := "vm"
@@ -676,7 +719,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	// Use UEFI boot instead - disk.img contains ESP with UKI
 	efiVariableStorePath := filepath.Join(vmDir, "efi-nvram.bin")
 	var variableStore *vz.EFIVariableStore
-	
+
 	// Check if variable store already exists
 	if _, err := os.Stat(efiVariableStorePath); err == nil {
 		// Load existing variable store
@@ -726,17 +769,17 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	if absDataDiskPath, err := filepath.Abs(dataDiskPath); err == nil {
 		if _, err := os.Stat(absDataDiskPath); err == nil {
 			fmt.Printf("[%s] Attaching data disk: %s...\n", time.Now().Format("15:04:05"), dataDiskPath)
-			
+
 			dataDiskAttachment, err := vz.NewDiskImageStorageDeviceAttachment(absDataDiskPath, false)
 			if err != nil {
 				return fmt.Errorf("failed to create data disk attachment: %w", err)
 			}
-			
+
 			dataStorageConfig, err := vz.NewVirtioBlockDeviceConfiguration(dataDiskAttachment)
 			if err != nil {
 				return fmt.Errorf("failed to create data storage device config: %w", err)
 			}
-			
+
 			storageDevices = append(storageDevices, dataStorageConfig)
 			fmt.Printf("[%s] Data disk attached as first device (for /var)\n", time.Now().Format("15:04:05"))
 		}
@@ -901,7 +944,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	if err != nil {
 		return fmt.Errorf("VM initialization failed: %w", err)
 	}
-	
+
 	fmt.Printf("VM IP address: %s\n", initOutput.IP)
 	fmt.Printf("VM ports: %+v\n", initOutput.Ports)
 
@@ -911,25 +954,25 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	ctx := context.Background()
 	forwarders := make(map[string]*LoopbackForwarder)
 	hostPorts := make(map[string]int)
-	
+
 	for portName, guestPort := range initOutput.Ports {
 		if guestPort == 0 {
 			fmt.Fprintf(os.Stderr, "Warning: Skipping port forwarding for %s (port is 0)\n", portName)
 			continue
 		}
-		
+
 		forwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestPort)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
 			continue
 		}
-		
+
 		forwarders[portName] = forwarder
 		hostPort := forwarder.Port()
 		hostPorts[portName] = hostPort
 		fmt.Printf("%s forwarding: 127.0.0.1:%d -> %s:%d\n", portName, hostPort, vmIP, guestPort)
 	}
-	
+
 	// Ensure forwarders are closed on exit
 	defer func() {
 		for _, forwarder := range forwarders {
@@ -939,16 +982,17 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 
 	// Write vm-state.json with runtime configuration
 	vmState := map[string]interface{}{
-		"vm_name":   "exasol-nano-vm",
-		"vm_ip":     vmIP,
-		"cpu_count": cpuCountStr,
-		"ram_size":  ramSizeStr,
-		"pid":       fmt.Sprintf("%d", os.Getpid()),
-		"ports":     hostPorts,
+		"vm_name":        "exasol-nano-vm",
+		"vm_ip":          vmIP,
+		"cpu_count":      cpuCountStr,
+		"ram_size":       ramSizeStr,
+		"db_shm_size_mb": dbShmSize,
+		"pid":            fmt.Sprintf("%d", os.Getpid()),
+		"ports":          hostPorts,
 	}
 	// Use relative path for shared directory
 	vmState["shared_dir"] = "./" + filepath.Base(sharedDir)
-	
+
 	// Add SSH private key path if it exists (relative path)
 	privateKeyPath := "vm-ssh-key"
 	if _, err := os.Stat(privateKeyPath); err == nil {
@@ -965,7 +1009,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	}
 
 	fmt.Println("VM state written to vm-state.json")
-	
+
 	// Display access information
 	fmt.Println("\n=== VM Access Information ===")
 	if sshPort, ok := hostPorts["ssh"]; ok && sshPort > 0 {

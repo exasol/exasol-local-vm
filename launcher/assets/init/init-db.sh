@@ -38,6 +38,7 @@ fi
 
 DB_CONTAINER_TARBALL_NAME=$(jq -r '.tarball_name' "$DB_CONFIG_FILE")
 DB_CONTAINER_NAME=$(jq -r '.container_name' "$DB_CONFIG_FILE")
+DB_SHM_SIZE_MB=$(jq -r '.db_shm_size_mb // 2048' "$DB_CONFIG_FILE")
 DB_PORT=$(jq -r '.ports.db' "$DB_CONFIG_FILE")
 UI_PORT=$(jq -r '.ports.ui' "$DB_CONFIG_FILE")
 
@@ -48,6 +49,16 @@ if [ -z "$DB_CONTAINER_TARBALL_NAME" ] || [ "$DB_CONTAINER_TARBALL_NAME" = "null
 fi
 if [ -z "$DB_CONTAINER_NAME" ] || [ "$DB_CONTAINER_NAME" = "null" ]; then
   echo "Error: container_name not found in $DB_CONFIG_FILE" >&2
+  exit 1
+fi
+case "$DB_SHM_SIZE_MB" in
+  ''|*[!0-9]*)
+    echo "Error: db_shm_size_mb must be a positive integer in $DB_CONFIG_FILE" >&2
+    exit 1
+    ;;
+esac
+if [ "$DB_SHM_SIZE_MB" -le 0 ]; then
+  echo "Error: db_shm_size_mb must be greater than 0 in $DB_CONFIG_FILE" >&2
   exit 1
 fi
 
@@ -114,14 +125,14 @@ fi
 
 if [ "$RELOAD_NEEDED" = "true" ]; then
   log_msg "Cleaning up old DB container and images..."
-  
+
   # Stop and remove the specific DB container if it exists
   if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
     log_msg "Stopping and removing existing DB container: $DB_CONTAINER_NAME"
     podman stop "$DB_CONTAINER_NAME" 2>/dev/null || true
     podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
   fi
-  
+
   # Remove only exasol-nano images (not all images)
   EXASOL_IMAGES=$(podman images --format "{{.Repository}}:{{.Tag}}" | grep "^exasol-nano" || true)
   if [ -n "$EXASOL_IMAGES" ]; then
@@ -130,13 +141,13 @@ if [ "$RELOAD_NEEDED" = "true" ]; then
       podman rmi -f "$image" 2>/dev/null || true
     done
   fi
-  
+
   # Load the new container
   log_msg "Loading container image..."
   LOAD_OUTPUT=$(podman load < "$DB_CONTAINER_TARBALL" 2>&1)
   if [ $? -eq 0 ]; then
     log_msg "Container loaded successfully"
-    
+
     # Extract the loaded image name from podman load output
     # Output format: "Loaded image: docker.io/library/exasol-nano:tag" or similar
     # Use sed instead of grep -P for BusyBox compatibility
@@ -145,7 +156,7 @@ if [ "$RELOAD_NEEDED" = "true" ]; then
       log_msg "Error: Could not determine loaded image name from output"
       exit 1
     fi
-    
+
     # Tag it with a predictable name for easy reference
     IMAGE_TAG="localhost/${DB_CONTAINER_NAME}:latest"
     log_msg "Tagging loaded image $LOADED_IMAGE as $IMAGE_TAG"
@@ -153,7 +164,7 @@ if [ "$RELOAD_NEEDED" = "true" ]; then
       log_msg "Error: Failed to tag image"
       exit 1
     fi
-    
+
     echo "$CURRENT_SHA" > "$STATE_FILE"
   else
     log_msg "Error: Failed to load container from $DB_CONTAINER_TARBALL"
@@ -191,11 +202,12 @@ IMAGE_NAME="localhost/${DB_CONTAINER_NAME}:latest"
 log_msg "Using image: $IMAGE_NAME"
 
 # Start the container
-log_msg "Starting container: $DB_CONTAINER_NAME"
+log_msg "Starting container: $DB_CONTAINER_NAME with ${DB_SHM_SIZE_MB}MB shared memory"
 podman run -d \
   --name "$DB_CONTAINER_NAME" \
   -p "$DB_PORT:$DB_PORT" \
   -p "$UI_PORT:$UI_PORT" \
+  --shm-size "${DB_SHM_SIZE_MB}m" \
   "$IMAGE_NAME"
 
 if [ $? -eq 0 ]; then

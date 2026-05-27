@@ -1,5 +1,6 @@
 {
     "container_name": "exasol-nano-db",
+    "db_shm_size_mb": 2048,
     "tarball_name": "exasol-nano-db.tar.gz",
     "ports": {
         "db": 8563,
