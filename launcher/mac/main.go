@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	_ "embed"
 	"encoding/json"
 	"encoding/pem"
@@ -69,20 +70,19 @@ func generateSSHKeyPair(privateKeyPath, publicKeyPath string) error {
 		return fmt.Errorf("failed to generate ED25519 key: %w", err)
 	}
 
-	// Convert to ssh.Signer to get proper OpenSSH format
-	signer, err := ssh.NewSignerFromKey(privKey)
-	if err != nil {
-		return fmt.Errorf("failed to create signer: %w", err)
-	}
-
-	// Marshal private key to OpenSSH format
-	privKeyPEM, err := ssh.MarshalPrivateKey(signer, "")
+	// Marshal private key to PKCS#8 format
+	privKeyBytes, err := x509.MarshalPKCS8PrivateKey(privKey)
 	if err != nil {
 		return fmt.Errorf("failed to marshal private key: %w", err)
 	}
 
+	privKeyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privKeyBytes,
+	})
+
 	// Write private key to file with restrictive permissions
-	if err := os.WriteFile(privateKeyPath, pem.EncodeToMemory(privKeyPEM), 0600); err != nil {
+	if err := os.WriteFile(privateKeyPath, privKeyPEM, 0600); err != nil {
 		return fmt.Errorf("failed to write private key: %w", err)
 	}
 
