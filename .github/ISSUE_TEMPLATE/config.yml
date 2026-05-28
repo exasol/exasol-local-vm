@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Exasol Documentation
+    url: https://docs.exasol.com/db/latest/home.htm
+    about: Official Exasol database documentation
+  - name: Security Vulnerability
+    url: https://github.com/exasol/exasol-nano-vm/security/advisories/new
+    about: Please report security vulnerabilities privately
