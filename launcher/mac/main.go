@@ -243,26 +243,26 @@ func waitForInitOutput(consoleLogPath string, timeout time.Duration) (*InitOutpu
 			continue
 		}
 
-		// Look for "=== INIT OUTPUT START ===" and "=== INIT OUTPUT END ==="
+		// Look for the latest complete "=== INIT OUTPUT START ===" and
+		// "=== INIT OUTPUT END ===" block.
 		content := string(data)
 		startMarker := "=== INIT OUTPUT START ==="
 		endMarker := "=== INIT OUTPUT END ==="
 
-		startIdx := strings.Index(content, startMarker)
-		if startIdx == -1 {
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-
-		endIdx := strings.Index(content[startIdx:], endMarker)
+		endIdx := strings.LastIndex(content, endMarker)
 		if endIdx == -1 {
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
-		// Extract JSON between markers
+		startIdx := strings.LastIndex(content[:endIdx], startMarker)
+		if startIdx == -1 {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
 		jsonStart := startIdx + len(startMarker)
-		jsonEnd := startIdx + endIdx
+		jsonEnd := endIdx
 		jsonStr := strings.TrimSpace(content[jsonStart:jsonEnd])
 
 		// Parse JSON
@@ -748,6 +748,9 @@ func runVMDaemon(cpuCountStr, ramSizeStr, dbShmSizeStr string) error {
 	// Create console logging attachment for hvc0 (VirtIO console)
 	consoleLogPath := "vm-console.log"
 	fmt.Printf("[%s] Configuring console logging to %s...\n", time.Now().Format("15:04:05"), consoleLogPath)
+	if err := os.Remove(consoleLogPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to remove stale console log %s: %w", consoleLogPath, err)
+	}
 	consoleAttachment, err := vz.NewFileSerialPortAttachment(consoleLogPath, true)
 	if err != nil {
 		return fmt.Errorf("failed to create console log attachment: %w", err)
