@@ -16,7 +16,7 @@ The release process uses a reusable workflow pattern with two workflows:
 - Reusable: `workflow_call` - Can be called by other workflows (like release.yml)
 
 **Jobs:**
-1. `build-linux-packages` - Builds Linux VM packages on Ubuntu
+1. `build-disk-images` - Builds VM disk images on Ubuntu
 2. `build-mac-launcher` - Builds, signs, and notarizes macOS launcher on macOS runner
 
 **Outputs:**

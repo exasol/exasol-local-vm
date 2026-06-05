@@ -87,7 +87,7 @@ echo ""
 if [ "$SKIP_LINUX_BUILD" = "true" ] && [ -z "$PREVIOUS_RUN_ID" ]; then
   echo "Validating that a previous run with Linux packages exists..."
   
-  # Get list of successful runs and check for build-linux-packages job
+  # Get list of successful runs and check for build-disk-images job
   RUN_IDS=$(gh run list \
     --workflow=build-packages.yml \
     --branch="$BRANCH" \
@@ -100,7 +100,7 @@ if [ "$SKIP_LINUX_BUILD" = "true" ] && [ -z "$PREVIOUS_RUN_ID" ]; then
   for candidate_run_id in $RUN_IDS; do
     BUILD_JOB_STATUS=$(gh run view "$candidate_run_id" \
       --json jobs \
-      --jq '.jobs[] | select(.name == "build-linux-packages") | .conclusion' 2>/dev/null || echo "")
+      --jq '.jobs[] | select(.name == "build-disk-images") | .conclusion' 2>/dev/null || echo "")
     
     if [ "$BUILD_JOB_STATUS" = "success" ]; then
       FOUND_VALID_RUN="$candidate_run_id"
