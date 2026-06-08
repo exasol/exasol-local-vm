@@ -5,7 +5,8 @@ on:
     tags:
       - "v*"
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   validate-tag:
@@ -27,6 +28,7 @@ jobs:
     uses: ./.github/workflows/build-packages.yml
     secrets: inherit
     permissions:
+      actions: read
       contents: read
 
   create-release:
