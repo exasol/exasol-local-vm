@@ -1,0 +1,25 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  copyright:
+    name: Copyright headers
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check copyright headers
+        run: python3 tools/copyright_headers.py --check

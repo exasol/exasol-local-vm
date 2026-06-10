@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
 set -euo pipefail
 
 if ! command -v podman >/dev/null 2>&1; then

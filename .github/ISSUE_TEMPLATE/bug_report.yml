@@ -1,3 +1,6 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
 name: Bug Report
 description: Report a bug or unexpected behavior
 title: "[Bug]: "

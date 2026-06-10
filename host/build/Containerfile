@@ -1,3 +1,6 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
 FROM fedora
 
 RUN dnf install -y \

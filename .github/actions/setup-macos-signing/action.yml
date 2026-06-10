@@ -1,3 +1,6 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
 name: 'Setup macOS Signing Certificate'
 description: 'Prepares macOS signing certificate for code signing'
 inputs:

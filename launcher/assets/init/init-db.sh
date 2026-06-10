@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
 # Load and run Exasol Nano DB container
 # Based on container/load-shared-container.sh
 set -eu

@@ -1,3 +1,6 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
 # Build from the repository root:
 #   podman build -t exasol-local-vm-runner host/run
 FROM ubuntu:24.04

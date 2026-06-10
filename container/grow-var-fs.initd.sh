@@ -1,4 +1,6 @@
 #!/sbin/openrc-run
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
 
 name="grow-var-vs"
 description="Resize /var to fill image"
