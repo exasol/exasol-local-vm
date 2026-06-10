@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
 
 # Adds specified services to the runlevel. Current working directory must be
 # root of the image.

@@ -1,3 +1,5 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
 
 #!/bin/sh
 # Run all initialization scripts in order

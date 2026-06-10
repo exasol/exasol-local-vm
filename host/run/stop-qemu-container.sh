@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
 set -euo pipefail
 
 CONTAINER_NAME="${VM_CONTAINER_NAME:-exasol-local-vm}"

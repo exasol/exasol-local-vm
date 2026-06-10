@@ -1,4 +1,6 @@
 #!/sbin/openrc-run
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
 
 name="format-data-disk"
 description="Format data disk if unformatted"

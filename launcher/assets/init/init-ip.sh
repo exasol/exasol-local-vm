@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
 # Get VM IP address and update init output file
 set -eu
 

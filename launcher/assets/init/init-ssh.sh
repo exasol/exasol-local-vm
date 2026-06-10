@@ -1,3 +1,5 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
 
 #!/bin/sh
 # Import SSH keys from shared folder
