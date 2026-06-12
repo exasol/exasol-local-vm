@@ -45,8 +45,11 @@ cp "$RAW_DISK" "$PACKAGE_DIR/disk.img"
 # Kernel, initramfs, and cmdline are bundled in the ESP partition as a UKI
 # Modern ARM64 kernels have EFI stub and require UEFI boot
 
-# Create the release archive first (without launcher)
-tar -C "$ROOT_DIR/package" -cf - "$PACKAGE_NAME" | xz -6 -v > "$RELEASE_FILE"
+# Create the release archive first (without launcher).
+# This archive is embedded into the macOS launcher binary, so it is packed at the
+# maximum xz level. -9 --extreme costs build-time CPU/memory only; launch-time
+# decompression is unaffected.
+tar -C "$ROOT_DIR/package" -cf - "$PACKAGE_NAME" | xz -9 --extreme -v > "$RELEASE_FILE"
 
 echo "==> macOS package archive created: $RELEASE_FILE"
 
