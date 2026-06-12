@@ -1,0 +1,209 @@
+//go:build darwin
+
+// Package integration contains end-to-end tests for the mac-runner launcher binary.
+// Tests require the notarized artifact zip produced by the build-packages CI workflow.
+// By default the fixture looks for ../dist/mac-runner-aarch64.zip (the path the
+// workflow writes it to); override with the LAUNCHER_ZIP env var.
+package integration
+
+import (
+	"archive/zip"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// LauncherFixture manages a temporary working directory with the launcher binary.
+// Call NewLauncherFixture to create one; call Cleanup when the test is done.
+type LauncherFixture struct {
+	// WorkDir is the temporary directory in which the launcher is run.
+	WorkDir string
+	// BinaryPath is the path to the launcher binary inside WorkDir.
+	BinaryPath string
+
+	vmRunning bool
+	t         *testing.T
+}
+
+// NewLauncherFixture locates the mac-runner-aarch64.zip artifact, unzips it into
+// a fresh temporary directory, and returns a ready-to-use fixture.
+// If the zip cannot be found the test is skipped.
+func NewLauncherFixture(t *testing.T) *LauncherFixture {
+	t.Helper()
+
+	zipPath := findLauncherZip(t)
+
+	workDir, err := os.MkdirTemp("", "mac-runner-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp work dir: %v", err)
+	}
+
+	if err := unzipTo(zipPath, workDir); err != nil {
+		os.RemoveAll(workDir)
+		t.Fatalf("failed to unzip launcher artifact %s: %v", zipPath, err)
+	}
+
+	binaryPath := filepath.Join(workDir, "launcher")
+	if err := os.Chmod(binaryPath, 0755); err != nil {
+		os.RemoveAll(workDir)
+		t.Fatalf("failed to chmod launcher binary: %v", err)
+	}
+
+	return &LauncherFixture{
+		WorkDir:    workDir,
+		BinaryPath: binaryPath,
+		t:          t,
+	}
+}
+
+// Init runs `launcher init` in WorkDir, extracting the embedded VM package and
+// init assets and generating an SSH key pair.
+func (f *LauncherFixture) Init() {
+	f.t.Helper()
+	f.run("init")
+}
+
+// StartVM runs `launcher start <cpu> <ramMB> <dataSizeGB>` and waits for it to
+// return. Marks the VM as running so Cleanup will call Stop.
+func (f *LauncherFixture) StartVM(cpu, ramMB, dataSizeGB int) {
+	f.t.Helper()
+	f.run("start",
+		fmt.Sprintf("%d", cpu),
+		fmt.Sprintf("%d", ramMB),
+		fmt.Sprintf("%d", dataSizeGB),
+	)
+	f.vmRunning = true
+}
+
+// StopVM runs `launcher stop`.
+func (f *LauncherFixture) StopVM() {
+	f.t.Helper()
+	f.run("stop")
+	f.vmRunning = false
+}
+
+// ResizeData runs `launcher resize-data <newSizeGB>` and returns any error.
+// The launcher's stderr is included in the returned error so callers can
+// inspect the human-readable rejection message (e.g. "shrinking is not supported").
+func (f *LauncherFixture) ResizeData(newSizeGB int) error {
+	f.t.Helper()
+	cmd := exec.Command(f.BinaryPath, "resize-data", fmt.Sprintf("%d", newSizeGB))
+	cmd.Dir = f.WorkDir
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		f.t.Logf("resize-data output:\n%s", strings.TrimSpace(string(out)))
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// Cleanup stops the VM if it is running and removes WorkDir.
+func (f *LauncherFixture) Cleanup() {
+	if f.vmRunning {
+		_ = exec.Command(f.BinaryPath, "stop").Run()
+	}
+	os.RemoveAll(f.WorkDir)
+}
+
+// SSHKeyPath returns the path to the generated private key after Init.
+func (f *LauncherFixture) SSHKeyPath() string {
+	return filepath.Join(f.WorkDir, "vm-ssh-key")
+}
+
+// DataDiskPath returns the expected path of the VM data disk after StartVM.
+func (f *LauncherFixture) DataDiskPath() string {
+	return filepath.Join(f.WorkDir, "vm", "data.img")
+}
+
+// requireIntegration is kept as a no-op helper for compatibility with existing
+// tests; integration tests now always run when this package is executed.
+func requireIntegration(t *testing.T) {
+	t.Helper()
+}
+
+// run executes the launcher binary with the given arguments inside WorkDir and
+// fails the test if the command exits non-zero.
+func (f *LauncherFixture) run(args ...string) {
+	f.t.Helper()
+	cmd := exec.Command(f.BinaryPath, args...)
+	cmd.Dir = f.WorkDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		f.t.Fatalf("launcher %v: %v", args, err)
+	}
+}
+
+// launcherBinaryPath returns the path to the launcher binary, preferring the
+// LAUNCHER_BINARY env var and falling back to the default build output location.
+func findLauncherZip(t *testing.T) string {
+	t.Helper()
+
+	if p := os.Getenv("LAUNCHER_ZIP"); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		t.Skipf("LAUNCHER_ZIP=%q not found; skipping", p)
+	}
+
+	// Default: dist/mac-runner-aarch64.zip at the repo root.
+	// go test sets the working directory to the package directory (tests/),
+	// so ../dist/ resolves to the repo root's dist/ directory.
+	defaultPath := filepath.Join("..", "dist", "mac-runner-aarch64.zip")
+	if _, err := os.Stat(defaultPath); err != nil {
+		t.Skipf(
+			"launcher zip not found at %s; download the mac-launcher artifact from CI or set LAUNCHER_ZIP",
+			defaultPath,
+		)
+	}
+	return defaultPath
+}
+
+// unzipTo extracts all files from zipPath into destDir, preserving permissions.
+func unzipTo(zipPath, destDir string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		destPath := filepath.Join(destDir, filepath.Clean(f.Name))
+
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(destPath, f.Mode()); err != nil {
+				return fmt.Errorf("mkdir %s: %w", destPath, err)
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return fmt.Errorf("mkdir parent of %s: %w", destPath, err)
+		}
+
+		out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return fmt.Errorf("create %s: %w", destPath, err)
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			out.Close()
+			return fmt.Errorf("open zip entry %s: %w", f.Name, err)
+		}
+
+		_, copyErr := io.Copy(out, rc)
+		rc.Close()
+		out.Close()
+		if copyErr != nil {
+			return fmt.Errorf("extract %s: %w", f.Name, copyErr)
+		}
+	}
+	return nil
+}

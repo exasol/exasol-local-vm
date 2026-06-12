@@ -188,6 +188,11 @@ tasks:
       - task: test-ssh-keys
       - task: test-container
 
+  test-launcher-integration:
+    desc: Run launcher integration tests in ./tests
+    cmds:
+      - cd tests && go test ./...
+
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
     run: when_changed

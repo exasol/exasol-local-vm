@@ -381,3 +381,40 @@ jobs:
             dist/mac-runner-aarch64.zip
             dist/mac-runner-aarch64.zip.sha256
           retention-days: 7
+
+  test-mac-launcher:
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - virtualization
+    needs: build-mac-launcher
+    if: ${{ always() && needs.build-mac-launcher.result == 'success' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: tests/go.mod
+
+      - name: Download macOS launcher artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mac-launcher
+          path: dist
+
+      - name: Install Task
+        run: |
+          set -euo pipefail
+          TASK_BIN_DIR="$RUNNER_TEMP/task-bin"
+          mkdir -p "$TASK_BIN_DIR"
+          sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b "$TASK_BIN_DIR"
+          echo "$TASK_BIN_DIR" >> "$GITHUB_PATH"
+          "$TASK_BIN_DIR/task" --version
+
+      - name: Run integration tests
+        run: task test-launcher-integration
