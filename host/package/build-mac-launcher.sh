@@ -36,7 +36,7 @@ cp "$VM_ARTIFACTS_TARBALL" vm-package.tar.xz
 
 # Compress launcher/assets/init directory to be embedded
 echo "==> Creating init assets tarball..."
-tar -C "$ROOT_DIR/launcher/assets" -cf - init | xz -6 > init-assets.tar.xz
+tar -C "$ROOT_DIR/launcher/assets" -cf - init | xz -9 --extreme > init-assets.tar.xz
 
 # Update Go module dependencies and go.sum
 echo "Updating Go dependencies..."
@@ -45,10 +45,12 @@ go mod download
 
 # Build the launcher binary
 # Use directory structure: release/launcher/{os}/{arch}/launcher
+# Note: CGO is required (vz/v3 binds Apple's Virtualization.framework), so CGO_ENABLED=0 is not an option.
+# -trimpath strips local paths; -ldflags="-s -w" drops the symbol table and DWARF debug data.
 LAUNCHER_OUTPUT_DIR="$ROOT_DIR/release/launcher/darwin/$ARCH"
 mkdir -p "$LAUNCHER_OUTPUT_DIR"
 LAUNCHER_OUTPUT="$LAUNCHER_OUTPUT_DIR/launcher"
-GOOS=darwin GOARCH="$GOARCH" go build -o "$LAUNCHER_OUTPUT" .
+GOOS=darwin GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "$LAUNCHER_OUTPUT" .
 
 # Clean up generated files
 rm -f vm-package.tar.xz
