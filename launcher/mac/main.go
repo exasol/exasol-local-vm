@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -43,6 +44,17 @@ type InitOutput struct {
 	IP    string         `json:"ip"`
 	Ports map[string]int `json:"ports"`
 }
+
+type RuntimeConfig struct {
+	SSHPrivateKey string `json:"ssh_private_key"`
+}
+
+const (
+	defaultSSHPrivateKeyPath = "vm-ssh-key"
+	runtimeConfigPath        = "vm-config.json"
+	sharedDirName            = "vm-shared"
+	authorizedKeysName       = "authorized_keys"
+)
 
 // readLastLines reads the last n lines from a file
 func readLastLines(filePath string, n int) ([]string, error) {
@@ -90,6 +102,104 @@ func generateSSHKeyPair(privateKeyPath, publicKeyPath string) error {
 	}
 
 	return nil
+}
+
+func expandHome(path string) (string, error) {
+	if path == "~" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve home directory: %w", err)
+		}
+		return homeDir, nil
+	}
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve home directory: %w", err)
+		}
+		return filepath.Join(homeDir, path[2:]), nil
+	}
+	return path, nil
+}
+
+func normalizeSSHPrivateKeyPath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("SSH private key path must not be empty")
+	}
+
+	expandedPath, err := expandHome(path)
+	if err != nil {
+		return "", err
+	}
+
+	info, err := os.Stat(expandedPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat SSH private key %s: %w", expandedPath, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("SSH private key path is a directory: %s", expandedPath)
+	}
+
+	absPath, err := filepath.Abs(expandedPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve SSH private key path %s: %w", expandedPath, err)
+	}
+	return absPath, nil
+}
+
+func authorizedKeyFromPrivateKey(privateKeyPath string) ([]byte, error) {
+	privateKeyData, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read SSH private key %s: %w", privateKeyPath, err)
+	}
+
+	// Derive the authorized_keys entry from the private key. We only support
+	// unprotected keys because init runs non-interactively and cannot prompt for
+	// a passphrase.
+	signer, err := ssh.ParsePrivateKey(privateKeyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse SSH private key %s; only unprotected private keys are supported: %w", privateKeyPath, err)
+	}
+
+	return ssh.MarshalAuthorizedKey(signer.PublicKey()), nil
+}
+
+func writeRuntimeConfig(config RuntimeConfig) error {
+	configData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal runtime config: %w", err)
+	}
+	if err := os.WriteFile(runtimeConfigPath, configData, 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", runtimeConfigPath, err)
+	}
+	return nil
+}
+
+func loadRuntimeConfig() (RuntimeConfig, error) {
+	config := RuntimeConfig{SSHPrivateKey: defaultSSHPrivateKeyPath}
+
+	configData, err := os.ReadFile(runtimeConfigPath)
+	if os.IsNotExist(err) {
+		return config, nil
+	}
+	if err != nil {
+		return RuntimeConfig{}, fmt.Errorf("failed to read %s: %w", runtimeConfigPath, err)
+	}
+
+	if err := json.Unmarshal(configData, &config); err != nil {
+		return RuntimeConfig{}, fmt.Errorf("failed to parse %s: %w", runtimeConfigPath, err)
+	}
+	if config.SSHPrivateKey == "" {
+		config.SSHPrivateKey = defaultSSHPrivateKeyPath
+	}
+	return config, nil
+}
+
+func displayPath(path string) string {
+	if filepath.IsAbs(path) || strings.HasPrefix(path, ".") {
+		return path
+	}
+	return "./" + path
 }
 
 // createSparseDataDisk creates a sparse raw disk image for VM data storage
@@ -286,7 +396,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Usage: mac-runner <command> [options]")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
-		fmt.Fprintln(os.Stderr, "  init                              Initialize VM")
+		fmt.Fprintln(os.Stderr, "  init [--ssh-key <private-key>]    Initialize VM")
 		fmt.Fprintln(os.Stderr, "  start <cpu> <ram> <data_size_gb>  Start VM with CPU count, RAM size (MB),")
 		fmt.Fprintln(os.Stderr, "                                    and data disk size in GB.")
 		fmt.Fprintln(os.Stderr, "                                    The data disk will be:")
@@ -303,7 +413,22 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "init":
-		err = initCmd()
+		initFlags := flag.NewFlagSet("init", flag.ContinueOnError)
+		initFlags.SetOutput(os.Stderr)
+		sshKeyPath := initFlags.String("ssh-key", "", "Use an existing SSH private key instead of generating one")
+		initFlags.Usage = func() {
+			fmt.Fprintln(os.Stderr, "Usage: mac-runner init [--ssh-key <private-key>]")
+			initFlags.PrintDefaults()
+		}
+		if parseErr := initFlags.Parse(os.Args[2:]); parseErr != nil {
+			os.Exit(2)
+		}
+		if initFlags.NArg() != 0 {
+			fmt.Fprintf(os.Stderr, "Unexpected init argument: %s\n", initFlags.Arg(0))
+			initFlags.Usage()
+			os.Exit(2)
+		}
+		err = initCmd(*sshKeyPath)
 	case "start":
 		if len(os.Args) < 5 {
 			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size> <data_size_gb>")
@@ -401,8 +526,23 @@ func extractTarXZ(data []byte, outputDir string, pathTransform func(string) stri
 	return nil
 }
 
-func initCmd() error {
+func initCmd(sshKeyPath string) error {
 	fmt.Println("Initializing VM...")
+
+	privateKeyPath := defaultSSHPrivateKeyPath
+	var authorizedKey []byte
+	if sshKeyPath != "" {
+		var err error
+		privateKeyPath, err = normalizeSSHPrivateKeyPath(sshKeyPath)
+		if err != nil {
+			return err
+		}
+		authorizedKey, err = authorizedKeyFromPrivateKey(privateKeyPath)
+		if err != nil {
+			return err
+		}
+	}
+
 	fmt.Println("Extracting VM package...")
 
 	// Create vm directory
@@ -423,7 +563,7 @@ func initCmd() error {
 	}
 
 	// Create shared directory for host-guest file sharing
-	sharedDir := "vm-shared"
+	sharedDir := sharedDirName
 	if err := os.MkdirAll(sharedDir, 0755); err != nil {
 		return fmt.Errorf("failed to create shared directory: %w", err)
 	}
@@ -435,17 +575,26 @@ func initCmd() error {
 		return fmt.Errorf("failed to extract init assets: %w", err)
 	}
 
-	// Generate SSH key pair for VM access
-	fmt.Println("Generating SSH key pair...")
-	privateKeyPath := "vm-ssh-key"
-	publicKeyPath := filepath.Join(sharedDir, "authorized_keys")
-
-	if err := generateSSHKeyPair(privateKeyPath, publicKeyPath); err != nil {
-		return fmt.Errorf("failed to generate SSH key pair: %w", err)
+	publicKeyPath := filepath.Join(sharedDir, authorizedKeysName)
+	if sshKeyPath == "" {
+		// Generate SSH key pair for VM access
+		fmt.Println("Generating SSH key pair...")
+		if err := generateSSHKeyPair(privateKeyPath, publicKeyPath); err != nil {
+			return fmt.Errorf("failed to generate SSH key pair: %w", err)
+		}
+	} else {
+		fmt.Println("Using provided SSH private key...")
+		if err := os.WriteFile(publicKeyPath, authorizedKey, 0644); err != nil {
+			return fmt.Errorf("failed to write public key: %w", err)
+		}
 	}
 
 	fmt.Printf("SSH private key: %s\n", privateKeyPath)
 	fmt.Printf("SSH public key added to: %s\n", publicKeyPath)
+	if err := writeRuntimeConfig(RuntimeConfig{SSHPrivateKey: privateKeyPath}); err != nil {
+		return err
+	}
+	fmt.Printf("Runtime config written to: %s\n", runtimeConfigPath)
 
 	fmt.Println("Successfully initialized VM")
 	fmt.Printf("VM files extracted to: %s/\n", vmDir)
@@ -498,7 +647,7 @@ func ensureDataDisk(path string, requestedSizeGB int) error {
 }
 
 func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int) error {
-	sharedDir := "vm-shared"
+	sharedDir := sharedDirName
 	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, data_size=%dGB, shared_dir=%s\n", cpuCountStr, ramSizeStr, dataSizeGB, sharedDir)
 
 	// Check if VM has been initialized
@@ -675,10 +824,16 @@ func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int) error {
 
 func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	// This function runs as a background daemon
-	sharedDir := "vm-shared"
+	sharedDir := sharedDirName
+	runtimeConfig, err := loadRuntimeConfig()
+	if err != nil {
+		return err
+	}
+	sshPrivateKeyPath := runtimeConfig.SSHPrivateKey
 
 	fmt.Printf("[%s] VM daemon started\n", time.Now().Format("15:04:05"))
 	fmt.Printf("[%s] Parsing configuration: CPU=%s, RAM=%s MB\n", time.Now().Format("15:04:05"), cpuCountStr, ramSizeStr)
+	fmt.Printf("[%s] Using SSH private key: %s\n", time.Now().Format("15:04:05"), sshPrivateKeyPath)
 
 	cpuCount, err := strconv.Atoi(cpuCountStr)
 	if err != nil {
@@ -938,7 +1093,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 				port = parts[1]
 			}
 			cmd := exec.Command("ssh",
-				"-i", "vm-ssh-key",
+				"-i", sshPrivateKeyPath,
 				"-p", port,
 				"-o", "StrictHostKeyChecking=no",
 				"-o", "UserKnownHostsFile=/dev/null",
@@ -1062,10 +1217,10 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	// Use relative path for shared directory
 	vmState["shared_dir"] = "./" + filepath.Base(sharedDir)
 
-	// Add SSH private key path if it exists (relative path)
-	privateKeyPath := "vm-ssh-key"
-	if _, err := os.Stat(privateKeyPath); err == nil {
-		vmState["ssh_private_key"] = "./" + privateKeyPath
+	if _, err := os.Stat(sshPrivateKeyPath); err == nil {
+		vmState["ssh_private_key"] = displayPath(sshPrivateKeyPath)
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: SSH private key not found: %s\n", sshPrivateKeyPath)
 	}
 
 	stateData, err := json.MarshalIndent(vmState, "", "  ")
@@ -1082,7 +1237,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	// Display access information
 	fmt.Println("\n=== VM Access Information ===")
 	if sshPort, ok := hostPorts["ssh"]; ok && sshPort > 0 {
-		fmt.Printf("SSH:      ssh -i vm-ssh-key -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1\n", sshPort)
+		fmt.Printf("SSH:      ssh -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1\n", displayPath(sshPrivateKeyPath), sshPort)
 	}
 	if dbPort, ok := hostPorts["db"]; ok && dbPort > 0 {
 		fmt.Printf("Database: 127.0.0.1:%d\n", dbPort)
