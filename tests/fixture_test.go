@@ -1,3 +1,6 @@
+// Copyright 2026 Exasol AG
+// SPDX-License-Identifier: MIT
+
 //go:build darwin
 
 // Package integration contains end-to-end tests for the mac-runner launcher binary.
