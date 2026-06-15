@@ -34,6 +34,13 @@ For the current macOS artifact, the flow is:
 ./launcher stop
 ```
 
+By default, initialization generates an SSH key pair for VM administration. To
+use an existing private key instead, pass it during initialization:
+
+```bash
+./launcher init --ssh-key ~/.ssh/id_ed25519
+```
+
 The preferred DB endpoint is `127.0.0.1:8563`. If that port is unavailable, the
 runtime reports the actual localhost endpoint to use.
 
