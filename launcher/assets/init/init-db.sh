@@ -43,6 +43,9 @@ DB_CONTAINER_TARBALL_NAME=$(jq -r '.db.tarball_name' "$CONFIG_FILE")
 DB_CONTAINER_NAME=$(jq -r '.db.container_name' "$CONFIG_FILE")
 DB_PORT=$(jq -r '.db.ports.db' "$CONFIG_FILE")
 DB_SHM_SIZE=$(jq -r '.db.shm_size' "$CONFIG_FILE")
+DB_PIDS_LIMIT=$(jq -r '.db.pids_limit' "$CONFIG_FILE")
+DB_SECURITY_OPT=$(jq -r '.db.security_opt' "$CONFIG_FILE")
+DB_RESTART=$(jq -r '.db.restart' "$CONFIG_FILE")
 
 # Validate that required fields were present in config
 if [ -z "$DB_CONTAINER_TARBALL_NAME" ] || [ "$DB_CONTAINER_TARBALL_NAME" = "null" ]; then
@@ -62,6 +65,18 @@ if [ -z "$DB_PORT" ] || [ "$DB_PORT" = "null" ]; then
 fi
 if [ -z "$DB_SHM_SIZE" ] || [ "$DB_SHM_SIZE" = "null" ]; then
   echo "Error: db.shm_size not found in $CONFIG_FILE" >&2
+  exit 1
+fi
+if [ -z "$DB_PIDS_LIMIT" ] || [ "$DB_PIDS_LIMIT" = "null" ]; then
+  echo "Error: db.pids_limit not found in $CONFIG_FILE" >&2
+  exit 1
+fi
+if [ -z "$DB_SECURITY_OPT" ] || [ "$DB_SECURITY_OPT" = "null" ]; then
+  echo "Error: db.security_opt not found in $CONFIG_FILE" >&2
+  exit 1
+fi
+if [ -z "$DB_RESTART" ] || [ "$DB_RESTART" = "null" ]; then
+  echo "Error: db.restart not found in $CONFIG_FILE" >&2
   exit 1
 fi
 
@@ -195,10 +210,13 @@ IMAGE_NAME="localhost/${DB_CONTAINER_NAME}:latest"
 log_msg "Using image: $IMAGE_NAME"
 
 # Start the container
-log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE"
+log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE pids-limit=$DB_PIDS_LIMIT security-opt=$DB_SECURITY_OPT restart=$DB_RESTART"
 podman run -d \
   --name "$DB_CONTAINER_NAME" \
   --shm-size="$DB_SHM_SIZE" \
+  --pids-limit="$DB_PIDS_LIMIT" \
+  --security-opt "$DB_SECURITY_OPT" \
+  --restart "$DB_RESTART" \
   -p "$DB_PORT:$DB_PORT" \
   "$IMAGE_NAME"
 
