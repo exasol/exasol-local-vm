@@ -1,11 +1,11 @@
 {
-    "db": {
-        "container_name": "exasol-nano-db",
-        "tarball_name": "exasol-nano-db.tar.gz",
-        "ports": {
-            "db": 8563
-        },
-        "minimum_memory": "2gb",
-        "shm_size": "1gb"
-    }
+  "db": {
+    "container_name": "exasol-local-db",
+    "tarball_name": "exasol-nano-db.tar.gz",
+    "ports": {
+      "db": 8563
+    },
+    "minimum_memory": "2gb",
+    "shm_size": "1gb"
+  }
 }
