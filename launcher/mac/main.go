@@ -1186,7 +1186,11 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 			continue
 		}
 
-		forwarder, err := StartLoopbackForwarder(ctx, 0, vmIP, guestPort)
+		// Try to bind on the same port number as the guest port; fall back to OS-assigned port.
+		forwarder, err := StartLoopbackForwarder(ctx, guestPort, vmIP, guestPort)
+		if err != nil {
+			forwarder, err = StartLoopbackForwarder(ctx, 0, vmIP, guestPort)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
 			continue
