@@ -9,6 +9,9 @@
     "shm_size": "512mb",
     "pids_limit": "-1",
     "security_opt": "unmask=ALL",
-    "restart": "always"
+    "restart": "always",
+    "params": [
+      "-maxConnectionsLicenseLimit=20"
+    ]
   }
 }

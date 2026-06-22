@@ -47,6 +47,17 @@ DB_PIDS_LIMIT=$(jq -r '.db.pids_limit' "$CONFIG_FILE")
 DB_SECURITY_OPT=$(jq -r '.db.security_opt' "$CONFIG_FILE")
 DB_RESTART=$(jq -r '.db.restart' "$CONFIG_FILE")
 
+# Optional extra parameters forwarded to the DB process (the container's
+# /controller entrypoint passes any trailing args straight into the DB
+# process command line). Collected into positional parameters so values
+# survive whitespace. Absent/empty "db.params" => no extra args.
+set --
+while IFS= read -r DB_PARAM; do
+  [ -n "$DB_PARAM" ] && set -- "$@" "$DB_PARAM"
+done <<EOF
+$(jq -r '.db.params[]? // empty' "$CONFIG_FILE")
+EOF
+
 # Validate that required fields were present in config
 if [ -z "$DB_CONTAINER_TARBALL_NAME" ] || [ "$DB_CONTAINER_TARBALL_NAME" = "null" ]; then
   echo "Error: db.tarball_name not found in $CONFIG_FILE" >&2
@@ -210,7 +221,7 @@ IMAGE_NAME="localhost/${DB_CONTAINER_NAME}:latest"
 log_msg "Using image: $IMAGE_NAME"
 
 # Start the container
-log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE pids-limit=$DB_PIDS_LIMIT security-opt=$DB_SECURITY_OPT restart=$DB_RESTART"
+log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE pids-limit=$DB_PIDS_LIMIT security-opt=$DB_SECURITY_OPT restart=$DB_RESTART db-params=[$*]"
 podman run -d \
   --name "$DB_CONTAINER_NAME" \
   --shm-size="$DB_SHM_SIZE" \
@@ -218,7 +229,7 @@ podman run -d \
   --security-opt "$DB_SECURITY_OPT" \
   --restart "$DB_RESTART" \
   -p "$DB_PORT:$DB_PORT" \
-  "$IMAGE_NAME"
+  "$IMAGE_NAME" "$@"
 
 if [ $? -eq 0 ]; then
   log_msg "Container started successfully"
