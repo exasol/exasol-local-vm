@@ -343,7 +343,18 @@ jobs:
           echo "  MACOS_NOTARY_KEY_ID length: ${#MACOS_NOTARY_KEY_ID}"
           
           echo "✓ Notarization credentials validated"
-          
+
+          # Verify credentials are accepted by Apple before submitting — catches
+          # expired agreements, revoked keys, or wrong issuer/key-id combinations
+          # with a clear error rather than a mid-submission 403.
+          echo "Verifying credentials with Apple notary service..."
+          xcrun notarytool history \
+            --issuer "$MACOS_NOTARY_ISSUER_ID" \
+            --key-id "$MACOS_NOTARY_KEY_ID" \
+            --key "$KEY_PATH" \
+            --output-format json > /dev/null
+          echo "✓ Apple credentials verified"
+
           xcrun notarytool submit \
             dist/mac-runner-aarch64.zip \
             --issuer "$MACOS_NOTARY_ISSUER_ID" \
