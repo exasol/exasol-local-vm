@@ -47,16 +47,11 @@ DB_PIDS_LIMIT=$(jq -r '.db.pids_limit' "$CONFIG_FILE")
 DB_SECURITY_OPT=$(jq -r '.db.security_opt' "$CONFIG_FILE")
 DB_RESTART=$(jq -r '.db.restart' "$CONFIG_FILE")
 
-# Optional extra parameters forwarded to the DB process (the container's
-# /controller entrypoint passes any trailing args straight into the DB
-# process command line). Collected into positional parameters so values
-# survive whitespace. Absent/empty "db.params" => no extra args.
-set --
-while IFS= read -r DB_PARAM; do
-  [ -n "$DB_PARAM" ] && set -- "$@" "$DB_PARAM"
-done <<EOF
-$(jq -r '.db.params[]? // empty' "$CONFIG_FILE")
-EOF
+# Optional DB parameters applied on first start. The Nano container accepts
+# these via its documented "init params='k=v ...'" interface; the values are
+# persisted to /exa/exasol.conf on the initial bootstrap. Absent/empty
+# "db.params" => start without an explicit init command.
+DB_PARAMS=$(jq -r '.db.params // [] | join(" ")' "$CONFIG_FILE")
 
 # Validate that required fields were present in config
 if [ -z "$DB_CONTAINER_TARBALL_NAME" ] || [ "$DB_CONTAINER_TARBALL_NAME" = "null" ]; then
@@ -221,7 +216,14 @@ IMAGE_NAME="localhost/${DB_CONTAINER_NAME}:latest"
 log_msg "Using image: $IMAGE_NAME"
 
 # Start the container
-log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE pids-limit=$DB_PIDS_LIMIT security-opt=$DB_SECURITY_OPT restart=$DB_RESTART db-params=[$*]"
+# Append the documented "init params='...'" command only when params are set.
+if [ -n "$DB_PARAMS" ]; then
+  set -- init "params=$DB_PARAMS"
+else
+  set --
+fi
+
+log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE pids-limit=$DB_PIDS_LIMIT security-opt=$DB_SECURITY_OPT restart=$DB_RESTART db-params=[$DB_PARAMS]"
 podman run -d \
   --name "$DB_CONTAINER_NAME" \
   --shm-size="$DB_SHM_SIZE" \

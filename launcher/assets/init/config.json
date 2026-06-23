@@ -11,7 +11,7 @@
     "security_opt": "unmask=ALL",
     "restart": "always",
     "params": [
-      "-maxConnectionsLicenseLimit=20"
+      "maxConnectionsLicenseLimit=20"
     ]
   }
 }
