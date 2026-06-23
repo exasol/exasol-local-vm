@@ -82,6 +82,38 @@ func (f *LauncherFixture) StartVM(cpu, ramMB, dataSizeGB int) {
 	f.vmRunning = true
 }
 
+// StartVMWithPorts is like StartVM but also passes --ports to override which
+// host port is bound for each named service (e.g. "db:9090,ssh:2222").
+func (f *LauncherFixture) StartVMWithPorts(cpu, ramMB, dataSizeGB int, ports string) {
+	f.t.Helper()
+	f.run("start",
+		"--ports", ports,
+		fmt.Sprintf("%d", cpu),
+		fmt.Sprintf("%d", ramMB),
+		fmt.Sprintf("%d", dataSizeGB),
+	)
+	f.vmRunning = true
+}
+
+// StartVMExpectError runs `launcher start` with the given extra flags/args and
+// returns any error rather than fataling, so callers can assert on failure cases.
+// The VM is not marked as running regardless of outcome.
+func (f *LauncherFixture) StartVMExpectError(cpu, ramMB, dataSizeGB int, extraArgs ...string) error {
+	f.t.Helper()
+	args := append([]string{"start"}, extraArgs...)
+	args = append(args, fmt.Sprintf("%d", cpu), fmt.Sprintf("%d", ramMB), fmt.Sprintf("%d", dataSizeGB))
+	cmd := exec.Command(f.BinaryPath, args...)
+	cmd.Dir = f.WorkDir
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		f.t.Logf("start output:\n%s", strings.TrimSpace(string(out)))
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // StopVM runs `launcher stop`.
 func (f *LauncherFixture) StopVM() {
 	f.t.Helper()

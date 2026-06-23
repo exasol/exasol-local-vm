@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,8 +398,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  init [--ssh-key <private-key>]    Initialize VM")
-		fmt.Fprintln(os.Stderr, "  start <cpu> <ram> <data_size_gb>  Start VM with CPU count, RAM size (MB),")
+		fmt.Fprintln(os.Stderr, "  start [--ports <svc>:<port>,...] <cpu> <ram> <data_size_gb>")
+		fmt.Fprintln(os.Stderr, "                                    Start VM with CPU count, RAM size (MB),")
 		fmt.Fprintln(os.Stderr, "                                    and data disk size in GB.")
+		fmt.Fprintln(os.Stderr, "                                    --ports overrides which host port is bound")
+		fmt.Fprintln(os.Stderr, "                                    for a named service (e.g. --ports db:9090,ssh:2222).")
+		fmt.Fprintln(os.Stderr, "                                    Unspecified services use the same port as the VM,")
+		fmt.Fprintln(os.Stderr, "                                    falling back to a random port if unavailable.")
 		fmt.Fprintln(os.Stderr, "                                    The data disk will be:")
 		fmt.Fprintln(os.Stderr, "                                      - created sparsely if it does not exist")
 		fmt.Fprintln(os.Stderr, "                                      - reused as-is if its size matches")
@@ -430,11 +436,22 @@ func main() {
 		}
 		err = initCmd(*sshKeyPath)
 	case "start":
-		if len(os.Args) < 5 {
-			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size> <data_size_gb>")
-			os.Exit(1)
+		startFlags := flag.NewFlagSet("start", flag.ContinueOnError)
+		startFlags.SetOutput(os.Stderr)
+		portsFlag := startFlags.String("ports", "", "Host port overrides: <service>:<port>[,<service>:<port>...]")
+		startFlags.Usage = func() {
+			fmt.Fprintln(os.Stderr, "Usage: mac-runner start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
+			startFlags.PrintDefaults()
 		}
-		dataSizeGB, parseErr := strconv.Atoi(os.Args[4])
+		if parseErr := startFlags.Parse(os.Args[2:]); parseErr != nil {
+			os.Exit(2)
+		}
+		if startFlags.NArg() != 3 {
+			fmt.Fprintf(os.Stderr, "Error: expected 3 positional arguments, got %d\n", startFlags.NArg())
+			startFlags.Usage()
+			os.Exit(2)
+		}
+		dataSizeGB, parseErr := strconv.Atoi(startFlags.Arg(2))
 		if parseErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: invalid data_size_gb: %v\n", parseErr)
 			os.Exit(1)
@@ -443,14 +460,18 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: data_size_gb must be a positive integer")
 			os.Exit(1)
 		}
-		err = startCmd(os.Args[2], os.Args[3], dataSizeGB)
+		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag)
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "Invalid daemon arguments")
 			os.Exit(1)
 		}
-		err = runVMDaemon(os.Args[2], os.Args[3])
+		daemonPorts := ""
+		if len(os.Args) >= 5 {
+			daemonPorts = os.Args[4]
+		}
+		err = runVMDaemon(os.Args[2], os.Args[3], daemonPorts)
 	case "stop":
 		err = stopCmd()
 	case "resize-data":
@@ -646,7 +667,52 @@ func ensureDataDisk(path string, requestedSizeGB int) error {
 	}
 }
 
-func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int) error {
+// parsePortOverrides parses a comma-separated list of "service:port" pairs into a map.
+func parsePortOverrides(s string) (map[string]int, error) {
+	overrides := make(map[string]int)
+	if strings.TrimSpace(s) == "" {
+		return overrides, nil
+	}
+	for _, entry := range strings.Split(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid port override %q: expected <service>:<port>", entry)
+		}
+		service := strings.TrimSpace(parts[0])
+		portStr := strings.TrimSpace(parts[1])
+		if service == "" {
+			return nil, fmt.Errorf("empty service name in port override %q", entry)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid port in override %q: must be an integer 1-65535", entry)
+		}
+		overrides[service] = port
+	}
+	return overrides, nil
+}
+
+// shutdownVM requests a graceful stop and waits up to 30 seconds.
+func shutdownVM(vm *vz.VirtualMachine) {
+	if vm.CanRequestStop() {
+		vm.RequestStop() //nolint:errcheck
+	} else if vm.CanStop() {
+		vm.Stop() //nolint:errcheck
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if vm.State() == vz.VirtualMachineStateStopped {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int, portsOverride string) error {
 	sharedDir := sharedDirName
 	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, data_size=%dGB, shared_dir=%s\n", cpuCountStr, ramSizeStr, dataSizeGB, sharedDir)
 
@@ -710,7 +776,7 @@ func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int) error {
 		},
 	}
 
-	args := []string{executable, "__daemon__", cpuCountStr, ramSizeStr}
+	args := []string{executable, "__daemon__", cpuCountStr, ramSizeStr, portsOverride}
 
 	process, err := os.StartProcess(executable, args, attr)
 	if err != nil {
@@ -822,7 +888,7 @@ func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int) error {
 	}
 }
 
-func runVMDaemon(cpuCountStr, ramSizeStr string) error {
+func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	// This function runs as a background daemon
 	sharedDir := sharedDirName
 	runtimeConfig, err := loadRuntimeConfig()
@@ -830,6 +896,11 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 		return err
 	}
 	sshPrivateKeyPath := runtimeConfig.SSHPrivateKey
+
+	portOverrides, err := parsePortOverrides(portsOverride)
+	if err != nil {
+		return fmt.Errorf("invalid --ports argument: %w", err)
+	}
 
 	fmt.Printf("[%s] VM daemon started\n", time.Now().Format("15:04:05"))
 	fmt.Printf("[%s] Parsing configuration: CPU=%s, RAM=%s MB\n", time.Now().Format("15:04:05"), cpuCountStr, ramSizeStr)
@@ -1175,6 +1246,20 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	target := fmt.Sprintf("%s:%d", vmIP, guestSSHPort)
 	sshTarget.Store(&target)
 
+	// Validate that all port overrides reference services reported by the VM.
+	for serviceName := range portOverrides {
+		if _, ok := initOutput.Ports[serviceName]; !ok {
+			knownNames := make([]string, 0, len(initOutput.Ports))
+			for n := range initOutput.Ports {
+				knownNames = append(knownNames, n)
+			}
+			sort.Strings(knownNames)
+			shutdownVM(vm)
+			return fmt.Errorf("--ports references unknown service %q; known services: %s",
+				serviceName, strings.Join(knownNames, ", "))
+		}
+	}
+
 	// Start port forwarders dynamically for all ports in init output
 	ctx := context.Background()
 	forwarders := make(map[string]*LoopbackForwarder)
@@ -1186,14 +1271,27 @@ func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 			continue
 		}
 
-		// Try to bind on the same port number as the guest port; fall back to OS-assigned port.
-		forwarder, err := StartLoopbackForwarder(ctx, guestPort, vmIP, guestPort)
-		if err != nil {
-			forwarder, err = StartLoopbackForwarder(ctx, 0, vmIP, guestPort)
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
-			continue
+		var forwarder *LoopbackForwarder
+		if overridePort, hasOverride := portOverrides[portName]; hasOverride {
+			// User specified an exact host port — hard failure if it cannot be bound.
+			forwarder, err = StartLoopbackForwarder(ctx, overridePort, vmIP, guestPort)
+			if err != nil {
+				for _, f := range forwarders {
+					f.Close()
+				}
+				shutdownVM(vm)
+				return fmt.Errorf("cannot bind host port %d for service %q (requested via --ports): %w", overridePort, portName, err)
+			}
+		} else {
+			// Default: try same port as the VM, fall back to OS-assigned.
+			forwarder, err = StartLoopbackForwarder(ctx, guestPort, vmIP, guestPort)
+			if err != nil {
+				forwarder, err = StartLoopbackForwarder(ctx, 0, vmIP, guestPort)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
+				continue
+			}
 		}
 
 		forwarders[portName] = forwarder
