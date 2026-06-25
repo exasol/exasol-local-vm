@@ -418,3 +418,6 @@ jobs:
 
       - name: Run integration tests
         run: task test-launcher-integration
+
+      - name: Run integration tests in tmux session
+        run: task test-launcher-integration-tmux

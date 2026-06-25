@@ -135,6 +135,19 @@ tasks:
     cmds:
       - cd tests && go test ./...
 
+  test-launcher-integration-tmux:
+    desc: Run launcher integration tests inside a detached tmux session
+    cmds:
+      - |
+        set -euo pipefail
+        EXIT_CODE_FILE=$(mktemp)
+        tmux new-session -d -s launcher-test \
+          "cd '{{.TASKFILE_DIR}}/tests' && go test ./...; echo \$? > \"$EXIT_CODE_FILE\"; tmux wait-for -S launcher-test-done"
+        tmux wait-for launcher-test-done
+        EXIT_CODE=$(cat "$EXIT_CODE_FILE")
+        rm -f "$EXIT_CODE_FILE"
+        exit "$EXIT_CODE"
+
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
     run: when_changed
