@@ -3,22 +3,11 @@
 
 version: '3'
 
+includes:
+  github: ./tasks/github.Taskfile.yml
+  lint: ./tasks/lint.Taskfile.yml
+
 tasks:
-  lint:
-    desc: Run all lint checks
-    cmds:
-      - task: lint-copyright
-
-  lint-copyright:
-    desc: Check configured source files for copyright and SPDX headers
-    cmds:
-      - python3 tools/copyright_headers.py --check
-
-  fix-copyright:
-    desc: Add missing copyright and SPDX headers to configured source files
-    cmds:
-      - python3 tools/copyright_headers.py --fix
-
   install-deps:
     desc: Install host dependencies for building and running the VM with Podman on Linux
     run: once
@@ -224,24 +213,3 @@ tasks:
     cmds:
       - task: stop-vm
       - git clean -Xf .
-
-  ci-build-mac-launcher:
-    desc: Run Build Packages workflow on current branch and download macOS launcher
-    vars:
-      # if you are only changing macOS launcher code, you can skip the vm disk build to speed up the workflow.
-      # note: you must have a recent successful vm disk build in the same branch for the workflow to use instead.
-      SKIP_LINUX_BUILD: '{{.SKIP_LINUX_BUILD | default "false"}}'
-      # If SKIP_LINUX_BUILD is true, you can optionally specify a previous workflow run ID to download the vm disk
-      # build artifacts from instead of the latest successful run.
-      PREVIOUS_RUN_ID: '{{.PREVIOUS_RUN_ID | default ""}}'
-    cmds:
-      - |
-        {{if eq .SKIP_LINUX_BUILD "true"}}
-          {{if ne .PREVIOUS_RUN_ID ""}}
-            ./host/github/ci-build-mac-launcher.sh --skip-linux-build --use-run-id {{.PREVIOUS_RUN_ID}}
-          {{else}}
-            ./host/github/ci-build-mac-launcher.sh --skip-linux-build
-          {{end}}
-        {{else}}
-          ./host/github/ci-build-mac-launcher.sh
-        {{end}}

@@ -1,0 +1,20 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
+version: '3'
+
+tasks:
+  lint:
+    desc: Run all lint checks
+    cmds:
+      - task: lint-copyright
+
+  lint-copyright:
+    desc: Check configured source files for copyright and SPDX headers
+    cmds:
+      - python3 tools/copyright_headers.py --check
+
+  fix-copyright:
+    desc: Add missing copyright and SPDX headers to configured source files
+    cmds:
+      - python3 tools/copyright_headers.py --fix

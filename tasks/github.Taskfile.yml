@@ -1,0 +1,26 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
+version: '3'
+
+tasks:
+  build-mac-launcher:
+    desc: Run Build Packages workflow on current branch and download macOS launcher
+    vars:
+      # if you are only changing macOS launcher code, you can skip the vm disk build to speed up the workflow.
+      # note: you must have a recent successful vm disk build in the same branch for the workflow to use instead.
+      SKIP_LINUX_BUILD: '{{.SKIP_LINUX_BUILD | default "false"}}'
+      # If SKIP_LINUX_BUILD is true, you can optionally specify a previous workflow run ID to download the vm disk
+      # build artifacts from instead of the latest successful run.
+      PREVIOUS_RUN_ID: '{{.PREVIOUS_RUN_ID | default ""}}'
+    cmds:
+      - |
+        {{if eq .SKIP_LINUX_BUILD "true"}}
+          {{if ne .PREVIOUS_RUN_ID ""}}
+            ./host/github/ci-build-mac-launcher.sh --skip-linux-build --use-run-id {{.PREVIOUS_RUN_ID}}
+          {{else}}
+            ./host/github/ci-build-mac-launcher.sh --skip-linux-build
+          {{end}}
+        {{else}}
+          ./host/github/ci-build-mac-launcher.sh
+        {{end}}
