@@ -50,8 +50,18 @@ runs:
           echo "${{ inputs.application-cert }}" | base64 -d > /tmp/developerID_application.cer
           openssl x509 -in /tmp/developerID_application.cer -inform DER -out /tmp/developerID_application.crt -outform PEM
           
-          # Read cert and key from PEM and export as pkcs12
-          openssl pkcs12 -export -inkey /tmp/private_key.pem -in /tmp/developerID_application.crt -out /tmp/signing_certificate.p12 -name "Developer ID Application" -passout "pass:${{ inputs.p12-password }}"
+          # Read cert and key from PEM and export as pkcs12.
+          # Force legacy algorithms (SHA1 MAC, 3DES key/cert encryption) for compatibility
+          # with macOS security import, which rejects the AES/SHA256 defaults from OpenSSL 3.x.
+          openssl pkcs12 -export \
+            -inkey /tmp/private_key.pem \
+            -in /tmp/developerID_application.crt \
+            -out /tmp/signing_certificate.p12 \
+            -name "Developer ID Application" \
+            -passout "pass:${{ inputs.p12-password }}" \
+            -macalg SHA1 \
+            -keypbe PBE-SHA1-3DES \
+            -certpbe PBE-SHA1-3DES
         fi
     - name: Import signing certificate into temporary keychain
       if: runner.os == 'macOS'
