@@ -21,6 +21,7 @@ case "$ARCH" in
 esac
 
 VM_ARTIFACTS_TARBALL="${RELEASE_FILE:-$ROOT_DIR/release/$PACKAGE_NAME.tar.xz}"
+VERSION_CHECK_DEFAULT_URL="${VERSION_CHECK_DEFAULT_URL:-https://metrics-test.exasol.com/v1/version-check}"
 
 if [ ! -f "$VM_ARTIFACTS_TARBALL" ]; then
     echo "Error: Release file not found: $VM_ARTIFACTS_TARBALL" >&2
@@ -30,6 +31,7 @@ fi
 
 echo "==> Building macOS launcher for $ARCH..."
 echo "    Release archive: $VM_ARTIFACTS_TARBALL"
+echo "    Version-check default URL: $VERSION_CHECK_DEFAULT_URL"
 
 LAUNCHER_DIR="$ROOT_DIR/launcher/mac"
 pushd "$LAUNCHER_DIR" > /dev/null
@@ -53,7 +55,11 @@ go mod download
 LAUNCHER_OUTPUT_DIR="$ROOT_DIR/release/launcher/darwin/$ARCH"
 mkdir -p "$LAUNCHER_OUTPUT_DIR"
 LAUNCHER_OUTPUT="$LAUNCHER_OUTPUT_DIR/launcher"
-GOOS=darwin GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "$LAUNCHER_OUTPUT" .
+GOOS=darwin GOARCH="$GOARCH" go build \
+  -trimpath \
+  -ldflags="-s -w -X main.defaultVersionCheckURL=$VERSION_CHECK_DEFAULT_URL" \
+  -o "$LAUNCHER_OUTPUT" \
+  .
 
 # Clean up generated files
 rm -f vm-package.tar.xz

@@ -29,10 +29,17 @@ if [ -z "$TARBALL_NAME" ] || [ "$TARBALL_NAME" = "null" ]; then
 fi
 
 SOURCE_TARBALL="$ROOT_DIR/release/exasol-nano-db-${IMG_ARCH}.tar.gz"
+SOURCE_METADATA="$SOURCE_TARBALL.metadata"
 DEST_TARBALL="$ROOT_DIR/launcher/assets/init/$TARBALL_NAME"
+DEST_METADATA="$DEST_TARBALL.metadata"
 
 if [ ! -f "$SOURCE_TARBALL" ]; then
     echo "Error: Container tarball not found at $SOURCE_TARBALL" >&2
+    echo "Run: task download-db-container IMG_ARCH=$IMG_ARCH" >&2
+    exit 1
+fi
+if [ ! -f "$SOURCE_METADATA" ]; then
+    echo "Error: Container metadata not found at $SOURCE_METADATA" >&2
     echo "Run: task download-db-container IMG_ARCH=$IMG_ARCH" >&2
     exit 1
 fi
@@ -43,6 +50,8 @@ echo "    Destination: $DEST_TARBALL"
 # Copy the container tarball to the init assets directory
 echo "==> Copying container tarball..."
 cp "$SOURCE_TARBALL" "$DEST_TARBALL"
+cp "$SOURCE_METADATA" "$DEST_METADATA"
 
 echo "==> Init assets staged successfully"
 echo "    Tarball size: $(du -h "$DEST_TARBALL" | cut -f1)"
+echo "    Metadata: $DEST_METADATA"

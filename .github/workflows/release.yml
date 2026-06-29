@@ -29,6 +29,8 @@ jobs:
   build:
     needs: validate-tag
     uses: ./.github/workflows/build-packages.yml
+    with:
+      version-check-default-url: https://metrics.exasol.com/v1/version-check
     secrets: inherit
     permissions:
       actions: read

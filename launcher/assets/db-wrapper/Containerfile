@@ -1,0 +1,16 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
+ARG NANO_BASE_TAG
+FROM docker.io/exasol/nano:${NANO_BASE_TAG}
+
+ARG NANO_BASE_TAG
+
+LABEL org.opencontainers.image.base.name="docker.io/exasol/nano:${NANO_BASE_TAG}" \
+      org.opencontainers.image.version="${NANO_BASE_TAG}" \
+      com.exasol.local-vm.nano-base-tag="${NANO_BASE_TAG}" \
+      com.exasol.local-vm.product-version="${NANO_BASE_TAG}"
+
+COPY --chmod=0555 exasol-local-vm-db-wrapper /usr/local/bin/exasol-local-vm-db-wrapper
+
+ENTRYPOINT ["/usr/local/bin/exasol-local-vm-db-wrapper"]

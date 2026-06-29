@@ -14,7 +14,17 @@ on:
         description: 'Previous workflow run ID to download Linux packages from (leave empty to use latest successful run)'
         type: string
         required: false
+      version-check-default-url:
+        description: 'Default scheduled version-check URL baked into the runner'
+        type: string
+        default: 'https://metrics-test.exasol.com/v1/version-check'
   workflow_call:
+    inputs:
+      version-check-default-url:
+        description: 'Default scheduled version-check URL baked into the runner'
+        required: false
+        type: string
+        default: 'https://metrics-test.exasol.com/v1/version-check'
     secrets:
       IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED:
         required: true
@@ -285,7 +295,8 @@ jobs:
         env:
           MACOS_SIGN_KEYCHAIN: ${{ steps.macos-signing.outputs.keychain-path }}
           MACOS_SIGN_IDENTITY: ${{ steps.macos-signing.outputs.signing-identity }}
-        run: task build-mac-launcher IMG_ARCH=aarch64
+          VERSION_CHECK_DEFAULT_URL: ${{ inputs.version-check-default-url }}
+        run: task build-mac-launcher IMG_ARCH=aarch64 VERSION_CHECK_DEFAULT_URL="$VERSION_CHECK_DEFAULT_URL"
       
       - name: Package macOS launcher for notarization
         run: |

@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,12 +50,36 @@ type RuntimeConfig struct {
 	SSHPrivateKey string `json:"ssh_private_key"`
 }
 
+type VersionCheckRuntimeConfig struct {
+	Enabled         bool   `json:"enabled"`
+	IntervalSeconds int    `json:"interval_seconds"`
+	Identity        string `json:"identity"`
+	URL             string `json:"url"`
+	OperatingSystem string `json:"operating_system"`
+	Architecture    string `json:"architecture"`
+}
+
+type VersionCheckOptions struct {
+	Enabled         bool
+	IntervalSeconds int
+	Identity        string
+	URL             string
+}
+
 const (
 	defaultSSHPrivateKeyPath = "vm-ssh-key"
 	runtimeConfigPath        = "vm-config.json"
 	sharedDirName            = "vm-shared"
 	authorizedKeysName       = "authorized_keys"
+
+	versionCheckRuntimeConfigName = "version-check.json"
+
+	defaultVersionCheckIntervalSeconds = 86400
+	defaultVersionCheckIdentity        = "NONE"
+	versionCheckHostOSMacOS            = "MacOS"
 )
+
+var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
 
 // readLastLines reads the last n lines from a file
 func readLastLines(filePath string, n int) ([]string, error) {
@@ -193,6 +218,79 @@ func loadRuntimeConfig() (RuntimeConfig, error) {
 		config.SSHPrivateKey = defaultSSHPrivateKeyPath
 	}
 	return config, nil
+}
+
+func defaultVersionCheckOptions() VersionCheckOptions {
+	return VersionCheckOptions{
+		Enabled:         true,
+		IntervalSeconds: defaultVersionCheckIntervalSeconds,
+		Identity:        defaultVersionCheckIdentity,
+		URL:             defaultVersionCheckURL,
+	}
+}
+
+func versionCheckRuntimeConfigFromOptions(
+	options VersionCheckOptions,
+	hostOS string,
+	goarch string,
+) VersionCheckRuntimeConfig {
+	url := strings.TrimSpace(options.URL)
+	if url == "" {
+		url = defaultVersionCheckURL
+	}
+
+	identity := strings.TrimSpace(options.Identity)
+	if identity == "" {
+		identity = defaultVersionCheckIdentity
+	}
+
+	intervalSeconds := options.IntervalSeconds
+	if intervalSeconds <= 0 {
+		intervalSeconds = defaultVersionCheckIntervalSeconds
+	}
+
+	return VersionCheckRuntimeConfig{
+		Enabled:         options.Enabled,
+		IntervalSeconds: intervalSeconds,
+		Identity:        identity,
+		URL:             url,
+		OperatingSystem: hostOS,
+		Architecture:    normalizeArchitecture(goarch),
+	}
+}
+
+func normalizeArchitecture(goarch string) string {
+	switch strings.ToLower(strings.TrimSpace(goarch)) {
+	case "amd64", "x64", "x86_64":
+		return "x86_64"
+	case "arm64", "aarch64":
+		return "arm64"
+	default:
+		return goarch
+	}
+}
+
+func writeVersionCheckRuntimeConfig(sharedDir string, config VersionCheckRuntimeConfig) error {
+	if err := os.MkdirAll(sharedDir, 0755); err != nil {
+		return fmt.Errorf("failed to create shared directory for version-check config: %w", err)
+	}
+
+	configPath := filepath.Join(sharedDir, versionCheckRuntimeConfigName)
+	configData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal version-check runtime config: %w", err)
+	}
+	if err := os.WriteFile(configPath, configData, 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", configPath, err)
+	}
+	return nil
+}
+
+func writeVersionCheckRuntimeConfigFromOptions(sharedDir string, options VersionCheckOptions) {
+	config := versionCheckRuntimeConfigFromOptions(options, versionCheckHostOSMacOS, runtime.GOARCH)
+	if err := writeVersionCheckRuntimeConfig(sharedDir, config); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to write version-check runtime config: %v\n", err)
+	}
 }
 
 func displayPath(path string) string {
@@ -397,7 +495,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  init [--ssh-key <private-key>]    Initialize VM")
-		fmt.Fprintln(os.Stderr, "  start <cpu> <ram> <data_size_gb>  Start VM with CPU count, RAM size (MB),")
+		fmt.Fprintln(os.Stderr, "  start [options] <cpu> <ram> <data_size_gb>")
+		fmt.Fprintln(os.Stderr, "                                    Start VM with CPU count, RAM size (MB),")
 		fmt.Fprintln(os.Stderr, "                                    and data disk size in GB.")
 		fmt.Fprintln(os.Stderr, "                                    The data disk will be:")
 		fmt.Fprintln(os.Stderr, "                                      - created sparsely if it does not exist")
@@ -430,11 +529,25 @@ func main() {
 		}
 		err = initCmd(*sshKeyPath)
 	case "start":
-		if len(os.Args) < 5 {
-			fmt.Fprintln(os.Stderr, "Usage: mac-runner start <cpu_count> <ram_size> <data_size_gb>")
+		startFlags := flag.NewFlagSet("start", flag.ContinueOnError)
+		startFlags.SetOutput(os.Stderr)
+		versionCheckOptions := defaultVersionCheckOptions()
+		startFlags.BoolVar(&versionCheckOptions.Enabled, "version-check-enabled", versionCheckOptions.Enabled, "Enable scheduled local database version checks")
+		startFlags.IntVar(&versionCheckOptions.IntervalSeconds, "version-check-interval-seconds", versionCheckOptions.IntervalSeconds, "Interval in seconds for scheduled local database version checks")
+		startFlags.StringVar(&versionCheckOptions.Identity, "version-check-identity", versionCheckOptions.Identity, "Identity string for scheduled local database version checks")
+		startFlags.StringVar(&versionCheckOptions.URL, "version-check-url", versionCheckOptions.URL, "Version-check URL override for scheduled local database version checks")
+		startFlags.Usage = func() {
+			fmt.Fprintln(os.Stderr, "Usage: mac-runner start [options] <cpu_count> <ram_size> <data_size_gb>")
+			startFlags.PrintDefaults()
+		}
+		if parseErr := startFlags.Parse(os.Args[2:]); parseErr != nil {
+			os.Exit(2)
+		}
+		if startFlags.NArg() != 3 {
+			startFlags.Usage()
 			os.Exit(1)
 		}
-		dataSizeGB, parseErr := strconv.Atoi(os.Args[4])
+		dataSizeGB, parseErr := strconv.Atoi(startFlags.Arg(2))
 		if parseErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: invalid data_size_gb: %v\n", parseErr)
 			os.Exit(1)
@@ -443,7 +556,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: data_size_gb must be a positive integer")
 			os.Exit(1)
 		}
-		err = startCmd(os.Args[2], os.Args[3], dataSizeGB)
+		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, versionCheckOptions)
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
@@ -646,7 +759,7 @@ func ensureDataDisk(path string, requestedSizeGB int) error {
 	}
 }
 
-func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int) error {
+func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int, versionCheckOptions VersionCheckOptions) error {
 	sharedDir := sharedDirName
 	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, data_size=%dGB, shared_dir=%s\n", cpuCountStr, ramSizeStr, dataSizeGB, sharedDir)
 
@@ -661,6 +774,8 @@ func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int) error {
 	if err := ensureDataDisk(dataDiskPath, dataSizeGB); err != nil {
 		return err
 	}
+
+	writeVersionCheckRuntimeConfigFromOptions(sharedDir, versionCheckOptions)
 
 	// Check if VM is already running
 	pidFile := "vm.pid"
@@ -825,6 +940,7 @@ func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int) error {
 func runVMDaemon(cpuCountStr, ramSizeStr string) error {
 	// This function runs as a background daemon
 	sharedDir := sharedDirName
+
 	runtimeConfig, err := loadRuntimeConfig()
 	if err != nil {
 		return err

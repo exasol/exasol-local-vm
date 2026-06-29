@@ -43,6 +43,8 @@ DB_CONTAINER_TARBALL_NAME=$(jq -r '.db.tarball_name' "$CONFIG_FILE")
 DB_CONTAINER_NAME=$(jq -r '.db.container_name' "$CONFIG_FILE")
 DB_PORT=$(jq -r '.db.ports.db' "$CONFIG_FILE")
 DB_SHM_SIZE=$(jq -r '.db.shm_size' "$CONFIG_FILE")
+VERSION_CHECK_RUNTIME_CONFIG_FILE="$EXASOL_VM_HOST_SHARED_DIR/version-check.json"
+VERSION_CHECK_CONTAINER_CONFIG_FILE="/run/exasol-local-vm-version-check.json"
 
 # Validate that required fields were present in config
 if [ -z "$DB_CONTAINER_TARBALL_NAME" ] || [ "$DB_CONTAINER_TARBALL_NAME" = "null" ]; then
@@ -65,12 +67,22 @@ if [ -z "$DB_SHM_SIZE" ] || [ "$DB_SHM_SIZE" = "null" ]; then
   exit 1
 fi
 
-STATE_FILE="/var/lib/container-state.sha256"
+STATE_DIR="${EXASOL_VM_CONTAINER_STATE_DIR:-/var/lib}"
+STATE_FILE="$STATE_DIR/container-state.sha256"
+CONTAINER_RUNTIME_STATE_FILE="$STATE_DIR/container-runtime-state.sha256"
 LOG_DIR="$EXASOL_VM_HOST_SHARED_DIR/logs"
 
 log_msg() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DB] $1"
   logger -t init-db "$1"
+}
+
+version_check_state_payload() {
+  if [ -f "$VERSION_CHECK_RUNTIME_CONFIG_FILE" ]; then
+    printf 'mounted:%s\n' "$VERSION_CHECK_RUNTIME_CONFIG_FILE"
+  else
+    printf 'absent\n'
+  fi
 }
 
 # Function to update init output file with container ports
@@ -81,8 +93,22 @@ update_output_ports() {
 
 # Create logs directory
 mkdir -p "$LOG_DIR" 2>/dev/null || true
+mkdir -p "$STATE_DIR" 2>/dev/null || true
 
 log_msg "Starting container initialization"
+CURRENT_RUNTIME_SHA=$(version_check_state_payload | sha256sum | cut -d' ' -f1)
+
+CONTAINER_RUNTIME_CHANGED=true
+if [ -f "$CONTAINER_RUNTIME_STATE_FILE" ]; then
+  PREVIOUS_RUNTIME_SHA=$(cat "$CONTAINER_RUNTIME_STATE_FILE")
+  if [ "$CURRENT_RUNTIME_SHA" = "$PREVIOUS_RUNTIME_SHA" ]; then
+    CONTAINER_RUNTIME_CHANGED=false
+  else
+    log_msg "Container runtime configuration has changed"
+  fi
+else
+  log_msg "No previous container runtime configuration state found"
+fi
 
 # Check if tarball exists
 if [ ! -f "$DB_CONTAINER_TARBALL" ]; then
@@ -168,13 +194,16 @@ fi
 # Check if container is already running
 if podman ps --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
   log_msg "Container already running"
+  if [ "$CONTAINER_RUNTIME_CHANGED" = "true" ]; then
+    log_msg "Container runtime configuration changed; running container will keep its current version-check configuration until restart"
+  fi
   update_output_ports
   exit 0
 fi
 
 # Check if container exists but isn't running - restart it if the image is current
 if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
-  if [ "$RELOAD_NEEDED" = "false" ]; then
+  if [ "$RELOAD_NEEDED" = "false" ] && [ "$CONTAINER_RUNTIME_CHANGED" = "false" ]; then
     log_msg "Restarting existing stopped container"
     if podman start "$DB_CONTAINER_NAME" 2>&1; then
       log_msg "Container restarted successfully"
@@ -185,7 +214,7 @@ if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
       podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
     fi
   else
-    log_msg "Removing stopped container (image changed)"
+    log_msg "Removing stopped container (image or runtime configuration changed)"
     podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
   fi
 fi
@@ -194,16 +223,30 @@ fi
 IMAGE_NAME="localhost/${DB_CONTAINER_NAME}:latest"
 log_msg "Using image: $IMAGE_NAME"
 
+run_db_container() {
+  if [ -f "$VERSION_CHECK_RUNTIME_CONFIG_FILE" ]; then
+    log_msg "Mounting version-check runtime config: $VERSION_CHECK_RUNTIME_CONFIG_FILE"
+    podman run -d \
+      --name "$DB_CONTAINER_NAME" \
+      --shm-size="$DB_SHM_SIZE" \
+      -p "$DB_PORT:$DB_PORT" \
+      --mount "type=bind,src=$VERSION_CHECK_RUNTIME_CONFIG_FILE,target=$VERSION_CHECK_CONTAINER_CONFIG_FILE,readonly" \
+      "$IMAGE_NAME"
+  else
+    log_msg "No version-check runtime config found; scheduled version checks remain disabled"
+    podman run -d \
+      --name "$DB_CONTAINER_NAME" \
+      --shm-size="$DB_SHM_SIZE" \
+      -p "$DB_PORT:$DB_PORT" \
+      "$IMAGE_NAME"
+  fi
+}
+
 # Start the container
 log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE"
-podman run -d \
-  --name "$DB_CONTAINER_NAME" \
-  --shm-size="$DB_SHM_SIZE" \
-  -p "$DB_PORT:$DB_PORT" \
-  "$IMAGE_NAME"
-
-if [ $? -eq 0 ]; then
+if run_db_container; then
   log_msg "Container started successfully"
+  echo "$CURRENT_RUNTIME_SHA" > "$CONTAINER_RUNTIME_STATE_FILE"
   update_output_ports
 else
   log_msg "Error: Failed to start container"
