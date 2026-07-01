@@ -67,15 +67,14 @@ type VersionCheckOptions struct {
 }
 
 const (
-	defaultSSHPrivateKeyPath = "vm-ssh-key"
-	runtimeConfigPath        = "vm-config.json"
-	sharedDirName            = "vm-shared"
-	authorizedKeysName       = "authorized_keys"
-
-	versionCheckRuntimeConfigName = "version-check.json"
-
+	defaultSSHPrivateKeyPath           = "vm-ssh-key"
+	runtimeConfigPath                  = "vm-config.json"
+	sharedDirName                      = "vm-shared"
+	authorizedKeysName                 = "authorized_keys"
+	versionCheckRuntimeConfigName      = "version-check.json"
 	defaultVersionCheckIntervalSeconds = 86400
 	defaultVersionCheckIdentity        = "NONE"
+	vmSocketPath                       = "vm.sock"
 )
 
 var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
@@ -507,6 +506,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "                                      - rejected (error) if larger; shrinking")
 		fmt.Fprintln(os.Stderr, "                                        is not supported.")
 		fmt.Fprintln(os.Stderr, "  stop                              Stop running VM")
+		fmt.Fprintln(os.Stderr, "  status                            Print JSON {\"running\": bool}")
 		fmt.Fprintln(os.Stderr, "  resize-data <size>                Resize data disk to SIZE GB (VM must be stopped)")
 		os.Exit(1)
 	}
@@ -574,6 +574,8 @@ func main() {
 		err = runVMDaemon(os.Args[2], os.Args[3], daemonPorts)
 	case "stop":
 		err = stopCmd()
+	case "status":
+		err = statusCmd()
 	case "resize-data":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: mac-runner resize-data <new_size_gb>")
@@ -582,7 +584,7 @@ func main() {
 		err = resizeDataDiskCmd(os.Args[2])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop")
+		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop, status, resize-data")
 		os.Exit(1)
 	}
 
@@ -836,23 +838,19 @@ func startCmd(
 
 	writeVersionCheckRuntimeConfigFromOptions(sharedDir, versionCheckOptions)
 
-	// Check if VM is already running
-	pidFile := "vm.pid"
-	if _, err := os.Stat(pidFile); err == nil {
-		pidData, _ := os.ReadFile(pidFile)
-		if len(pidData) > 0 {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
-			if err == nil {
-				// Check if process exists
-				if process, err := os.FindProcess(pid); err == nil {
-					if err := process.Signal(syscall.Signal(0)); err == nil {
-						return fmt.Errorf("VM is already running (PID: %d)", pid)
-					}
-				}
-			}
+	// Check if VM is already running by probing the status socket.
+	if conn, err := net.DialTimeout("unix", vmSocketPath, 2*time.Second); err == nil {
+		conn.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+		var resp struct {
+			Status string `json:"status"`
 		}
-		// Stale PID file, remove it
-		os.Remove(pidFile)
+		if err := json.NewEncoder(conn).Encode(map[string]string{"request": "status"}); err == nil {
+			json.NewDecoder(conn).Decode(&resp) //nolint:errcheck
+		}
+		conn.Close()
+		if resp.Status == "running" {
+			return fmt.Errorf("VM is already running")
+		}
 	}
 
 	// Get the current executable path
@@ -1008,6 +1006,10 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	portOverrides, err := parsePortOverrides(portsOverride)
 	if err != nil {
 		return fmt.Errorf("invalid --ports argument: %w", err)
+	}
+
+	if err := startStatusListener(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: status socket unavailable: %v\n", err)
 	}
 
 	fmt.Printf("[%s] VM daemon started\n", time.Now().Format("15:04:05"))
@@ -1461,6 +1463,64 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 		}
 		time.Sleep(1 * time.Second)
 	}
+	return nil
+}
+
+// startStatusListener opens a Unix domain socket and serves {"request":"status"}
+// queries with {"status":"running"} for as long as the daemon is alive.
+// Stale sockets from a previous run are removed on entry.
+func startStatusListener() error {
+	os.Remove(vmSocketPath)
+	ln, err := net.Listen("unix", vmSocketPath)
+	if err != nil {
+		return fmt.Errorf("failed to listen on %s: %w", vmSocketPath, err)
+	}
+	go func() {
+		defer ln.Close()
+		defer os.Remove(vmSocketPath)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+				var req struct {
+					Request string `json:"request"`
+				}
+				if err := json.NewDecoder(c).Decode(&req); err != nil || req.Request != "status" {
+					return
+				}
+				json.NewEncoder(c).Encode(map[string]string{"status": "running"}) //nolint:errcheck
+			}(conn)
+		}
+	}()
+	return nil
+}
+
+func statusCmd() error {
+	running := false
+
+	conn, err := net.DialTimeout("unix", vmSocketPath, 2*time.Second)
+	if err == nil {
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+		if err := json.NewEncoder(conn).Encode(map[string]string{"request": "status"}); err == nil {
+			var resp struct {
+				Status string `json:"status"`
+			}
+			if err := json.NewDecoder(conn).Decode(&resp); err == nil {
+				running = resp.Status == "running"
+			}
+		}
+	}
+
+	out, err := json.Marshal(map[string]bool{"running": running})
+	if err != nil {
+		return fmt.Errorf("failed to marshal status: %w", err)
+	}
+	fmt.Println(string(out))
 	return nil
 }
 
