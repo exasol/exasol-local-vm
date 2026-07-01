@@ -189,6 +189,23 @@ load_version_check_config() {
   log_msg "Configured Nano version checks: endpoint=$NANO_VERSION_CHECK_ENDPOINT operating_system=$NANO_VERSION_CHECK_OPERATING_SYSTEM interval=${NANO_VERSION_CHECK_INTERVAL_SEC}s retry_interval=${NANO_VERSION_CHECK_RETRY_INTERVAL_SEC}s"
 }
 
+log_diagnostics() {
+  log_msg "=== Diagnostic dump ==="
+  log_msg "--- dmesg (last 40 lines) ---"
+  dmesg 2>/dev/null | tail -40 | while IFS= read -r line; do log_msg "$line"; done || true
+  log_msg "--- podman info ---"
+  podman info 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+  log_msg "--- podman ps -a ---"
+  podman ps -a 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+  if podman ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^${DB_CONTAINER_NAME}$"; then
+    log_msg "--- podman inspect $DB_CONTAINER_NAME ---"
+    podman inspect "$DB_CONTAINER_NAME" 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+    log_msg "--- podman logs $DB_CONTAINER_NAME ---"
+    podman logs "$DB_CONTAINER_NAME" 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+  fi
+  log_msg "=== End diagnostic dump ==="
+}
+
 # Function to update init output file with container ports
 update_output_ports() {
   jq --argjson db "$DB_PORT" '.ports.db = $db' "$INIT_OUTPUT_FILE" > "${INIT_OUTPUT_FILE}.tmp" && mv "${INIT_OUTPUT_FILE}.tmp" "$INIT_OUTPUT_FILE"
@@ -200,6 +217,9 @@ mkdir -p "$LOG_DIR" 2>/dev/null || true
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 
 log_msg "Starting container initialization"
+log_msg "--- initial podman ps -a ---"
+podman ps -a 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+
 load_version_check_config
 CURRENT_RUNTIME_SHA=$(version_check_state_payload | sha256sum | cut -d' ' -f1)
 
@@ -316,6 +336,7 @@ if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
       exit 0
     else
       log_msg "Failed to restart container, will remove and recreate"
+      log_diagnostics
       podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
     fi
   else
@@ -363,13 +384,16 @@ if [ "$NANO_VERSION_CHECK_ENABLED" = "1" ]; then
 fi
 
 log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE pids-limit=$DB_PIDS_LIMIT security-opt=$DB_SECURITY_OPT restart=$DB_RESTART db-params=[$DB_PARAMS]"
-if run_db_container "$@"; then
-  log_msg "Container started successfully"
-  echo "$CURRENT_RUNTIME_SHA" > "$CONTAINER_RUNTIME_STATE_FILE"
-  update_output_ports
-else
-  log_msg "Error: Failed to start container"
-  exit 1
+PODMAN_RUN_RC=0
+run_db_container "$@" || PODMAN_RUN_RC=$?
+
+if [ "$PODMAN_RUN_RC" -ne 0 ]; then
+  log_msg "Error: podman run failed with exit code $PODMAN_RUN_RC"
+  log_diagnostics
+  exit "$PODMAN_RUN_RC"
 fi
+log_msg "Container started successfully"
+echo "$CURRENT_RUNTIME_SHA" > "$CONTAINER_RUNTIME_STATE_FILE"
+update_output_ports
 
 log_msg "Database initialization complete"
