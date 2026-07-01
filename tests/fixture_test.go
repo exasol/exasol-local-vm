@@ -11,12 +11,15 @@ package integration
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -118,6 +121,47 @@ func (f *LauncherFixture) StartVMExpectError(cpu, ramMB, dataSizeGB int, extraAr
 func (f *LauncherFixture) StopVM() {
 	f.t.Helper()
 	f.run("stop")
+	f.vmRunning = false
+}
+
+// Status runs `launcher status` and returns whether the VM reports itself as running.
+func (f *LauncherFixture) Status() bool {
+	f.t.Helper()
+	cmd := exec.Command(f.BinaryPath, "status")
+	cmd.Dir = f.WorkDir
+	out, err := cmd.Output()
+	if err != nil {
+		f.t.Fatalf("launcher status: %v", err)
+	}
+	var result struct {
+		Running bool `json:"running"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		f.t.Fatalf("failed to parse status output %q: %v", strings.TrimSpace(string(out)), err)
+	}
+	return result.Running
+}
+
+// KillVM sends SIGKILL to the daemon process identified by vm.pid.
+// Use this to simulate an unclean shutdown; prefer StopVM for graceful stops.
+func (f *LauncherFixture) KillVM() {
+	f.t.Helper()
+	pidPath := filepath.Join(f.WorkDir, "vm.pid")
+	pidData, err := os.ReadFile(pidPath)
+	if err != nil {
+		f.t.Fatalf("KillVM: failed to read %s: %v", pidPath, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil {
+		f.t.Fatalf("KillVM: invalid pid in %s: %v", pidPath, err)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		f.t.Fatalf("KillVM: failed to find process %d: %v", pid, err)
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		f.t.Fatalf("KillVM: failed to SIGKILL process %d: %v", pid, err)
+	}
 	f.vmRunning = false
 }
 
