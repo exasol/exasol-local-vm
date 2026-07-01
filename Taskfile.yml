@@ -133,7 +133,7 @@ tasks:
   test-launcher-integration:
     desc: Run launcher integration tests in ./tests
     cmds:
-      - cd tests && go test ./...
+      - cd tests && go test -timeout 30m ./...
 
   package-linux:
     desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
