@@ -65,4 +65,10 @@ func TestStatusAfterForcefulKill(t *testing.T) {
 	if !f.Status() {
 		t.Fatal("expected status running=true after restart following SIGKILL, got false")
 	}
+
+	if state := f.VMState(); state.Ports["db"] == 0 {
+		f.CopyLogsToFailuresDir(t.Name())
+		f.SSHCaptureDiagnostics(t.Name())
+		t.Fatal("VM restarted after SIGKILL but db port is absent from vm-state.json; logs saved to failures/" + t.Name())
+	}
 }
