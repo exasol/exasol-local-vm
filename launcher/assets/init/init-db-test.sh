@@ -123,13 +123,14 @@ VERSION_CHECK_JSON
     assert_contains "$run_line" "localhost/exasol-local-db:latest init"
     assert_contains "$run_line" "VERSION_CHECK_ENABLED=1"
     assert_contains "$run_line" "VERSION_CHECK_ENDPOINT=$expected_url"
-    assert_contains "$run_line" "VERSION_CHECK_IDENTITY=$expected_identity"
+    assert_contains "$run_line" "-e VERSION_CHECK_IDENTITY=$expected_identity"
     assert_contains "$run_line" "VERSION_CHECK_INTERVAL_SEC=60"
     assert_contains "$run_line" "VERSION_CHECK_RETRY_INTERVAL_SEC=60"
     assert_contains "$run_line" "VERSION_CHECK_OPERATING_SYSTEM=$expected_operating_system"
+    local init_args="${run_line#*localhost/exasol-local-db:latest init}"
+    assert_not_contains "$init_args" "VERSION_CHECK_IDENTITY"
     assert_not_contains "$run_line" "version_check_architecture"
     assert_not_contains "$run_line" "EXANANO_VERSION_CHECK"
-    assert_not_contains "$run_line" "-e "
     assert_not_contains "$run_line" "--mount type=bind"
 }
 

@@ -378,8 +378,13 @@ log_msg "Using image: $IMAGE_NAME"
 run_db_container() {
   if [ "$NANO_VERSION_CHECK_ENABLED" = "1" ]; then
     log_msg "Starting DB container with Nano version checks enabled in exasol.conf"
+    # Exasol Personal identities contain semicolons. AdminI's init parser treats
+    # semicolons as command separators, so pass this config value via the
+    # container environment instead of the init command line.
+    set -- "-e" "VERSION_CHECK_IDENTITY=$NANO_VERSION_CHECK_IDENTITY" "$IMAGE_NAME" "$@"
   else
     log_msg "Starting DB container with Nano version checks disabled in exasol.conf"
+    set -- "$IMAGE_NAME" "$@"
   fi
   podman run -d \
     --name "$DB_CONTAINER_NAME" \
@@ -388,7 +393,7 @@ run_db_container() {
     --security-opt "$DB_SECURITY_OPT" \
     --restart "$DB_RESTART" \
     -p "$DB_PORT:$DB_PORT" \
-    "$IMAGE_NAME" "$@"
+    "$@"
 }
 # Start the container
 # Append Nano's documented "init" config arguments so version-check settings
@@ -401,7 +406,6 @@ set -- "$@" "VERSION_CHECK_ENABLED=$NANO_VERSION_CHECK_ENABLED"
 if [ "$NANO_VERSION_CHECK_ENABLED" = "1" ]; then
   set -- "$@" \
     "VERSION_CHECK_ENDPOINT=$NANO_VERSION_CHECK_ENDPOINT" \
-    "VERSION_CHECK_IDENTITY=$NANO_VERSION_CHECK_IDENTITY" \
     "VERSION_CHECK_INTERVAL_SEC=$NANO_VERSION_CHECK_INTERVAL_SEC" \
     "VERSION_CHECK_RETRY_INTERVAL_SEC=$NANO_VERSION_CHECK_RETRY_INTERVAL_SEC"
   if [ -n "$NANO_VERSION_CHECK_OPERATING_SYSTEM" ]; then
