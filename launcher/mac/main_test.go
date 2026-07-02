@@ -5,10 +5,12 @@ package main
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestAuthorizedKeyFromPrivateKeyMatchesGeneratedPublicKey(t *testing.T) {
@@ -132,5 +134,52 @@ func TestWriteVersionCheckRuntimeConfig(t *testing.T) {
 	}
 	if decoded != config {
 		t.Fatalf("decoded config mismatch: got %+v, want %+v", decoded, config)
+	}
+}
+
+func TestWaitForSSHServiceAcceptsSSHBanner(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer ln.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte("SSH-2.0-test\r\n"))
+	}()
+
+	if err := waitForSSHService(ln.Addr().String(), time.Second); err != nil {
+		t.Fatalf("waitForSSHService() error = %v", err)
+	}
+	<-done
+}
+
+func TestWaitForSSHServiceRejectsNonSSHBanner(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\n"))
+			_ = conn.Close()
+		}
+	}()
+
+	if err := waitForSSHService(ln.Addr().String(), 50*time.Millisecond); err == nil {
+		t.Fatal("expected waitForSSHService() to reject a non-SSH banner")
 	}
 }
