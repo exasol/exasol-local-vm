@@ -1558,9 +1558,25 @@ func stopCmd() error {
 		return fmt.Errorf("failed to send stop signal to VM: %w", err)
 	}
 
-	fmt.Println("Stop signal sent to VM")
-	fmt.Println("VM should stop gracefully")
-	return nil
+	fmt.Println("Stop signal sent to VM; waiting for it to stop...")
+
+	// The daemon's own signal handler tries an SSH poweroff and waits up to
+	// 60s for the VM to reach Stopped before exiting, so give it enough room
+	// to finish before giving up. Without this wait, a caller that starts a
+	// new VM against the same disk images immediately after stop returns can
+	// race the old daemon while it's still shutting down and corrupt guest
+	// disk state.
+	deadline := time.Now().Add(65 * time.Second)
+	for time.Now().Before(deadline) {
+		if process.Signal(syscall.Signal(0)) != nil {
+			os.Remove(pidFile)
+			fmt.Println("VM stopped")
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	return fmt.Errorf("VM (pid %d) did not stop within 65s of receiving the stop signal", pid)
 }
 
 func resizeDataDiskCmd(newSizeStr string) error {
