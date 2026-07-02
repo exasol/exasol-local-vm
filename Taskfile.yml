@@ -3,6 +3,9 @@
 
 version: '3'
 
+vars:
+  NANO_BASE_TAG: 2026.2.0-nano.2
+
 tasks:
   lint:
     desc: Run all lint checks
@@ -36,8 +39,11 @@ tasks:
           enum: [x86_64, aarch64]
     status:
       - test -f release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz
+      - test -f release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata
+      - test "$(sed -n 's/^nano_base_tag=//p' release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata)" = "{{.NANO_BASE_TAG}}"
+      - test release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz -nt launcher/assets/download-db-container.sh
     cmds:
-      - ./launcher/assets/download-db-container.sh "{{.IMG_ARCH}}"
+      - NANO_BASE_TAG="{{.NANO_BASE_TAG}}" ./launcher/assets/download-db-container.sh "{{.IMG_ARCH}}"
 
   stage-init-assets:
     desc: Copy database container tarball from release/ to launcher/assets/init for {{.IMG_ARCH}}
@@ -52,6 +58,9 @@ tasks:
           IMG_ARCH: "{{.IMG_ARCH}}"
     status:
       - test -f launcher/assets/init/exasol-nano-db.tar.gz
+      - test -f launcher/assets/init/exasol-nano-db.tar.gz.metadata
+      - test launcher/assets/init/exasol-nano-db.tar.gz -nt release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz
+      - cmp -s release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata launcher/assets/init/exasol-nano-db.tar.gz.metadata
     cmds:
       - ./launcher/assets/stage-init-assets.sh "{{.IMG_ARCH}}"
 

@@ -169,6 +169,8 @@ def add_header(text: str, style: str) -> str:
 def candidate_files() -> list[tuple[Path, str, str]]:
     candidates: list[tuple[Path, str, str]] = []
     for path in repository_files():
+        if not path.exists():
+            continue
         data = path.read_bytes()
         if is_binary(data):
             continue

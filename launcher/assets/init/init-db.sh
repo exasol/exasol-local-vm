@@ -49,9 +49,19 @@ DB_RESTART=$(jq -r '.db.restart' "$CONFIG_FILE")
 
 # Optional DB parameters applied on first start. The Nano container accepts
 # these via its documented "init params='k=v ...'" interface; the values are
-# persisted to /exa/exasol.conf on the initial bootstrap. Absent/empty
-# "db.params" => start without an explicit init command.
+# persisted to /exa/exasol.conf on the initial bootstrap.
 DB_PARAMS=$(jq -r '.db.params // [] | join(" ")' "$CONFIG_FILE")
+VERSION_CHECK_RUNTIME_CONFIG_FILE="$EXASOL_VM_HOST_SHARED_DIR/version-check.json"
+NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC=86400
+NANO_VERSION_CHECK_MIN_INTERVAL_SEC=60
+NANO_VERSION_CHECK_MAX_INTERVAL_SEC=604800
+NANO_VERSION_CHECK_MAX_RETRY_INTERVAL_SEC=86400
+NANO_VERSION_CHECK_ENABLED=0
+NANO_VERSION_CHECK_ENDPOINT=
+NANO_VERSION_CHECK_IDENTITY=
+NANO_VERSION_CHECK_OPERATING_SYSTEM=
+NANO_VERSION_CHECK_INTERVAL_SEC=$NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC
+NANO_VERSION_CHECK_RETRY_INTERVAL_SEC=$NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC
 
 # Validate that required fields were present in config
 if [ -z "$DB_CONTAINER_TARBALL_NAME" ] || [ "$DB_CONTAINER_TARBALL_NAME" = "null" ]; then
@@ -86,12 +96,97 @@ if [ -z "$DB_RESTART" ] || [ "$DB_RESTART" = "null" ]; then
   exit 1
 fi
 
-STATE_FILE="/var/lib/container-state.sha256"
+STATE_DIR="${EXASOL_VM_CONTAINER_STATE_DIR:-/var/lib}"
+STATE_FILE="$STATE_DIR/container-state.sha256"
+CONTAINER_RUNTIME_STATE_FILE="$STATE_DIR/container-runtime-state.sha256"
 LOG_DIR="$EXASOL_VM_HOST_SHARED_DIR/logs"
 
 log_msg() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DB] $1"
   logger -t init-db "$1"
+}
+
+version_check_state_payload() {
+  if [ -f "$VERSION_CHECK_RUNTIME_CONFIG_FILE" ]; then
+    sha256sum "$VERSION_CHECK_RUNTIME_CONFIG_FILE"
+  else
+    printf 'absent\n'
+  fi
+}
+
+clamp_integer() {
+  CLAMP_VALUE="$1"
+  CLAMP_MIN="$2"
+  CLAMP_MAX="$3"
+  CLAMP_DEFAULT="$4"
+
+  case "$CLAMP_VALUE" in
+    ''|*[!0-9]*)
+      CLAMP_VALUE="$CLAMP_DEFAULT"
+      ;;
+  esac
+  if [ "$CLAMP_VALUE" -lt "$CLAMP_MIN" ]; then
+    CLAMP_VALUE="$CLAMP_MIN"
+  fi
+  if [ "$CLAMP_VALUE" -gt "$CLAMP_MAX" ]; then
+    CLAMP_VALUE="$CLAMP_MAX"
+  fi
+  printf '%s' "$CLAMP_VALUE"
+}
+
+load_version_check_config() {
+  NANO_VERSION_CHECK_ENABLED=0
+  NANO_VERSION_CHECK_ENDPOINT=
+  NANO_VERSION_CHECK_IDENTITY=
+  NANO_VERSION_CHECK_OPERATING_SYSTEM=
+  NANO_VERSION_CHECK_INTERVAL_SEC=$NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC
+  NANO_VERSION_CHECK_RETRY_INTERVAL_SEC=$NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC
+
+  if [ ! -f "$VERSION_CHECK_RUNTIME_CONFIG_FILE" ]; then
+    log_msg "No version-check runtime config found; Nano version checks disabled in exasol.conf"
+    return
+  fi
+
+  VERSION_CHECK_ENABLED_VALUE=$(jq -r '.enabled // false' "$VERSION_CHECK_RUNTIME_CONFIG_FILE" 2>/dev/null) || {
+    log_msg "Invalid version-check runtime config; Nano version checks disabled in exasol.conf"
+    return
+  }
+  if [ "$VERSION_CHECK_ENABLED_VALUE" != "true" ]; then
+    log_msg "Version-check runtime config disables Nano version checks in exasol.conf"
+    return
+  fi
+
+  VERSION_CHECK_ENDPOINT_VALUE=$(jq -r '.url // empty' "$VERSION_CHECK_RUNTIME_CONFIG_FILE" 2>/dev/null) || {
+    log_msg "Invalid version-check runtime config; Nano version checks disabled in exasol.conf"
+    return
+  }
+  if [ -z "$VERSION_CHECK_ENDPOINT_VALUE" ] || [ "$VERSION_CHECK_ENDPOINT_VALUE" = "null" ]; then
+    log_msg "Version-check runtime config has no URL; Nano version checks disabled in exasol.conf"
+    return
+  fi
+
+  VERSION_CHECK_IDENTITY_VALUE=$(jq -r '.identity // "NONE"' "$VERSION_CHECK_RUNTIME_CONFIG_FILE" 2>/dev/null) || {
+    VERSION_CHECK_IDENTITY_VALUE=NONE
+  }
+  if [ -z "$VERSION_CHECK_IDENTITY_VALUE" ] || [ "$VERSION_CHECK_IDENTITY_VALUE" = "null" ]; then
+    VERSION_CHECK_IDENTITY_VALUE=NONE
+  fi
+
+  VERSION_CHECK_OPERATING_SYSTEM_VALUE=$(jq -r '.operating_system // .version_check_operating_system // empty' "$VERSION_CHECK_RUNTIME_CONFIG_FILE" 2>/dev/null) || {
+    VERSION_CHECK_OPERATING_SYSTEM_VALUE=
+  }
+
+  VERSION_CHECK_INTERVAL_VALUE=$(jq -r ".interval_seconds // $NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC" "$VERSION_CHECK_RUNTIME_CONFIG_FILE" 2>/dev/null) || {
+    VERSION_CHECK_INTERVAL_VALUE=$NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC
+  }
+
+  NANO_VERSION_CHECK_ENABLED=1
+  NANO_VERSION_CHECK_ENDPOINT="$VERSION_CHECK_ENDPOINT_VALUE"
+  NANO_VERSION_CHECK_IDENTITY="$VERSION_CHECK_IDENTITY_VALUE"
+  NANO_VERSION_CHECK_OPERATING_SYSTEM="$VERSION_CHECK_OPERATING_SYSTEM_VALUE"
+  NANO_VERSION_CHECK_INTERVAL_SEC=$(clamp_integer "$VERSION_CHECK_INTERVAL_VALUE" "$NANO_VERSION_CHECK_MIN_INTERVAL_SEC" "$NANO_VERSION_CHECK_MAX_INTERVAL_SEC" "$NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC")
+  NANO_VERSION_CHECK_RETRY_INTERVAL_SEC=$(clamp_integer "$NANO_VERSION_CHECK_INTERVAL_SEC" "$NANO_VERSION_CHECK_MIN_INTERVAL_SEC" "$NANO_VERSION_CHECK_MAX_RETRY_INTERVAL_SEC" "$NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC")
+  log_msg "Configured Nano version checks: endpoint=$NANO_VERSION_CHECK_ENDPOINT operating_system=$NANO_VERSION_CHECK_OPERATING_SYSTEM interval=${NANO_VERSION_CHECK_INTERVAL_SEC}s retry_interval=${NANO_VERSION_CHECK_RETRY_INTERVAL_SEC}s"
 }
 
 # Function to update init output file with container ports
@@ -102,8 +197,23 @@ update_output_ports() {
 
 # Create logs directory
 mkdir -p "$LOG_DIR" 2>/dev/null || true
+mkdir -p "$STATE_DIR" 2>/dev/null || true
 
 log_msg "Starting container initialization"
+load_version_check_config
+CURRENT_RUNTIME_SHA=$(version_check_state_payload | sha256sum | cut -d' ' -f1)
+
+CONTAINER_RUNTIME_CHANGED=true
+if [ -f "$CONTAINER_RUNTIME_STATE_FILE" ]; then
+  PREVIOUS_RUNTIME_SHA=$(cat "$CONTAINER_RUNTIME_STATE_FILE")
+  if [ "$CURRENT_RUNTIME_SHA" = "$PREVIOUS_RUNTIME_SHA" ]; then
+    CONTAINER_RUNTIME_CHANGED=false
+  else
+    log_msg "Container runtime configuration has changed"
+  fi
+else
+  log_msg "No previous container runtime configuration state found"
+fi
 
 # Check if tarball exists
 if [ ! -f "$DB_CONTAINER_TARBALL" ]; then
@@ -189,13 +299,16 @@ fi
 # Check if container is already running
 if podman ps --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
   log_msg "Container already running"
+  if [ "$CONTAINER_RUNTIME_CHANGED" = "true" ]; then
+    log_msg "Container runtime configuration changed; running container will keep its current version-check configuration until restart"
+  fi
   update_output_ports
   exit 0
 fi
 
 # Check if container exists but isn't running - restart it if the image is current
 if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
-  if [ "$RELOAD_NEEDED" = "false" ]; then
+  if [ "$RELOAD_NEEDED" = "false" ] && [ "$CONTAINER_RUNTIME_CHANGED" = "false" ]; then
     log_msg "Restarting existing stopped container"
     if podman start "$DB_CONTAINER_NAME" 2>&1; then
       log_msg "Container restarted successfully"
@@ -206,7 +319,7 @@ if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
       podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
     fi
   else
-    log_msg "Removing stopped container (image changed)"
+    log_msg "Removing stopped container (image or runtime configuration changed)"
     podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
   fi
 fi
@@ -215,26 +328,44 @@ fi
 IMAGE_NAME="localhost/${DB_CONTAINER_NAME}:latest"
 log_msg "Using image: $IMAGE_NAME"
 
+run_db_container() {
+  if [ "$NANO_VERSION_CHECK_ENABLED" = "1" ]; then
+    log_msg "Starting DB container with Nano version checks enabled in exasol.conf"
+  else
+    log_msg "Starting DB container with Nano version checks disabled in exasol.conf"
+  fi
+  podman run -d \
+    --name "$DB_CONTAINER_NAME" \
+    --shm-size="$DB_SHM_SIZE" \
+    --pids-limit="$DB_PIDS_LIMIT" \
+    --security-opt "$DB_SECURITY_OPT" \
+    --restart "$DB_RESTART" \
+    -p "$DB_PORT:$DB_PORT" \
+    "$IMAGE_NAME" "$@"
+}
 # Start the container
-# Append the documented "init params='...'" command only when params are set.
+# Append Nano's documented "init" config arguments so version-check settings
+# are persisted to exasol.conf instead of being one-run environment overrides.
+set -- init
 if [ -n "$DB_PARAMS" ]; then
-  set -- init "params=$DB_PARAMS"
-else
-  set --
+  set -- "$@" "params=$DB_PARAMS"
+fi
+set -- "$@" "VERSION_CHECK_ENABLED=$NANO_VERSION_CHECK_ENABLED"
+if [ "$NANO_VERSION_CHECK_ENABLED" = "1" ]; then
+  set -- "$@" \
+    "VERSION_CHECK_ENDPOINT=$NANO_VERSION_CHECK_ENDPOINT" \
+    "VERSION_CHECK_IDENTITY=$NANO_VERSION_CHECK_IDENTITY" \
+    "VERSION_CHECK_INTERVAL_SEC=$NANO_VERSION_CHECK_INTERVAL_SEC" \
+    "VERSION_CHECK_RETRY_INTERVAL_SEC=$NANO_VERSION_CHECK_RETRY_INTERVAL_SEC"
+  if [ -n "$NANO_VERSION_CHECK_OPERATING_SYSTEM" ]; then
+    set -- "$@" "version_check_operating_system=$NANO_VERSION_CHECK_OPERATING_SYSTEM"
+  fi
 fi
 
 log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE pids-limit=$DB_PIDS_LIMIT security-opt=$DB_SECURITY_OPT restart=$DB_RESTART db-params=[$DB_PARAMS]"
-podman run -d \
-  --name "$DB_CONTAINER_NAME" \
-  --shm-size="$DB_SHM_SIZE" \
-  --pids-limit="$DB_PIDS_LIMIT" \
-  --security-opt "$DB_SECURITY_OPT" \
-  --restart "$DB_RESTART" \
-  -p "$DB_PORT:$DB_PORT" \
-  "$IMAGE_NAME" "$@"
-
-if [ $? -eq 0 ]; then
+if run_db_container "$@"; then
   log_msg "Container started successfully"
+  echo "$CURRENT_RUNTIME_SHA" > "$CONTAINER_RUNTIME_STATE_FILE"
   update_output_ports
 else
   log_msg "Error: Failed to start container"
