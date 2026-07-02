@@ -25,6 +25,38 @@ log_msg() {
   logger -t init-ssh "$1"
 }
 
+# Persist SSH host keys on the data disk so they survive VM restarts instead
+# of being regenerated (and re-triggering client host-key warnings, and
+# costing boot time) on every boot. This runs before sshd starts (init-ssh.sh
+# runs in the boot runlevel via run-host-init; sshd is a default-runlevel
+# service that starts afterwards).
+HOST_KEY_DIR="/var/lib/ssh-host-keys"
+mkdir -p "$HOST_KEY_DIR"
+
+if [ -n "$(ls -A "$HOST_KEY_DIR" 2>/dev/null)" ]; then
+  for key in "$HOST_KEY_DIR"/ssh_host_*_key "$HOST_KEY_DIR"/ssh_host_*_key.pub; do
+    [ -e "$key" ] || continue
+    cp -p "$key" "/etc/ssh/$(basename "$key")"
+  done
+  chown root:root /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+  chmod 600 /etc/ssh/ssh_host_*_key 2>/dev/null || true
+  chmod 644 /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+  log_msg "Restored SSH host keys from $HOST_KEY_DIR"
+else
+  log_msg "No persisted SSH host keys found; generating new ones"
+fi
+
+# Generate any host key types not already restored above (first boot: all of
+# them). No-op for key types that already exist.
+ssh-keygen -A >/dev/null 2>&1 || true
+
+# Save the now-complete key set for future boots.
+for key in /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub; do
+  [ -e "$key" ] || continue
+  cp -p "$key" "$HOST_KEY_DIR/$(basename "$key")"
+done
+log_msg "Saved SSH host keys to $HOST_KEY_DIR"
+
 # Exit if shared folder not mounted or no keys file
 if [ ! -f "$SHARED_KEYS" ]; then
   log_msg "No SSH keys found at $SHARED_KEYS, skipping"
