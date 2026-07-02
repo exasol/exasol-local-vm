@@ -214,6 +214,26 @@ update_output_ports() {
   log_msg "Updated init output file with database port"
 }
 
+# Stream the DB container's podman logs to the shared directory so they are
+# visible to the host for debugging, without spawning a duplicate follower if
+# one from an earlier init-db.sh run in this boot is still alive.
+DB_LOG_FILE="$LOG_DIR/${DB_CONTAINER_NAME}.log"
+DB_LOG_FOLLOWER_PID_FILE="$STATE_DIR/db-log-follower.pid"
+
+start_db_log_follower() {
+  if [ -f "$DB_LOG_FOLLOWER_PID_FILE" ]; then
+    EXISTING_FOLLOWER_PID=$(cat "$DB_LOG_FOLLOWER_PID_FILE" 2>/dev/null || true)
+    if [ -n "$EXISTING_FOLLOWER_PID" ] && kill -0 "$EXISTING_FOLLOWER_PID" 2>/dev/null; then
+      log_msg "Container log follower already running (pid $EXISTING_FOLLOWER_PID)"
+      return
+    fi
+  fi
+
+  podman logs -f "$DB_CONTAINER_NAME" >>"$DB_LOG_FILE" 2>&1 &
+  echo "$!" > "$DB_LOG_FOLLOWER_PID_FILE"
+  log_msg "Streaming container logs to $DB_LOG_FILE (follower pid $!)"
+}
+
 # Create logs directory
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -326,6 +346,7 @@ if podman ps --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
   if [ "$CONTAINER_RUNTIME_CHANGED" = "true" ]; then
     log_msg "Container runtime configuration changed; running container will keep its current version-check configuration until restart"
   fi
+  start_db_log_follower
   update_output_ports
   exit 0
 fi
@@ -336,6 +357,7 @@ if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
     log_msg "Restarting existing stopped container"
     if podman start "$DB_CONTAINER_NAME" 2>&1; then
       log_msg "Container restarted successfully"
+      start_db_log_follower
       update_output_ports
       exit 0
     else
@@ -400,6 +422,7 @@ log_msg "Container started successfully"
 echo "$CURRENT_RUNTIME_SHA" > "$CONTAINER_RUNTIME_STATE_FILE"
 sync
 log_msg "Container state flushed to disk"
+start_db_log_follower
 update_output_ports
 
 log_msg "Database initialization complete"
