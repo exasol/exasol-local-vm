@@ -151,6 +151,11 @@ jobs:
             mkdir -p release
             mv exasol-nano-db-aarch64.tar.gz release/
           fi
+          if [ -f exasol-nano-db-aarch64.tar.gz.metadata ]; then
+            echo "Found exasol-nano-db-aarch64.tar.gz.metadata in root, moving to release/"
+            mkdir -p release
+            mv exasol-nano-db-aarch64.tar.gz.metadata release/
+          fi
           if [ -d release ]; then
             echo "✓ Release directory exists"
             ls -lh release/
@@ -158,7 +163,7 @@ jobs:
             echo "✗ ERROR: No release artifacts found!" >&2
             exit 1
           fi
-          
+
           echo ""
           echo "Checking for required artifacts:"
           if [ -f release/mac-arm64.tar.xz ]; then
@@ -173,7 +178,13 @@ jobs:
             echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz" >&2
             exit 1
           fi
-      
+          if [ -f release/exasol-nano-db-aarch64.tar.gz.metadata ]; then
+            echo "✓ Found: release/exasol-nano-db-aarch64.tar.gz.metadata"
+          else
+            echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz.metadata" >&2
+            exit 1
+          fi
+
       - name: Download release packages from previous run
         if: ${{ needs.build-disk-images.result == 'skipped' }}
         env:
@@ -231,6 +242,11 @@ jobs:
             mkdir -p release
             mv exasol-nano-db-aarch64.tar.gz release/
           fi
+          if [ -f exasol-nano-db-aarch64.tar.gz.metadata ]; then
+            echo "Found exasol-nano-db-aarch64.tar.gz.metadata in root, moving to release/"
+            mkdir -p release
+            mv exasol-nano-db-aarch64.tar.gz.metadata release/
+          fi
           if [ -d release ]; then
             echo "✓ Release directory exists"
             ls -lh release/
@@ -238,7 +254,7 @@ jobs:
             echo "✗ ERROR: No release artifacts found!" >&2
             exit 1
           fi
-          
+
           echo ""
           echo "Checking for required artifacts:"
           if [ -f release/mac-arm64.tar.xz ]; then
@@ -253,7 +269,13 @@ jobs:
             echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz" >&2
             exit 1
           fi
-      
+          if [ -f release/exasol-nano-db-aarch64.tar.gz.metadata ]; then
+            echo "✓ Found: release/exasol-nano-db-aarch64.tar.gz.metadata"
+          else
+            echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz.metadata" >&2
+            exit 1
+          fi
+
       - name: Install Task
         run: |
           brew install go-task
