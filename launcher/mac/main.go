@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,12 +51,34 @@ type RuntimeConfig struct {
 	SSHPrivateKey string `json:"ssh_private_key"`
 }
 
+type VersionCheckRuntimeConfig struct {
+	Enabled         bool   `json:"enabled"`
+	IntervalSeconds int    `json:"interval_seconds"`
+	Identity        string `json:"identity"`
+	URL             string `json:"url"`
+	OperatingSystem string `json:"operating_system"`
+}
+
+type VersionCheckOptions struct {
+	Enabled         bool
+	IntervalSeconds int
+	Identity        string
+	URL             string
+}
+
 const (
 	defaultSSHPrivateKeyPath = "vm-ssh-key"
 	runtimeConfigPath        = "vm-config.json"
 	sharedDirName            = "vm-shared"
 	authorizedKeysName       = "authorized_keys"
+
+	versionCheckRuntimeConfigName = "version-check.json"
+
+	defaultVersionCheckIntervalSeconds = 86400
+	defaultVersionCheckIdentity        = "NONE"
 )
+
+var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
 
 // readLastLines reads the last n lines from a file
 func readLastLines(filePath string, n int) ([]string, error) {
@@ -194,6 +217,78 @@ func loadRuntimeConfig() (RuntimeConfig, error) {
 		config.SSHPrivateKey = defaultSSHPrivateKeyPath
 	}
 	return config, nil
+}
+
+func defaultVersionCheckOptions() VersionCheckOptions {
+	return VersionCheckOptions{
+		Enabled:         true,
+		IntervalSeconds: defaultVersionCheckIntervalSeconds,
+		Identity:        defaultVersionCheckIdentity,
+		URL:             defaultVersionCheckURL,
+	}
+}
+
+func versionCheckOperatingSystem(goos string) string {
+	switch goos {
+	case "darwin":
+		return "MacOS"
+	case "linux":
+		return "Linux"
+	case "windows":
+		return "Windows"
+	case "":
+		return "unknown"
+	default:
+		return goos
+	}
+}
+
+func versionCheckRuntimeConfigFromOptions(options VersionCheckOptions) VersionCheckRuntimeConfig {
+	url := strings.TrimSpace(options.URL)
+	if url == "" {
+		url = defaultVersionCheckURL
+	}
+
+	identity := strings.TrimSpace(options.Identity)
+	if identity == "" {
+		identity = defaultVersionCheckIdentity
+	}
+
+	intervalSeconds := options.IntervalSeconds
+	if intervalSeconds <= 0 {
+		intervalSeconds = defaultVersionCheckIntervalSeconds
+	}
+
+	return VersionCheckRuntimeConfig{
+		Enabled:         options.Enabled,
+		IntervalSeconds: intervalSeconds,
+		Identity:        identity,
+		URL:             url,
+		OperatingSystem: versionCheckOperatingSystem(runtime.GOOS),
+	}
+}
+
+func writeVersionCheckRuntimeConfig(sharedDir string, config VersionCheckRuntimeConfig) error {
+	if err := os.MkdirAll(sharedDir, 0755); err != nil {
+		return fmt.Errorf("failed to create shared directory for version-check config: %w", err)
+	}
+
+	configPath := filepath.Join(sharedDir, versionCheckRuntimeConfigName)
+	configData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal version-check runtime config: %w", err)
+	}
+	if err := os.WriteFile(configPath, configData, 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", configPath, err)
+	}
+	return nil
+}
+
+func writeVersionCheckRuntimeConfigFromOptions(sharedDir string, options VersionCheckOptions) {
+	config := versionCheckRuntimeConfigFromOptions(options)
+	if err := writeVersionCheckRuntimeConfig(sharedDir, config); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Failed to write version-check runtime config: %v\n", err)
+	}
 }
 
 func displayPath(path string) string {
@@ -439,6 +534,11 @@ func main() {
 		startFlags := flag.NewFlagSet("start", flag.ContinueOnError)
 		startFlags.SetOutput(os.Stderr)
 		portsFlag := startFlags.String("ports", "", "Host port overrides: <service>:<port>[,<service>:<port>...]")
+		versionCheckOptions := defaultVersionCheckOptions()
+		startFlags.BoolVar(&versionCheckOptions.Enabled, "version-check-enabled", versionCheckOptions.Enabled, "Enable scheduled local database version checks")
+		startFlags.IntVar(&versionCheckOptions.IntervalSeconds, "version-check-interval-seconds", versionCheckOptions.IntervalSeconds, "Interval in seconds for scheduled local database version checks")
+		startFlags.StringVar(&versionCheckOptions.Identity, "version-check-identity", versionCheckOptions.Identity, "Identity string for scheduled local database version checks")
+		startFlags.StringVar(&versionCheckOptions.URL, "version-check-url", versionCheckOptions.URL, "Version-check URL override for scheduled local database version checks")
 		startFlags.Usage = func() {
 			fmt.Fprintln(os.Stderr, "Usage: mac-runner start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
 			startFlags.PrintDefaults()
@@ -460,7 +560,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: data_size_gb must be a positive integer")
 			os.Exit(1)
 		}
-		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag)
+		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag, versionCheckOptions)
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
@@ -712,7 +812,13 @@ func shutdownVM(vm *vz.VirtualMachine) {
 	}
 }
 
-func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int, portsOverride string) error {
+func startCmd(
+	cpuCountStr string,
+	ramSizeStr string,
+	dataSizeGB int,
+	portsOverride string,
+	versionCheckOptions VersionCheckOptions,
+) error {
 	sharedDir := sharedDirName
 	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, data_size=%dGB, shared_dir=%s\n", cpuCountStr, ramSizeStr, dataSizeGB, sharedDir)
 
@@ -727,6 +833,8 @@ func startCmd(cpuCountStr, ramSizeStr string, dataSizeGB int, portsOverride stri
 	if err := ensureDataDisk(dataDiskPath, dataSizeGB); err != nil {
 		return err
 	}
+
+	writeVersionCheckRuntimeConfigFromOptions(sharedDir, versionCheckOptions)
 
 	// Check if VM is already running
 	pidFile := "vm.pid"
