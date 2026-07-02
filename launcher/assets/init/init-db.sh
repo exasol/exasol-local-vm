@@ -5,6 +5,8 @@
 # Load and run Exasol Nano DB container
 # Based on container/load-shared-container.sh
 set -eu
+set -x
+trap 'rc=$?; echo "[$(date +%Y-%m-%dT%H:%M:%S)] [DB] EXIT trap: code=$rc"' EXIT
 
 # Validate required environment variables
 if [ -z "${EXASOL_VM_HOST_SHARED_DIR:-}" ]; then
@@ -91,7 +93,24 @@ LOG_DIR="$EXASOL_VM_HOST_SHARED_DIR/logs"
 
 log_msg() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DB] $1"
-  logger -t init-db "$1"
+  logger -t init-db "$1" 2>/dev/null || true
+}
+
+log_diagnostics() {
+  log_msg "Diagnostic dump start"
+  log_msg "dmesg (last 40 lines)"
+  dmesg 2>/dev/null | tail -40 | while IFS= read -r line; do log_msg "$line"; done || true
+  log_msg "podman info"
+  podman info 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+  log_msg "podman ps -a"
+  podman ps -a 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+  if podman ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^${DB_CONTAINER_NAME}$"; then
+    log_msg "podman inspect $DB_CONTAINER_NAME"
+    podman inspect "$DB_CONTAINER_NAME" 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+    log_msg "podman logs $DB_CONTAINER_NAME"
+    podman logs "$DB_CONTAINER_NAME" 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
+  fi
+  log_msg "Diagnostic dump end"
 }
 
 # Function to update init output file with container ports
@@ -104,6 +123,8 @@ update_output_ports() {
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 
 log_msg "Starting container initialization"
+log_msg "initial container state (podman ps -a)"
+podman ps -a 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
 
 # Check if tarball exists
 if [ ! -f "$DB_CONTAINER_TARBALL" ]; then
@@ -178,6 +199,8 @@ if [ "$RELOAD_NEEDED" = "true" ]; then
     fi
     
     echo "$CURRENT_SHA" > "$STATE_FILE"
+    sync
+    log_msg "Image and state file flushed to disk"
   else
     LOAD_RC=$?
     log_msg "Error: podman load failed (exit $LOAD_RC) for $DB_CONTAINER_TARBALL"
@@ -203,6 +226,7 @@ if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
       exit 0
     else
       log_msg "Failed to restart container, will remove and recreate"
+      log_diagnostics
       podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
     fi
   else
@@ -224,6 +248,7 @@ else
 fi
 
 log_msg "Starting container: $DB_CONTAINER_NAME with shm-size=$DB_SHM_SIZE pids-limit=$DB_PIDS_LIMIT security-opt=$DB_SECURITY_OPT restart=$DB_RESTART db-params=[$DB_PARAMS]"
+PODMAN_RUN_RC=0
 podman run -d \
   --name "$DB_CONTAINER_NAME" \
   --shm-size="$DB_SHM_SIZE" \
@@ -231,14 +256,16 @@ podman run -d \
   --security-opt "$DB_SECURITY_OPT" \
   --restart "$DB_RESTART" \
   -p "$DB_PORT:$DB_PORT" \
-  "$IMAGE_NAME" "$@"
+  "$IMAGE_NAME" "$@" || PODMAN_RUN_RC=$?
 
-if [ $? -eq 0 ]; then
-  log_msg "Container started successfully"
-  update_output_ports
-else
-  log_msg "Error: Failed to start container"
-  exit 1
+if [ "$PODMAN_RUN_RC" -ne 0 ]; then
+  log_msg "Error: podman run failed with exit code $PODMAN_RUN_RC"
+  log_diagnostics
+  exit "$PODMAN_RUN_RC"
 fi
+log_msg "Container started successfully"
+sync
+log_msg "Container state flushed to disk"
+update_output_ports
 
 log_msg "Database initialization complete"

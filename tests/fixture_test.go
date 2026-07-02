@@ -11,12 +11,15 @@ package integration
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -37,6 +40,10 @@ type LauncherFixture struct {
 // If the zip cannot be found the test is skipped.
 func NewLauncherFixture(t *testing.T) *LauncherFixture {
 	t.Helper()
+
+	if err := os.MkdirAll("failures", 0755); err != nil {
+		t.Logf("warning: could not create failures dir: %v", err)
+	}
 
 	zipPath := findLauncherZip(t)
 
@@ -119,6 +126,138 @@ func (f *LauncherFixture) StopVM() {
 	f.t.Helper()
 	f.run("stop")
 	f.vmRunning = false
+}
+
+// Status runs `launcher status` and returns whether the VM reports itself as running.
+func (f *LauncherFixture) Status() bool {
+	f.t.Helper()
+	cmd := exec.Command(f.BinaryPath, "status")
+	cmd.Dir = f.WorkDir
+	out, err := cmd.Output()
+	if err != nil {
+		f.t.Fatalf("launcher status: %v", err)
+	}
+	var result struct {
+		Running bool `json:"running"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		f.t.Fatalf("failed to parse status output %q: %v", strings.TrimSpace(string(out)), err)
+	}
+	return result.Running
+}
+
+// KillVM sends SIGKILL to the daemon process identified by vm.pid.
+// Use this to simulate an unclean shutdown; prefer StopVM for graceful stops.
+func (f *LauncherFixture) KillVM() {
+	f.t.Helper()
+	pidPath := filepath.Join(f.WorkDir, "vm.pid")
+	pidData, err := os.ReadFile(pidPath)
+	if err != nil {
+		f.t.Fatalf("KillVM: failed to read %s: %v", pidPath, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil {
+		f.t.Fatalf("KillVM: invalid pid in %s: %v", pidPath, err)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		f.t.Fatalf("KillVM: failed to find process %d: %v", pid, err)
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		f.t.Fatalf("KillVM: failed to SIGKILL process %d: %v", pid, err)
+	}
+	f.vmRunning = false
+}
+
+// VMState reads and parses vm-state.json from WorkDir.
+func (f *LauncherFixture) VMState() vmState {
+	f.t.Helper()
+	data, err := os.ReadFile(filepath.Join(f.WorkDir, "vm-state.json"))
+	if err != nil {
+		f.t.Fatalf("failed to read vm-state.json: %v", err)
+	}
+	var state vmState
+	if err := json.Unmarshal(data, &state); err != nil {
+		f.t.Fatalf("failed to parse vm-state.json: %v", err)
+	}
+	return state
+}
+
+// SSHCaptureDiagnostics SSHes into the running VM and collects diagnostic
+// information (dmesg, Podman state, container logs) into failures/<testName>/diagnostics.txt.
+// Best-effort: logs warnings on error rather than fataling.
+func (f *LauncherFixture) SSHCaptureDiagnostics(testName string) {
+	f.t.Helper()
+	state := f.VMState()
+	sshPort := state.Ports["ssh"]
+	if sshPort == 0 {
+		f.t.Logf("SSHCaptureDiagnostics: no ssh port in vm-state.json, skipping")
+		return
+	}
+	dest := filepath.Join("failures", testName)
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		f.t.Logf("SSHCaptureDiagnostics: could not create dir %s: %v", dest, err)
+		return
+	}
+	const script = `set +e
+echo '=== dmesg ==='
+dmesg
+echo '=== /proc/mounts ==='
+cat /proc/mounts
+echo '=== df -h ==='
+df -h
+echo '=== podman info ==='
+podman info
+echo '=== podman ps -a ==='
+podman ps -a
+echo '=== podman inspect exasol-local-db ==='
+podman inspect exasol-local-db 2>&1
+echo '=== podman logs exasol-local-db ==='
+podman logs exasol-local-db 2>&1`
+	cmd := exec.Command("ssh",
+		"-i", f.SSHKeyPath(),
+		"-p", strconv.Itoa(sshPort),
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "ConnectTimeout=10",
+		"-o", "BatchMode=yes",
+		"root@127.0.0.1",
+		fmt.Sprintf("sh -c %s", shellQuote(script)),
+	)
+	cmd.Dir = f.WorkDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		f.t.Logf("SSHCaptureDiagnostics: ssh error: %v", err)
+	}
+	diagPath := filepath.Join(dest, "diagnostics.txt")
+	if writeErr := os.WriteFile(diagPath, out, 0644); writeErr != nil {
+		f.t.Logf("SSHCaptureDiagnostics: could not write %s: %v", diagPath, writeErr)
+		return
+	}
+	f.t.Logf("SSHCaptureDiagnostics: saved %s (%d bytes)", diagPath, len(out))
+}
+
+// CopyLogsToFailuresDir copies VM log files from WorkDir into failures/<testName>/
+// so they survive fixture cleanup and can be inspected after a test failure.
+func (f *LauncherFixture) CopyLogsToFailuresDir(testName string) {
+	f.t.Helper()
+	dest := filepath.Join("failures", testName)
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		f.t.Logf("could not create failures dir %s: %v", dest, err)
+		return
+	}
+	for _, name := range []string{"vm.log", "vm-console.log", "vm-state.json"} {
+		data, err := os.ReadFile(filepath.Join(f.WorkDir, name))
+		if err != nil {
+			if !os.IsNotExist(err) {
+				f.t.Logf("could not read %s for failures dir: %v", name, err)
+			}
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dest, name), data, 0644); err != nil {
+			f.t.Logf("could not write %s to failures dir: %v", name, err)
+		}
+	}
 }
 
 // ResizeData runs `launcher resize-data <newSizeGB>` and returns any error.
