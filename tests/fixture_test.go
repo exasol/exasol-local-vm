@@ -279,6 +279,14 @@ func (f *LauncherFixture) ResizeData(newSizeGB int) error {
 
 // Cleanup stops the VM if it is running and removes WorkDir.
 func (f *LauncherFixture) Cleanup() {
+	if f.t.Failed() {
+		if f.vmRunning {
+			if _, err := os.Stat(filepath.Join(f.WorkDir, "vm-state.json")); err == nil {
+				f.SSHCaptureDiagnostics(f.t.Name())
+			}
+		}
+		f.CopyLogsToFailuresDir(f.t.Name())
+	}
 	if f.vmRunning {
 		_ = exec.Command(f.BinaryPath, "stop").Run()
 	}
