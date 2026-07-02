@@ -126,7 +126,7 @@ VERSION_CHECK_JSON
     assert_contains "$run_line" "VERSION_CHECK_IDENTITY=$expected_identity"
     assert_contains "$run_line" "VERSION_CHECK_INTERVAL_SEC=60"
     assert_contains "$run_line" "VERSION_CHECK_RETRY_INTERVAL_SEC=60"
-    assert_contains "$run_line" "version_check_operating_system=$expected_operating_system"
+    assert_contains "$run_line" "VERSION_CHECK_OPERATING_SYSTEM=$expected_operating_system"
     assert_not_contains "$run_line" "version_check_architecture"
     assert_not_contains "$run_line" "EXANANO_VERSION_CHECK"
     assert_not_contains "$run_line" "-e "
@@ -142,7 +142,7 @@ test_missing_runtime_config_disables_nano_checks() {
 
     assert_contains "$run_line" "localhost/exasol-local-db:latest init"
     assert_contains "$run_line" "VERSION_CHECK_ENABLED=0"
-    assert_not_contains "$run_line" "version_check_operating_system"
+    assert_not_contains "$run_line" "VERSION_CHECK_OPERATING_SYSTEM"
     assert_not_contains "$run_line" "version_check_architecture"
     assert_not_contains "$run_line" "EXANANO_VERSION_CHECK"
     assert_not_contains "$run_line" "-e "
