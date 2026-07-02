@@ -425,6 +425,68 @@ func (f *LoopbackForwarder) proxyConnection(ctx context.Context, clientConn net.
 	copyWG.Wait()
 }
 
+func waitForSSHService(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+
+		conn, err := net.DialTimeout("tcp", addr, shorterDuration(3*time.Second, remaining))
+		if err != nil {
+			lastErr = err
+			sleepUntil(deadline, 1*time.Second)
+			continue
+		}
+
+		readTimeout := shorterDuration(3*time.Second, time.Until(deadline))
+		if readTimeout <= 0 {
+			conn.Close()
+			break
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			conn.Close()
+			return fmt.Errorf("failed to set SSH readiness deadline: %w", err)
+		}
+
+		buf := make([]byte, 256)
+		n, err := conn.Read(buf)
+		conn.Close()
+		if err == nil && strings.HasPrefix(string(buf[:n]), "SSH-") {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("unexpected SSH banner %q", string(buf[:n]))
+		}
+		sleepUntil(deadline, 1*time.Second)
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("timed out waiting for SSH service at %s after %v: %w", addr, timeout, lastErr)
+	}
+	return fmt.Errorf("timed out waiting for SSH service at %s after %v", addr, timeout)
+}
+
+func shorterDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func sleepUntil(deadline time.Time, duration time.Duration) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return
+	}
+	time.Sleep(shorterDuration(duration, remaining))
+}
+
 // waitForVMIP waits for the VM to report its IP address in the console log
 func waitForVMIP(consoleLogPath string, timeout time.Duration) (string, error) {
 	initOutput, err := waitForInitOutput(consoleLogPath, timeout)
@@ -892,7 +954,7 @@ func startCmd(
 
 	// Wait for either daemon to fail or vm-state.json to be written
 	stateFile := "vm-state.json"
-	timeout := 60 * time.Second
+	timeout := 4 * time.Minute
 	checkInterval := 200 * time.Millisecond
 	deadline := time.Now().Add(timeout)
 
@@ -977,7 +1039,7 @@ func startCmd(
 			if lines, err := readLastLines("vm.log", 20); err == nil && len(lines) > 0 {
 				logContext = "\n\nLast 20 lines from vm.log:\n" + strings.Join(lines, "\n")
 			}
-			return fmt.Errorf("timeout waiting for VM to start (60s)%s", logContext)
+			return fmt.Errorf("timeout waiting for VM to start (%v)%s", timeout, logContext)
 		}
 		// State file exists, release the daemon process
 		process.Release()
@@ -1355,6 +1417,13 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	}
 	target := fmt.Sprintf("%s:%d", vmIP, guestSSHPort)
 	sshTarget.Store(&target)
+
+	fmt.Printf("Waiting for SSH service at %s...\n", target)
+	if err := waitForSSHService(target, 2*time.Minute); err != nil {
+		shutdownVM(vm)
+		return err
+	}
+	fmt.Println("SSH service is ready")
 
 	// Validate that all port overrides reference services reported by the VM.
 	for serviceName := range portOverrides {
