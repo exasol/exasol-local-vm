@@ -903,7 +903,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	}
 
 	if err := startStatusListener(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: status socket unavailable: %v\n", err)
+		return fmt.Errorf("failed to start status listener: %w", err)
 	}
 
 	fmt.Printf("[%s] VM daemon started\n", time.Now().Format("15:04:05"))
@@ -1393,22 +1393,30 @@ func startStatusListener() error {
 	return nil
 }
 
-func statusCmd() error {
-	running := false
-
+// isVMRunning checks VM liveness by querying the status Unix domain socket
+// rather than relying on the PID file, which can be stale after an improper
+// shutdown.
+func isVMRunning() bool {
 	conn, err := net.DialTimeout("unix", vmSocketPath, 2*time.Second)
-	if err == nil {
-		defer conn.Close()
-		conn.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-		if err := json.NewEncoder(conn).Encode(map[string]string{"request": "status"}); err == nil {
-			var resp struct {
-				Status string `json:"status"`
-			}
-			if err := json.NewDecoder(conn).Decode(&resp); err == nil {
-				running = resp.Status == "running"
-			}
-		}
+	if err != nil {
+		return false
 	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	if err := json.NewEncoder(conn).Encode(map[string]string{"request": "status"}); err != nil {
+		return false
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return false
+	}
+	return resp.Status == "running"
+}
+
+func statusCmd() error {
+	running := isVMRunning()
 
 	out, err := json.Marshal(map[string]bool{"running": running})
 	if err != nil {
@@ -1451,19 +1459,8 @@ func stopCmd() error {
 
 func resizeDataDiskCmd(newSizeStr string) error {
 	// Check if VM is running
-	pidFile := "vm.pid"
-	if _, err := os.Stat(pidFile); err == nil {
-		pidData, _ := os.ReadFile(pidFile)
-		if len(pidData) > 0 {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
-			if err == nil {
-				if process, err := os.FindProcess(pid); err == nil {
-					if err := process.Signal(syscall.Signal(0)); err == nil {
-						return fmt.Errorf("VM is currently running (PID: %d). Stop the VM first with 'mac-runner stop'", pid)
-					}
-				}
-			}
-		}
+	if isVMRunning() {
+		return fmt.Errorf("VM is currently running. Stop the VM first with 'mac-runner stop'")
 	}
 
 	// Parse and validate new size
