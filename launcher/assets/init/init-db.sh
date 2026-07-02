@@ -351,11 +351,32 @@ if podman ps --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
   exit 0
 fi
 
+# On an unclean shutdown (e.g. the VM daemon was SIGKILLed) the container's
+# writable layer survives with its TLS certs intact. The Nano entrypoint reruns
+# its bootstrap on every start and, finding those certs, blocks on an
+# interactive "Accept existing, overwrite, or abort? [a/y/N]" prompt. A plain
+# `podman start` leaves stdin closed, so the prompt gets EOF and defaults to
+# abort - the DB engine then never binds its port. Answer "a" (accept
+# existing) via a backgrounded, piped `podman start -ai`, then poll for the
+# container to come up since the attach blocks for the container's lifetime.
+restart_existing_container() {
+  printf 'a\n' | podman start -ai --sig-proxy=false "$DB_CONTAINER_NAME" >>"$DB_LOG_FILE" 2>&1 &
+  RESTART_WAIT_ELAPSED=0
+  while [ "$RESTART_WAIT_ELAPSED" -lt 30 ]; do
+    if podman ps --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
+      return 0
+    fi
+    sleep 1
+    RESTART_WAIT_ELAPSED=$((RESTART_WAIT_ELAPSED + 1))
+  done
+  return 1
+}
+
 # Check if container exists but isn't running - restart it if the image is current
 if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
   if [ "$RELOAD_NEEDED" = "false" ] && [ "$CONTAINER_RUNTIME_CHANGED" = "false" ]; then
     log_msg "Restarting existing stopped container"
-    if podman start "$DB_CONTAINER_NAME" 2>&1; then
+    if restart_existing_container; then
       log_msg "Container restarted successfully"
       start_db_log_follower
       update_output_ports
@@ -375,6 +396,10 @@ fi
 IMAGE_NAME="localhost/${DB_CONTAINER_NAME}:latest"
 log_msg "Using image: $IMAGE_NAME"
 
+# Keeps the container created with stdin open (-i on podman run below) so a
+# later `podman start -ai` can answer the Nano entrypoint's interactive
+# "existing certs" prompt; a detached restart otherwise gets EOF on stdin and
+# the entrypoint defaults to abort, leaving the DB engine never started.
 run_db_container() {
   if [ "$NANO_VERSION_CHECK_ENABLED" = "1" ]; then
     log_msg "Starting DB container with Nano version checks enabled in exasol.conf"
@@ -386,7 +411,7 @@ run_db_container() {
     log_msg "Starting DB container with Nano version checks disabled in exasol.conf"
     set -- "$IMAGE_NAME" "$@"
   fi
-  podman run -d \
+  podman run -d -i \
     --name "$DB_CONTAINER_NAME" \
     --shm-size="$DB_SHM_SIZE" \
     --pids-limit="$DB_PIDS_LIMIT" \
