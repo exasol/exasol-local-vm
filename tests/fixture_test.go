@@ -222,7 +222,7 @@ podman logs exasol-local-db 2>&1`
 		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=yes",
 		"root@127.0.0.1",
-		"sh", "-c", script,
+		fmt.Sprintf("sh -c %s", shellQuote(script)),
 	)
 	cmd.Dir = f.WorkDir
 	out, err := cmd.CombinedOutput()
