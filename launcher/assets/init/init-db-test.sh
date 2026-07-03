@@ -182,6 +182,28 @@ test_existing_exa_data_skips_params() {
     assert_not_contains "$run_line" "params="
 }
 
+test_removes_existing_tls_certificates() {
+    local case_dir="$1/existing-certs"
+    prepare_case "$case_dir"
+    # Simulate certs left in /exa by a prior (possibly interrupted) init. Their
+    # presence would otherwise make the Nano entrypoint block on an interactive
+    # overwrite prompt; init-db.sh must delete them before starting the container.
+    mkdir -p "$case_dir/state/exa/certificates"
+    touch "$case_dir/state/exa/certificates/fullchain.pem"
+    touch "$case_dir/state/exa/certificates/privkey.pem"
+
+    run_init_db_case "$case_dir" >/dev/null
+
+    if [ -e "$case_dir/state/exa/certificates/fullchain.pem" ]; then
+        echo "Expected fullchain.pem to be removed before container start" >&2
+        exit 1
+    fi
+    if [ -e "$case_dir/state/exa/certificates/privkey.pem" ]; then
+        echo "Expected privkey.pem to be removed before container start" >&2
+        exit 1
+    fi
+}
+
 main() {
     local tmp_dir
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/exasol-local-vm-init-db-test.XXXXXX")"
@@ -191,6 +213,7 @@ main() {
     test_missing_runtime_config_disables_nano_checks "$tmp_dir"
     test_fresh_deployment_passes_params "$tmp_dir"
     test_existing_exa_data_skips_params "$tmp_dir"
+    test_removes_existing_tls_certificates "$tmp_dir"
 
     echo "init-db version-check tests passed"
 }
