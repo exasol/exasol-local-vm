@@ -77,6 +77,16 @@ const (
 	vmSocketPath                       = "vm.sock"
 )
 
+// vmnetRestartSettleDelay is how long a restart waits before bringing up
+// networking, to let macOS reclaim the previous VM instance's vmnet interface.
+// A new VM that starts too soon after the previous one's process died binds a
+// conflicting network path on the shared 192.168.64.0/24 subnet: the guest
+// boots and sshd listens, but the host cannot initiate TCP to the guest for the
+// VM's whole lifetime (retrying SSH afterward never recovers), so the settle
+// must happen before the new VM's network comes up. Only applied on restart
+// (see the EFI variable store check); a first-ever boot has no prior instance.
+const vmnetRestartSettleDelay = 5 * time.Second
+
 var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
 
 // readLastLines reads the last n lines from a file
@@ -1115,9 +1125,15 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	efiVariableStorePath := filepath.Join(vmDir, "efi-nvram.bin")
 	var variableStore *vz.EFIVariableStore
 
+	// The EFI variable store exists from a prior boot, so this start is a
+	// restart of an existing VM rather than a fresh first boot. This is the
+	// signal used to decide whether a vmnet settle-delay is needed below.
+	isRestart := false
+
 	// Check if variable store already exists
 	if _, err := os.Stat(efiVariableStorePath); err == nil {
 		// Load existing variable store
+		isRestart = true
 		fmt.Printf("[%s] Loading existing EFI variable store from %s...\n", time.Now().Format("15:04:05"), efiVariableStorePath)
 		variableStore, err = vz.NewEFIVariableStore(efiVariableStorePath)
 		if err != nil {
@@ -1199,6 +1215,15 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	}
 	storageDevices = append(storageDevices, storageDeviceConfig)
 	fmt.Printf("[%s] Boot disk attached\n", time.Now().Format("15:04:05"))
+
+	// On a restart, pause before bringing up networking so macOS can reclaim
+	// the previous VM instance's vmnet interface. Starting the new VM's network
+	// too soon after the old process died leaves the host unable to reach the
+	// guest for the VM's whole lifetime (see vmnetRestartSettleDelay).
+	if isRestart {
+		fmt.Printf("[%s] Restart detected; waiting %s for host vmnet to settle before networking...\n", time.Now().Format("15:04:05"), vmnetRestartSettleDelay)
+		time.Sleep(vmnetRestartSettleDelay)
+	}
 
 	// Create network device
 	fmt.Printf("[%s] Configuring NAT networking...\n", time.Now().Format("15:04:05"))
