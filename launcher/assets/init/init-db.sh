@@ -100,20 +100,16 @@ fi
 
 STATE_DIR="${EXASOL_VM_CONTAINER_STATE_DIR:-/var/lib}"
 STATE_FILE="$STATE_DIR/container-state.sha256"
-CONTAINER_RUNTIME_STATE_FILE="$STATE_DIR/container-runtime-state.sha256"
+# Nano's own persistent runtime data (config, certs, storage). Bind-mounted
+# into a fresh container every start, per the image's documented "mount /exa
+# to keep database state between container runs" pattern - so container
+# instances stay disposable and we never need to resume/restart one in place.
+EXA_DATA_DIR="$STATE_DIR/exa"
 LOG_DIR="$EXASOL_VM_HOST_SHARED_DIR/logs"
 
 log_msg() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DB] $1"
   logger -t init-db "$1" 2>/dev/null || true
-}
-
-version_check_state_payload() {
-  if [ -f "$VERSION_CHECK_RUNTIME_CONFIG_FILE" ]; then
-    sha256sum "$VERSION_CHECK_RUNTIME_CONFIG_FILE"
-  else
-    printf 'absent\n'
-  fi
 }
 
 clamp_integer() {
@@ -237,24 +233,21 @@ start_db_log_follower() {
 # Create logs directory
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 mkdir -p "$STATE_DIR" 2>/dev/null || true
+mkdir -p "$EXA_DATA_DIR" 2>/dev/null || true
 
 log_msg "Starting container initialization"
 log_msg "initial container state (podman ps -a)"
 podman ps -a 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
 
 load_version_check_config
-CURRENT_RUNTIME_SHA=$(version_check_state_payload | sha256sum | cut -d' ' -f1)
 
-CONTAINER_RUNTIME_CHANGED=true
-if [ -f "$CONTAINER_RUNTIME_STATE_FILE" ]; then
-  PREVIOUS_RUNTIME_SHA=$(cat "$CONTAINER_RUNTIME_STATE_FILE")
-  if [ "$CURRENT_RUNTIME_SHA" = "$PREVIOUS_RUNTIME_SHA" ]; then
-    CONTAINER_RUNTIME_CHANGED=false
-  else
-    log_msg "Container runtime configuration has changed"
-  fi
-else
-  log_msg "No previous container runtime configuration state found"
+# Nano's init params=... (and the initial SYS password options) only apply on
+# the first deployment of a fresh /exa runtime; on a populated /exa they're
+# meant to be omitted since the values are already persisted in exasol.conf.
+EXA_FRESH_DEPLOYMENT=true
+if [ -f "$EXA_DATA_DIR/exasol.conf" ]; then
+  EXA_FRESH_DEPLOYMENT=false
+  log_msg "Existing /exa runtime found at $EXA_DATA_DIR; skipping first-deployment init params"
 fi
 
 # Check if tarball exists
@@ -340,35 +333,23 @@ if [ "$RELOAD_NEEDED" = "true" ]; then
   fi
 fi
 
-# Check if container is already running
+# Check if container is already running (e.g. a prior init-db.sh run this boot)
 if podman ps --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
   log_msg "Container already running"
-  if [ "$CONTAINER_RUNTIME_CHANGED" = "true" ]; then
-    log_msg "Container runtime configuration changed; running container will keep its current version-check configuration until restart"
-  fi
   start_db_log_follower
   update_output_ports
   exit 0
 fi
 
-# Check if container exists but isn't running - restart it if the image is current
+# Always recreate the container from scratch rather than resuming a stopped
+# instance. The container itself is disposable - all state that must survive
+# lives in /exa (bind-mounted below) - so there's nothing to gain by reusing
+# an old instance, and doing so risks the Nano entrypoint's interactive
+# "existing certs" confirmation prompt, which has no documented non-interactive
+# override and would hang with no TTY attached.
 if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
-  if [ "$RELOAD_NEEDED" = "false" ] && [ "$CONTAINER_RUNTIME_CHANGED" = "false" ]; then
-    log_msg "Restarting existing stopped container"
-    if podman start "$DB_CONTAINER_NAME" 2>&1; then
-      log_msg "Container restarted successfully"
-      start_db_log_follower
-      update_output_ports
-      exit 0
-    else
-      log_msg "Failed to restart container, will remove and recreate"
-      log_diagnostics
-      podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
-    fi
-  else
-    log_msg "Removing stopped container (image or runtime configuration changed)"
-    podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
-  fi
+  log_msg "Removing stopped container to recreate it fresh"
+  podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
 fi
 
 # Use the predictable tagged image name
@@ -393,13 +374,14 @@ run_db_container() {
     --security-opt "$DB_SECURITY_OPT" \
     --restart "$DB_RESTART" \
     -p "$DB_PORT:$DB_PORT" \
+    -v "$EXA_DATA_DIR:/exa" \
     "$@"
 }
 # Start the container
 # Append Nano's documented "init" config arguments so version-check settings
 # are persisted to exasol.conf instead of being one-run environment overrides.
 set -- init
-if [ -n "$DB_PARAMS" ]; then
+if [ "$EXA_FRESH_DEPLOYMENT" = "true" ] && [ -n "$DB_PARAMS" ]; then
   set -- "$@" "params=$DB_PARAMS"
 fi
 set -- "$@" "VERSION_CHECK_ENABLED=$NANO_VERSION_CHECK_ENABLED"
@@ -423,9 +405,6 @@ if [ "$PODMAN_RUN_RC" -ne 0 ]; then
   exit "$PODMAN_RUN_RC"
 fi
 log_msg "Container started successfully"
-echo "$CURRENT_RUNTIME_SHA" > "$CONTAINER_RUNTIME_STATE_FILE"
-sync
-log_msg "Container state flushed to disk"
 start_db_log_follower
 update_output_ports
 
