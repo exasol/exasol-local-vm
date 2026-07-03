@@ -185,10 +185,23 @@ func (f *LauncherFixture) VMState() vmState {
 
 // SSHCaptureDiagnostics SSHes into the running VM and collects diagnostic
 // information (dmesg, Podman state, container logs) into failures/<testName>/diagnostics.txt.
-// Best-effort: logs warnings on error rather than fataling.
+// Best-effort: logs warnings on error rather than fataling. Safe to call even
+// if the VM never got far enough to write vm-state.json (e.g. Cleanup running
+// after an early failure), unlike VMState which fatals when it's missing.
 func (f *LauncherFixture) SSHCaptureDiagnostics(testName string) {
 	f.t.Helper()
-	state := f.VMState()
+	stateData, err := os.ReadFile(filepath.Join(f.WorkDir, "vm-state.json"))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			f.t.Logf("SSHCaptureDiagnostics: could not read vm-state.json: %v", err)
+		}
+		return
+	}
+	var state vmState
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		f.t.Logf("SSHCaptureDiagnostics: could not parse vm-state.json: %v", err)
+		return
+	}
 	sshPort := state.Ports["ssh"]
 	if sshPort == 0 {
 		f.t.Logf("SSHCaptureDiagnostics: no ssh port in vm-state.json, skipping")
@@ -237,8 +250,9 @@ podman logs exasol-local-db 2>&1`
 	f.t.Logf("SSHCaptureDiagnostics: saved %s (%d bytes)", diagPath, len(out))
 }
 
-// CopyLogsToFailuresDir copies VM log files from WorkDir into failures/<testName>/
-// so they survive fixture cleanup and can be inspected after a test failure.
+// CopyLogsToFailuresDir copies VM log files and the guest-shared directory's
+// logs from WorkDir into failures/<testName>/ so they survive fixture cleanup
+// and can be inspected after a test failure.
 func (f *LauncherFixture) CopyLogsToFailuresDir(testName string) {
 	f.t.Helper()
 	dest := filepath.Join("failures", testName)
@@ -247,17 +261,81 @@ func (f *LauncherFixture) CopyLogsToFailuresDir(testName string) {
 		return
 	}
 	for _, name := range []string{"vm.log", "vm-console.log", "vm-state.json"} {
-		data, err := os.ReadFile(filepath.Join(f.WorkDir, name))
-		if err != nil {
-			if !os.IsNotExist(err) {
-				f.t.Logf("could not read %s for failures dir: %v", name, err)
-			}
+		f.copyFileToDir(filepath.Join(f.WorkDir, name), filepath.Join(dest, name))
+	}
+
+	// vm-shared is the VirtioFS folder shared with the guest; it holds
+	// init.log, the DB container's streamed logs, and other guest-written
+	// state that's often the only record of what happened during a boot that
+	// never came up (e.g. SSH never answering). Skip vm-shared/init, which is
+	// just the (large, static) assets the host copied in, not guest output.
+	sharedDir := filepath.Join(f.WorkDir, "vm-shared")
+	sharedDest := filepath.Join(dest, "vm-shared")
+	entries, err := os.ReadDir(sharedDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			f.t.Logf("could not read shared dir %s for failures dir: %v", sharedDir, err)
+		}
+		return
+	}
+	for _, entry := range entries {
+		if entry.Name() == "init" {
 			continue
 		}
-		if err := os.WriteFile(filepath.Join(dest, name), data, 0644); err != nil {
-			f.t.Logf("could not write %s to failures dir: %v", name, err)
-		}
+		f.copyPathToDir(filepath.Join(sharedDir, entry.Name()), filepath.Join(sharedDest, entry.Name()))
 	}
+}
+
+// copyFileToDir copies a single file, logging (not fataling) on error. Missing
+// source files are silently skipped since they're expected in many failure modes.
+func (f *LauncherFixture) copyFileToDir(src, dst string) {
+	f.t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			f.t.Logf("could not read %s for failures dir: %v", src, err)
+		}
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		f.t.Logf("could not create %s for failures dir: %v", filepath.Dir(dst), err)
+		return
+	}
+	if err := os.WriteFile(dst, data, 0644); err != nil {
+		f.t.Logf("could not write %s to failures dir: %v", dst, err)
+	}
+}
+
+// copyPathToDir copies a file, or a directory tree recursively, from src to dst.
+func (f *LauncherFixture) copyPathToDir(src, dst string) {
+	f.t.Helper()
+	info, err := os.Stat(src)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			f.t.Logf("could not stat %s for failures dir: %v", src, err)
+		}
+		return
+	}
+	if !info.IsDir() {
+		f.copyFileToDir(src, dst)
+		return
+	}
+	_ = filepath.Walk(src, func(path string, walkInfo os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			f.t.Logf("could not walk %s for failures dir: %v", path, walkErr)
+			return nil
+		}
+		if walkInfo.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			f.t.Logf("could not compute relative path for %s: %v", path, err)
+			return nil
+		}
+		f.copyFileToDir(path, filepath.Join(dst, rel))
+		return nil
+	})
 }
 
 // ResizeData runs `launcher resize-data <newSizeGB>` and returns any error.
@@ -277,8 +355,13 @@ func (f *LauncherFixture) ResizeData(newSizeGB int) error {
 	return nil
 }
 
-// Cleanup stops the VM if it is running and removes WorkDir.
+// Cleanup captures diagnostics for a failed test (while the VM can still be
+// reached over SSH), then stops the VM if it is running and removes WorkDir.
 func (f *LauncherFixture) Cleanup() {
+	if f.t.Failed() {
+		f.SSHCaptureDiagnostics(f.t.Name())
+		f.CopyLogsToFailuresDir(f.t.Name())
+	}
 	if f.vmRunning {
 		_ = exec.Command(f.BinaryPath, "stop").Run()
 	}

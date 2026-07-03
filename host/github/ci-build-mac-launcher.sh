@@ -164,12 +164,33 @@ echo ""
 
 # Watch the workflow
 echo "Waiting for workflow to complete..."
-gh run watch "$RUN_ID" --exit-status || {
+WORKFLOW_FAILED="false"
+gh run watch "$RUN_ID" --exit-status || WORKFLOW_FAILED="true"
+
+if [ "$WORKFLOW_FAILED" = "true" ]; then
   echo ""
   echo "❌ Workflow failed!"
   echo "View logs: gh run view $RUN_ID"
+fi
+
+mkdir -p ci-downloads
+
+# Test failure logs (integration test diagnostics, VM logs, and the guest's
+# shared-directory logs) are uploaded with `if: always()`, so try to fetch
+# them regardless of whether the workflow succeeded or failed - most useful
+# precisely when it failed. Absent when no test failed (if-no-files-found:
+# ignore means the artifact may simply not exist), so don't treat that as fatal.
+echo ""
+echo "Downloading test failure logs (if any)..."
+if gh run download "$RUN_ID" --name test-failure-logs --dir ci-downloads/test-failure-logs 2>/dev/null; then
+  echo "✓ Test failure logs downloaded to: ci-downloads/test-failure-logs/"
+else
+  echo "  (no test-failure-logs artifact found for this run)"
+fi
+
+if [ "$WORKFLOW_FAILED" = "true" ]; then
   exit 1
-}
+fi
 
 echo ""
 echo "✓ Workflow completed successfully"
@@ -177,7 +198,6 @@ echo ""
 
 # Download artifacts
 echo "Downloading macOS launcher artifacts..."
-mkdir -p ci-downloads
 cd ci-downloads
 
 gh run download "$RUN_ID" --name mac-launcher || {
