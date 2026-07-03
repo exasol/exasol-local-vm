@@ -151,6 +151,37 @@ test_missing_runtime_config_disables_nano_checks() {
     assert_not_contains "$run_line" "version-check.json"
 }
 
+test_fresh_deployment_passes_params() {
+    local case_dir="$1/fresh-params"
+    prepare_case "$case_dir"
+    # Add db.params to config.json for this case.
+    jq '.db.params = ["maxConnectionsLicenseLimit=20"]' "$case_dir/init/config.json" > "$case_dir/init/config.json.tmp"
+    mv "$case_dir/init/config.json.tmp" "$case_dir/init/config.json"
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    assert_contains "$run_line" "-v $case_dir/state/exa:/exa"
+    assert_contains "$run_line" "params=maxConnectionsLicenseLimit=20"
+}
+
+test_existing_exa_data_skips_params() {
+    local case_dir="$1/existing-exa"
+    prepare_case "$case_dir"
+    jq '.db.params = ["maxConnectionsLicenseLimit=20"]' "$case_dir/init/config.json" > "$case_dir/init/config.json.tmp"
+    mv "$case_dir/init/config.json.tmp" "$case_dir/init/config.json"
+    # Simulate a populated /exa runtime from a prior container's lifetime,
+    # so this run must skip the first-deployment-only "params=" argument.
+    mkdir -p "$case_dir/state/exa"
+    touch "$case_dir/state/exa/exasol.conf"
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    assert_contains "$run_line" "-v $case_dir/state/exa:/exa"
+    assert_not_contains "$run_line" "params="
+}
+
 main() {
     local tmp_dir
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/exasol-local-vm-init-db-test.XXXXXX")"
@@ -158,6 +189,8 @@ main() {
 
     test_enabled_runtime_config "$tmp_dir"
     test_missing_runtime_config_disables_nano_checks "$tmp_dir"
+    test_fresh_deployment_passes_params "$tmp_dir"
+    test_existing_exa_data_skips_params "$tmp_dir"
 
     echo "init-db version-check tests passed"
 }
