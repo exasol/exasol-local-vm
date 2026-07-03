@@ -6,6 +6,7 @@
 package integration
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -42,8 +43,15 @@ func TestDBConnection(t *testing.T) {
 	}
 }
 
-// waitForDB polls until the Exasol DB at 127.0.0.1:port accepts connections,
-// then returns an open *sql.DB handle.
+// waitForDB polls until the Exasol DB at 127.0.0.1:port can actually serve a
+// query, then returns an open *sql.DB handle.
+//
+// It runs a real "SELECT 1" rather than db.Ping(). The forwarded port can
+// accept TCP/websocket connections (and Ping can succeed) while the SQL engine
+// is still initializing or crash-looping - e.g. pddserver briefly binds 8563
+// before the InitProcess fails on a bad restart. Requiring a query round-trip
+// to succeed proves the engine has finished starting and is genuinely serving,
+// which is the readiness signal the DB reconnection tests depend on.
 func waitForDB(t *testing.T, port int, timeout time.Duration) *sql.DB {
 	t.Helper()
 
@@ -53,22 +61,27 @@ func waitForDB(t *testing.T, port int, timeout time.Duration) *sql.DB {
 		ValidateServerCertificate(false).
 		String()
 
+	db, err := sql.Open("exasol", connStr)
+	if err != nil {
+		t.Fatalf("failed to open exasol connection on port %d: %v", port, err)
+	}
+
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		db, err := sql.Open("exasol", connStr)
-		if err == nil {
-			if pingErr := db.Ping(); pingErr == nil {
-				return db
-			} else {
-				lastErr = pingErr
-				_ = db.Close()
-			}
-		} else {
-			lastErr = err
+		// Per-attempt timeout so a single hung connection doesn't swallow the
+		// whole budget; database/sql discards the bad conn and we retry.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var one int
+		queryErr := db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+		cancel()
+		if queryErr == nil && one == 1 {
+			return db
 		}
-		time.Sleep(5 * time.Second)
+		lastErr = queryErr
+		time.Sleep(3 * time.Second)
 	}
+	_ = db.Close()
 	t.Fatalf("Exasol DB on port %d did not become ready within %v: %v", port, timeout, lastErr)
 	return nil
 }

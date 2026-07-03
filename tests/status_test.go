@@ -54,6 +54,12 @@ func TestStatusAfterForcefulKill(t *testing.T) {
 		t.Fatal("expected status running=true after start, got false")
 	}
 
+	// Wait for the database to finish its first-time initialization before the
+	// forceful kill, so this exercises recovery of a fully-created database
+	// rather than a create that was interrupted partway through.
+	initialDBPort := readDBPortFromVMState(t, f)
+	waitForDB(t, initialDBPort, 5*time.Minute).Close()
+
 	f.KillVM()
 	waitForVMStopped(t, f, 10*time.Second)
 
