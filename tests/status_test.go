@@ -6,6 +6,7 @@
 package integration
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,7 +67,17 @@ func TestStatusAfterForcefulKill(t *testing.T) {
 		t.Fatal("expected status running=true after restart following SIGKILL, got false")
 	}
 
-	if state := f.VMState(); state.Ports["db"] == 0 {
-		t.Fatal("VM restarted after SIGKILL but db port is absent from vm-state.json; logs saved to failures/" + t.Name())
+	// Verify the database engine itself recovered after the unclean shutdown,
+	// not just that the VM and its port are up: connect and run a query.
+	dbPort := readDBPortFromVMState(t, f)
+	db := waitForDB(t, dbPort, 5*time.Minute)
+	defer db.Close()
+
+	var result string
+	if err := db.QueryRow("SELECT CURRENT_SESSION").Scan(&result); err != nil {
+		t.Fatalf("query after restart following SIGKILL failed: %v", err)
+	}
+	if strings.TrimSpace(result) == "" {
+		t.Fatal("CURRENT_SESSION returned an empty value after restart following SIGKILL")
 	}
 }
