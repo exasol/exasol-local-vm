@@ -381,7 +381,7 @@ run_db_container() {
     # Exasol Personal identities contain semicolons. AdminI's init parser treats
     # semicolons as command separators, so pass this config value via the
     # container environment instead of the init command line.
-    set -- "-e" "VERSION_CHECK_IDENTITY=$NANO_VERSION_CHECK_IDENTITY" "$IMAGE_NAME" "$@"
+    set -- "-e" "EXANANO_VERSION_CHECK_IDENTITY=$NANO_VERSION_CHECK_IDENTITY" "$IMAGE_NAME" "$@"
   else
     log_msg "Starting DB container with Nano version checks disabled in exasol.conf"
     set -- "$IMAGE_NAME" "$@"
