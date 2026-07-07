@@ -39,6 +39,7 @@ on:
 permissions:
   contents: read
   actions: read
+  packages: write
 
 jobs:
   build-disk-images:
@@ -59,6 +60,30 @@ jobs:
       
       - name: Install system dependencies
         run: task install-deps
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Configure Podman build cache
+        run: |
+          set -euo pipefail
+
+          CACHE_OWNER="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          CACHE_REPO="$(printf '%s' "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
+          BASE_CACHE_REF="ghcr.io/${CACHE_OWNER}/${CACHE_REPO}-podman-build-cache-base-aarch64"
+          CONVERTER_CACHE_REF="ghcr.io/${CACHE_OWNER}/${CACHE_REPO}-podman-build-cache-converter-aarch64"
+
+          echo "PODMAN_BASE_BUILD_CACHE_FROM=$BASE_CACHE_REF" >> "$GITHUB_ENV"
+          echo "PODMAN_BASE_BUILD_CACHE_TO=$BASE_CACHE_REF" >> "$GITHUB_ENV"
+          echo "PODMAN_CONVERTER_BUILD_CACHE_FROM=$CONVERTER_CACHE_REF" >> "$GITHUB_ENV"
+          echo "PODMAN_CONVERTER_BUILD_CACHE_TO=$CONVERTER_CACHE_REF" >> "$GITHUB_ENV"
+
+          echo "Using VM contents build cache repository: $BASE_CACHE_REF"
+          echo "Using converter build cache repository: $CONVERTER_CACHE_REF"
       
       - name: Build mac package
         run: task package-mac IMG_ARCH=aarch64

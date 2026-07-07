@@ -33,6 +33,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      packages: write
 
   create-release:
     runs-on: ubuntu-latest
