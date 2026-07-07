@@ -27,7 +27,8 @@ mkdir -p "$OUTPUT_DIR"
 # as we can bump it before a release.
 #
 # These builds use idfiles so we don't have to tag these temporary containers
-# and clutter the host.
+# and clutter the host. CI can set PODMAN_*_BUILD_CACHE_* variables to use a
+# registry-backed build cache between ephemeral runners.
 BASE_BUILD_ARGS=(
     --jobs=0
     --pull=newer
@@ -43,12 +44,39 @@ IMG_CONVERTER_BUILD_ARGS=(
     --arch="${IMG_ARCH}"
     --iidfile="${OUTPUT_DIR}/converter_image_id"
 )
+BASE_BUILD_CACHE_FROM_ARGS=()
+IMG_CONVERTER_BUILD_CACHE_FROM_ARGS=()
+
+if [ -n "${PODMAN_BASE_BUILD_CACHE_FROM:-}" ]; then
+    BASE_BUILD_CACHE_FROM_ARGS+=("--cache-from=${PODMAN_BASE_BUILD_CACHE_FROM}")
+fi
+if [ -n "${PODMAN_BASE_BUILD_CACHE_TO:-}" ]; then
+    BASE_BUILD_ARGS+=("--cache-to=${PODMAN_BASE_BUILD_CACHE_TO}")
+fi
+if [ -n "${PODMAN_CONVERTER_BUILD_CACHE_FROM:-}" ]; then
+    IMG_CONVERTER_BUILD_CACHE_FROM_ARGS+=("--cache-from=${PODMAN_CONVERTER_BUILD_CACHE_FROM}")
+fi
+if [ -n "${PODMAN_CONVERTER_BUILD_CACHE_TO:-}" ]; then
+    IMG_CONVERTER_BUILD_ARGS+=("--cache-to=${PODMAN_CONVERTER_BUILD_CACHE_TO}")
+fi
 
 echo "==> Building VM contents image with podman..."
-podman build "${BASE_BUILD_ARGS[@]}" "$ROOT_DIR/container"
+if ! podman build "${BASE_BUILD_ARGS[@]}" "${BASE_BUILD_CACHE_FROM_ARGS[@]}" "$ROOT_DIR/container"; then
+    if [ "${#BASE_BUILD_CACHE_FROM_ARGS[@]}" -eq 0 ]; then
+        exit 1
+    fi
+    echo "Warning: VM contents image build failed with remote cache; retrying without --cache-from" >&2
+    podman build "${BASE_BUILD_ARGS[@]}" "$ROOT_DIR/container"
+fi
 
 echo "==> Building podman image -> VM disk image converter with podman..."
-podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "$ROOT_DIR/host/build"
+if ! podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "${IMG_CONVERTER_BUILD_CACHE_FROM_ARGS[@]}" "$ROOT_DIR/host/build"; then
+    if [ "${#IMG_CONVERTER_BUILD_CACHE_FROM_ARGS[@]}" -eq 0 ]; then
+        exit 1
+    fi
+    echo "Warning: converter image build failed with remote cache; retrying without --cache-from" >&2
+    podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "$ROOT_DIR/host/build"
+fi
 
 BASE_IMG_ID="$(cat "${OUTPUT_DIR}/base_image_id")"
 CONVERTER_IMG_ID="$(cat "${OUTPUT_DIR}/converter_image_id")"
