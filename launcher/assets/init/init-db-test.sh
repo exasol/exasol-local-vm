@@ -204,6 +204,41 @@ test_removes_existing_tls_certificates() {
     fi
 }
 
+test_quarantines_incomplete_initial_create() {
+    local case_dir="$1/incomplete-create"
+    prepare_case "$case_dir"
+    jq '.db.params = ["maxConnectionsLicenseLimit=20"]' "$case_dir/init/config.json" > "$case_dir/init/config.json.tmp"
+    mv "$case_dir/init/config.json.tmp" "$case_dir/init/config.json"
+    mkdir -p "$case_dir/state/exa"
+    touch "$case_dir/state/exa/exasol.conf"
+    touch "$case_dir/state/exa/.exanano-initial-create-in-progress"
+    printf 'keep diagnostics' > "$case_dir/state/exa/sentinel.txt"
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    local quarantined_dir
+    quarantined_dir="$(find "$case_dir/state" -maxdepth 1 -type d -name 'exa.failed-*' -print -quit)"
+    if [ -z "$quarantined_dir" ]; then
+        echo "Expected incomplete /exa runtime to be moved to exa.failed-*" >&2
+        exit 1
+    fi
+    if [ ! -f "$quarantined_dir/.exanano-initial-create-in-progress" ]; then
+        echo "Expected incomplete-create marker to be preserved in quarantined /exa runtime" >&2
+        exit 1
+    fi
+    if [ ! -f "$quarantined_dir/sentinel.txt" ]; then
+        echo "Expected quarantined /exa runtime to preserve existing files" >&2
+        exit 1
+    fi
+    if [ -e "$case_dir/state/exa/.exanano-initial-create-in-progress" ]; then
+        echo "Expected replacement /exa runtime to be clean" >&2
+        exit 1
+    fi
+    assert_contains "$run_line" "-v $case_dir/state/exa:/exa"
+    assert_contains "$run_line" "params=maxConnectionsLicenseLimit=20"
+}
+
 main() {
     local tmp_dir
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/exasol-local-vm-init-db-test.XXXXXX")"
@@ -214,6 +249,7 @@ main() {
     test_fresh_deployment_passes_params "$tmp_dir"
     test_existing_exa_data_skips_params "$tmp_dir"
     test_removes_existing_tls_certificates "$tmp_dir"
+    test_quarantines_incomplete_initial_create "$tmp_dir"
 
     echo "init-db version-check tests passed"
 }

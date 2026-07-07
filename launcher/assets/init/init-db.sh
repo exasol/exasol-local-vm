@@ -105,6 +105,8 @@ STATE_FILE="$STATE_DIR/container-state.sha256"
 # to keep database state between container runs" pattern - so container
 # instances stay disposable and we never need to resume/restart one in place.
 EXA_DATA_DIR="$STATE_DIR/exa"
+EXA_INITIAL_CREATE_MARKER="$EXA_DATA_DIR/.exanano-initial-create-in-progress"
+EXA_CONFIG_FILE="$EXA_DATA_DIR/exasol.conf"
 LOG_DIR="$EXASOL_VM_HOST_SHARED_DIR/logs"
 
 log_msg() {
@@ -210,6 +212,28 @@ update_output_ports() {
   log_msg "Updated init output file with database port"
 }
 
+recover_incomplete_initial_create() {
+  if [ ! -e "$EXA_INITIAL_CREATE_MARKER" ]; then
+    return
+  fi
+
+  log_msg "Detected incomplete initial DB create marker at $EXA_INITIAL_CREATE_MARKER; quarantining $EXA_DATA_DIR before clean re-initialization"
+  if podman ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^${DB_CONTAINER_NAME}$"; then
+    log_msg "Stopping and removing DB container before quarantining incomplete /exa runtime"
+    podman stop "$DB_CONTAINER_NAME" 2>/dev/null || true
+    podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
+  fi
+
+  FAILED_EXA_DATA_DIR="${EXA_DATA_DIR}.failed-$(date '+%Y%m%d%H%M%S')"
+  if [ -e "$FAILED_EXA_DATA_DIR" ]; then
+    FAILED_EXA_DATA_DIR="${FAILED_EXA_DATA_DIR}-$$"
+  fi
+  mv "$EXA_DATA_DIR" "$FAILED_EXA_DATA_DIR"
+  mkdir -p "$EXA_DATA_DIR"
+  sync
+  log_msg "Moved incomplete /exa runtime to $FAILED_EXA_DATA_DIR"
+}
+
 # Stream the DB container's podman logs to the shared directory so they are
 # visible to the host for debugging, without spawning a duplicate follower if
 # one from an earlier init-db.sh run in this boot is still alive.
@@ -240,15 +264,6 @@ log_msg "initial container state (podman ps -a)"
 podman ps -a 2>&1 | while IFS= read -r line; do log_msg "$line"; done || true
 
 load_version_check_config
-
-# Nano's init params=... (and the initial SYS password options) only apply on
-# the first deployment of a fresh /exa runtime; on a populated /exa they're
-# meant to be omitted since the values are already persisted in exasol.conf.
-EXA_FRESH_DEPLOYMENT=true
-if [ -f "$EXA_DATA_DIR/exasol.conf" ]; then
-  EXA_FRESH_DEPLOYMENT=false
-  log_msg "Existing /exa runtime found at $EXA_DATA_DIR; skipping first-deployment init params"
-fi
 
 # Check if tarball exists
 if [ ! -f "$DB_CONTAINER_TARBALL" ]; then
@@ -350,6 +365,17 @@ fi
 if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
   log_msg "Removing stopped container to recreate it fresh"
   podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
+fi
+
+recover_incomplete_initial_create
+
+# Nano's init params=... (and the initial SYS password options) only apply on
+# the first deployment of a fresh /exa runtime; on a populated /exa they're
+# meant to be omitted since the values are already persisted in exasol.conf.
+EXA_FRESH_DEPLOYMENT=true
+if [ -f "$EXA_CONFIG_FILE" ]; then
+  EXA_FRESH_DEPLOYMENT=false
+  log_msg "Existing /exa runtime found at $EXA_DATA_DIR; skipping first-deployment init params"
 fi
 
 # Use the predictable tagged image name

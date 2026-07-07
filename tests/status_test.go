@@ -6,6 +6,7 @@
 package integration
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,7 @@ func TestStatusAfterForcefulKill(t *testing.T) {
 	// rather than a create that was interrupted partway through.
 	initialDBPort := readDBPortFromVMState(t, f)
 	waitForDB(t, initialDBPort, 5*time.Minute).Close()
+	waitForInitialDBStateFlushed(t, f, 2*time.Minute)
 
 	f.KillVM()
 	waitForVMStopped(t, f, 10*time.Second)
@@ -86,4 +88,23 @@ func TestStatusAfterForcefulKill(t *testing.T) {
 	if strings.TrimSpace(result) == "" {
 		t.Fatal("CURRENT_SESSION returned an empty value after restart following SIGKILL")
 	}
+}
+
+func waitForInitialDBStateFlushed(t *testing.T, f *LauncherFixture, timeout time.Duration) {
+	t.Helper()
+
+	command := fmt.Sprintf(`deadline=$(( $(date +%%s) + %d ))
+while [ "$(date +%%s)" -le "$deadline" ]; do
+  if [ -f /var/lib/exa/exasol.conf ] && [ ! -e /var/lib/exa/.exanano-initial-create-in-progress ]; then
+    sync
+    exit 0
+  fi
+  sleep 1
+done
+echo "timed out waiting for durable initial DB state" >&2
+echo "/var/lib/exa contents:" >&2
+ls -la /var/lib/exa >&2 || true
+exit 1`, int(timeout.Seconds()))
+
+	runSSHCommand(t, f, command)
 }
