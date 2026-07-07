@@ -204,6 +204,31 @@ test_removes_existing_tls_certificates() {
     fi
 }
 
+test_preserves_existing_runtime_tls_certificates() {
+    local case_dir="$1/existing-runtime-certs"
+    prepare_case "$case_dir"
+    # A completed /exa runtime needs these certificate files. The Nano restart
+    # path does not regenerate them when exasol.conf already exists.
+    mkdir -p "$case_dir/state/exa/certificates"
+    touch "$case_dir/state/exa/exasol.conf"
+    printf 'fullchain' > "$case_dir/state/exa/certificates/fullchain.pem"
+    printf 'privkey' > "$case_dir/state/exa/certificates/privkey.pem"
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    assert_contains "$run_line" "-v $case_dir/state/exa:/exa"
+    assert_not_contains "$run_line" "params="
+    if [ "$(cat "$case_dir/state/exa/certificates/fullchain.pem")" != "fullchain" ]; then
+        echo "Expected existing runtime fullchain.pem to be preserved" >&2
+        exit 1
+    fi
+    if [ "$(cat "$case_dir/state/exa/certificates/privkey.pem")" != "privkey" ]; then
+        echo "Expected existing runtime privkey.pem to be preserved" >&2
+        exit 1
+    fi
+}
+
 test_quarantines_incomplete_initial_create() {
     local case_dir="$1/incomplete-create"
     prepare_case "$case_dir"
@@ -249,6 +274,7 @@ main() {
     test_fresh_deployment_passes_params "$tmp_dir"
     test_existing_exa_data_skips_params "$tmp_dir"
     test_removes_existing_tls_certificates "$tmp_dir"
+    test_preserves_existing_runtime_tls_certificates "$tmp_dir"
     test_quarantines_incomplete_initial_create "$tmp_dir"
 
     echo "init-db version-check tests passed"

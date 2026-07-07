@@ -403,23 +403,19 @@ run_db_container() {
     -v "$EXA_DATA_DIR:/exa" \
     "$@"
 }
-# Remove any persisted TLS certificates from /exa before starting the container.
-# The Nano entrypoint runs its "init" bootstrap on every start; when it finds
-# existing certs it blocks on an interactive "Accept existing, overwrite, or
-# abort? [a/y/N]" prompt, which has no TTY here and defaults to abort - so the
-# DB engine never binds its port and the container crash-loops. This is hit in
-# particular after an unclean shutdown that interrupted the first-time init,
-# leaving certs behind without a completed exasol.conf. Deleting the certs puts
-# the entrypoint back on its clean "generate a fresh self-signed cert" path
-# (the same one a first boot takes) so no prompt is ever reached. The DB data
-# lives in the persistent /exa storage volume, independent of these cert files,
-# so this only churns the self-signed cert (clients here don't validate it).
-for cert_file in "$EXA_DATA_DIR/certificates/fullchain.pem" "$EXA_DATA_DIR/certificates/privkey.pem"; do
-  if [ -e "$cert_file" ]; then
-    log_msg "Removing existing TLS certificate to avoid interactive init prompt: $cert_file"
-    rm -f "$cert_file"
-  fi
-done
+# On a fresh /exa path, remove stale TLS certificates left by a pre-marker
+# interrupted init so Nano can generate a consistent pair without prompting.
+# Once exasol.conf exists these files are part of the persisted runtime config;
+# deleting them makes the DB accept TCP connections but close TLS/WebSocket
+# clients with EOF because the existing-config path does not regenerate them.
+if [ "$EXA_FRESH_DEPLOYMENT" = "true" ]; then
+  for cert_file in "$EXA_DATA_DIR/certificates/fullchain.pem" "$EXA_DATA_DIR/certificates/privkey.pem"; do
+    if [ -e "$cert_file" ]; then
+      log_msg "Removing stale TLS certificate before fresh init: $cert_file"
+      rm -f "$cert_file"
+    fi
+  done
+fi
 
 # Start the container
 # Append Nano's documented "init" config arguments so version-check settings
