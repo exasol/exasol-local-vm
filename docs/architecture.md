@@ -205,6 +205,16 @@ Host-shared storage is a different channel. It is used to pass initialization
 assets, credentials, logs, and optional user data between host and guest. It is
 not the same thing as the guest's internal runtime storage.
 
+The Exasol Nano `/exa` runtime directory is persistent state. The guest
+bind-mounts it from the VM runtime data area into the DB container on every
+start, so the `exasol-local-db` container can be removed and recreated without
+hiding or deleting database state. During startup the guest also detects legacy
+containers that were created without this `/exa` bind mount. If such a
+container exists, it copies `exasol-local-db:/exa/.` into the persistent runtime
+directory before removing the old container. If the persistent `/exa` directory
+already contains data, startup fails before removing the old container and logs
+manual recovery instructions.
+
 Conceptually:
 
 ```mermaid

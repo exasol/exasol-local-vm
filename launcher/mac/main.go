@@ -835,6 +835,24 @@ func extractTarXZ(data []byte, outputDir string, pathTransform func(string) stri
 	return nil
 }
 
+// refreshInitDBScript updates the database initializer on every start without
+// re-running init. This lets a newer launcher migrate existing deployments
+// while preserving the VM image, data disk, SSH credentials, and other shared
+// runtime files created by the original launcher.
+func refreshInitDBScript(sharedDir string) error {
+	const initDBScriptArchivePath = "init/init-db.sh"
+
+	if err := extractTarXZ(initAssets, sharedDir, func(path string) string {
+		if path == initDBScriptArchivePath {
+			return path
+		}
+		return ""
+	}); err != nil {
+		return fmt.Errorf("failed to refresh database init script: %w", err)
+	}
+	return nil
+}
+
 func initCmd(sshKeyPath string) error {
 	fmt.Println("Initializing VM...")
 
@@ -1050,6 +1068,9 @@ func startCmd(
 	vmDir := "vm"
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
 		return fmt.Errorf("VM not initialized. Run 'mac-runner init' first")
+	}
+	if err := refreshInitDBScript(sharedDir); err != nil {
+		return err
 	}
 
 	// Ensure the data disk exists at the requested size (create / grow / error).
