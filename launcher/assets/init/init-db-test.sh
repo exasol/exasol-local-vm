@@ -43,6 +43,28 @@ done
 printf '\n' >> "$PODMAN_CALLS"
 
 case "$command" in
+    ps)
+        if [[ "${PODMAN_MOCK_EXISTING_CONTAINER:-}" == "1" && " $* " == *" -a "* ]]; then
+            echo "exasol-local-db"
+        fi
+        ;;
+    inspect)
+        if [[ "${PODMAN_MOCK_EXA_MOUNT:-0}" == "1" ]]; then
+            echo '[{"Mounts":[{"Destination":"/exa"}]}]'
+        else
+            echo '[{"Mounts":[]}]'
+        fi
+        ;;
+    cp)
+        src="${1:-}"
+        dest="${2:-}"
+        if [[ "$src" != "exasol-local-db:/exa/." || -z "${PODMAN_MOCK_OVERLAY_EXA:-}" ]]; then
+            echo "unexpected podman cp arguments: $src $dest" >&2
+            exit 1
+        fi
+        mkdir -p "$dest"
+        cp -a "$PODMAN_MOCK_OVERLAY_EXA/." "$dest/"
+        ;;
     load)
         cat >/dev/null
         echo "Loaded image: docker.io/library/exasol-local-db:test"
@@ -91,6 +113,9 @@ run_init_db_case() {
 
     PATH="$case_dir/mock-bin:$PATH" \
         PODMAN_CALLS="$calls_file" \
+        PODMAN_MOCK_EXISTING_CONTAINER="${PODMAN_MOCK_EXISTING_CONTAINER:-}" \
+        PODMAN_MOCK_EXA_MOUNT="${PODMAN_MOCK_EXA_MOUNT:-}" \
+        PODMAN_MOCK_OVERLAY_EXA="${PODMAN_MOCK_OVERLAY_EXA:-}" \
         EXASOL_VM_INIT_DIR="$case_dir/init" \
         EXASOL_VM_HOST_SHARED_DIR="$case_dir/shared" \
         EXASOL_VM_CONTAINER_STATE_DIR="$case_dir/state" \
@@ -98,6 +123,31 @@ run_init_db_case() {
         sh "$INIT_DB_SCRIPT" >/dev/null
 
     grep '^run ' "$calls_file"
+}
+
+run_init_db_case_expect_failure() {
+    local case_dir="$1"
+    local calls_file="$case_dir/podman-calls.log"
+
+    set +e
+    PATH="$case_dir/mock-bin:$PATH" \
+        PODMAN_CALLS="$calls_file" \
+        PODMAN_MOCK_EXISTING_CONTAINER="${PODMAN_MOCK_EXISTING_CONTAINER:-}" \
+        PODMAN_MOCK_EXA_MOUNT="${PODMAN_MOCK_EXA_MOUNT:-}" \
+        PODMAN_MOCK_OVERLAY_EXA="${PODMAN_MOCK_OVERLAY_EXA:-}" \
+        EXASOL_VM_INIT_DIR="$case_dir/init" \
+        EXASOL_VM_HOST_SHARED_DIR="$case_dir/shared" \
+        EXASOL_VM_CONTAINER_STATE_DIR="$case_dir/state" \
+        INIT_OUTPUT_FILE="$case_dir/init/init-output.json" \
+        sh "$INIT_DB_SCRIPT" >"$case_dir/init-db-output.log" 2>&1
+    local rc=$?
+    set -e
+
+    if [ "$rc" -eq 0 ]; then
+        echo "Expected init-db.sh to fail, but it succeeded" >&2
+        cat "$case_dir/init-db-output.log" >&2
+        exit 1
+    fi
 }
 
 test_enabled_runtime_config() {
@@ -264,6 +314,72 @@ test_quarantines_incomplete_initial_create() {
     assert_contains "$run_line" "params=maxConnectionsLicenseLimit=20"
 }
 
+test_migrates_overlay_exa_before_container_removal() {
+    local case_dir="$1/overlay-migration"
+    prepare_case "$case_dir"
+    jq '.db.params = ["maxConnectionsLicenseLimit=20"]' "$case_dir/init/config.json" > "$case_dir/init/config.json.tmp"
+    mv "$case_dir/init/config.json.tmp" "$case_dir/init/config.json"
+
+    local overlay_exa="$case_dir/overlay-exa"
+    mkdir -p "$overlay_exa"
+    printf 'old config' > "$overlay_exa/exasol.conf"
+    printf 'preserve me' > "$overlay_exa/sentinel.txt"
+
+    local run_line
+    run_line="$(PODMAN_MOCK_EXISTING_CONTAINER=1 PODMAN_MOCK_OVERLAY_EXA="$overlay_exa" run_init_db_case "$case_dir")"
+
+    if [ "$(cat "$case_dir/state/exa/exasol.conf")" != "old config" ]; then
+        echo "Expected exasol.conf to be migrated from overlay-backed container" >&2
+        exit 1
+    fi
+    if [ "$(cat "$case_dir/state/exa/sentinel.txt")" != "preserve me" ]; then
+        echo "Expected /exa data to be migrated from overlay-backed container" >&2
+        exit 1
+    fi
+
+    local calls
+    calls="$(cat "$case_dir/podman-calls.log")"
+    assert_contains "$calls" "cp exasol-local-db:/exa/."
+    assert_contains "$calls" "rm exasol-local-db"
+    assert_contains "$run_line" "-v $case_dir/state/exa:/exa"
+    assert_not_contains "$run_line" "params="
+
+    local stop_line cp_line rm_line
+    stop_line="$(grep -n '^stop exasol-local-db' "$case_dir/podman-calls.log" | head -1 | cut -d: -f1)"
+    cp_line="$(grep -n '^cp exasol-local-db:/exa/.' "$case_dir/podman-calls.log" | head -1 | cut -d: -f1)"
+    rm_line="$(grep -n '^rm exasol-local-db' "$case_dir/podman-calls.log" | head -1 | cut -d: -f1)"
+    if [ -z "$stop_line" ] || [ -z "$cp_line" ] || [ -z "$rm_line" ] \
+        || [ "$stop_line" -ge "$cp_line" ] || [ "$cp_line" -ge "$rm_line" ]; then
+        echo "Expected old container to be stopped, copied, then removed during migration" >&2
+        cat "$case_dir/podman-calls.log" >&2
+        exit 1
+    fi
+}
+
+test_blocks_overlay_migration_when_persistent_exa_exists() {
+    local case_dir="$1/overlay-migration-conflict"
+    prepare_case "$case_dir"
+    mkdir -p "$case_dir/state/exa"
+    printf 'new config' > "$case_dir/state/exa/exasol.conf"
+
+    local overlay_exa="$case_dir/overlay-exa"
+    mkdir -p "$overlay_exa"
+    printf 'old config' > "$overlay_exa/exasol.conf"
+
+    PODMAN_MOCK_EXISTING_CONTAINER=1 PODMAN_MOCK_OVERLAY_EXA="$overlay_exa" run_init_db_case_expect_failure "$case_dir"
+
+    local calls
+    calls="$(cat "$case_dir/podman-calls.log")"
+    assert_not_contains "$calls" "stop exasol-local-db"
+    assert_not_contains "$calls" "cp exasol-local-db:/exa/."
+    assert_not_contains "$calls" "rm exasol-local-db"
+    if [ "$(cat "$case_dir/state/exa/exasol.conf")" != "new config" ]; then
+        echo "Expected existing persistent /exa data to be left untouched" >&2
+        exit 1
+    fi
+    assert_contains "$(cat "$case_dir/init-db-output.log")" "refusing to overwrite populated persistent /exa directory"
+}
+
 main() {
     local tmp_dir
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/exasol-local-vm-init-db-test.XXXXXX")"
@@ -276,6 +392,8 @@ main() {
     test_removes_existing_tls_certificates "$tmp_dir"
     test_preserves_existing_runtime_tls_certificates "$tmp_dir"
     test_quarantines_incomplete_initial_create "$tmp_dir"
+    test_migrates_overlay_exa_before_container_removal "$tmp_dir"
+    test_blocks_overlay_migration_when_persistent_exa_exists "$tmp_dir"
 
     echo "init-db version-check tests passed"
 }

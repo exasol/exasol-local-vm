@@ -212,13 +212,26 @@ update_output_ports() {
   log_msg "Updated init output file with database port"
 }
 
+dir_has_entries() {
+  [ -n "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+}
+
+db_container_exists() {
+  podman ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^${DB_CONTAINER_NAME}$"
+}
+
+db_container_has_exa_mount() {
+  podman inspect "$DB_CONTAINER_NAME" 2>/dev/null \
+    | jq -e '.[0].Mounts[]? | select(.Destination == "/exa")' >/dev/null 2>&1
+}
+
 recover_incomplete_initial_create() {
   if [ ! -e "$EXA_INITIAL_CREATE_MARKER" ]; then
     return
   fi
 
   log_msg "Detected incomplete initial DB create marker at $EXA_INITIAL_CREATE_MARKER; quarantining $EXA_DATA_DIR before clean re-initialization"
-  if podman ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^${DB_CONTAINER_NAME}$"; then
+  if db_container_exists; then
     log_msg "Stopping and removing DB container before quarantining incomplete /exa runtime"
     podman stop "$DB_CONTAINER_NAME" 2>/dev/null || true
     podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
@@ -232,6 +245,58 @@ recover_incomplete_initial_create() {
   mkdir -p "$EXA_DATA_DIR"
   sync
   log_msg "Moved incomplete /exa runtime to $FAILED_EXA_DATA_DIR"
+}
+
+migrate_overlay_exa_if_needed() {
+  if ! db_container_exists; then
+    return
+  fi
+  if db_container_has_exa_mount; then
+    return
+  fi
+
+  log_msg "Existing DB container has no /exa bind mount; migrating overlay-backed /exa to $EXA_DATA_DIR before container recreation"
+  if dir_has_entries "$EXA_DATA_DIR"; then
+    log_msg "Error: refusing to overwrite populated persistent /exa directory at $EXA_DATA_DIR while migrating overlay-backed DB container"
+    log_msg "Manual recovery: inspect '${DB_CONTAINER_NAME}:/exa' and $EXA_DATA_DIR, merge the data manually, then remove the old container"
+    exit 1
+  fi
+
+  log_msg "Stopping old DB container before copying overlay-backed /exa"
+  podman stop "$DB_CONTAINER_NAME" 2>/dev/null || true
+
+  MIGRATION_DIR="$STATE_DIR/exa.overlay-migration.$$"
+  MIGRATION_ERROR_FILE="$STATE_DIR/exa.overlay-migration.$$.err"
+  rm -rf "$MIGRATION_DIR"
+  rm -f "$MIGRATION_ERROR_FILE"
+  mkdir -p "$MIGRATION_DIR"
+
+  if ! podman cp "${DB_CONTAINER_NAME}:/exa/." "$MIGRATION_DIR" 2>"$MIGRATION_ERROR_FILE"; then
+    MIGRATION_ERROR=$(cat "$MIGRATION_ERROR_FILE" 2>/dev/null || true)
+    rm -rf "$MIGRATION_DIR"
+    rm -f "$MIGRATION_ERROR_FILE"
+    log_msg "Error: failed to copy /exa from overlay-backed DB container; leaving container untouched. podman cp output: $MIGRATION_ERROR"
+    log_msg "Manual recovery: copy data with 'podman cp ${DB_CONTAINER_NAME}:/exa/. $EXA_DATA_DIR/' before removing the old container"
+    exit 1
+  fi
+  rm -f "$MIGRATION_ERROR_FILE"
+
+  if ! dir_has_entries "$MIGRATION_DIR"; then
+    rm -rf "$MIGRATION_DIR"
+    log_msg "Overlay-backed DB container had no /exa contents to migrate"
+  else
+    cp -a "$MIGRATION_DIR/." "$EXA_DATA_DIR/"
+    rm -rf "$MIGRATION_DIR"
+    sync
+    log_msg "Migrated overlay-backed /exa from existing DB container to $EXA_DATA_DIR"
+  fi
+
+  log_msg "Stopping and removing old DB container so it can be recreated with persistent /exa bind mount"
+  podman stop "$DB_CONTAINER_NAME" 2>/dev/null || true
+  if ! podman rm "$DB_CONTAINER_NAME" 2>/dev/null; then
+    log_msg "Error: failed to remove old DB container after migrating /exa; cannot safely recreate it"
+    exit 1
+  fi
 }
 
 # Stream the DB container's podman logs to the shared directory so they are
@@ -273,6 +338,18 @@ fi
 
 log_msg "Found container tarball: $DB_CONTAINER_TARBALL_NAME"
 
+migrate_overlay_exa_if_needed
+recover_incomplete_initial_create
+
+# Nano's init params=... (and the initial SYS password options) only apply on
+# the first deployment of a fresh /exa runtime; on a populated /exa they're
+# meant to be omitted since the values are already persisted in exasol.conf.
+EXA_FRESH_DEPLOYMENT=true
+if [ -f "$EXA_CONFIG_FILE" ]; then
+  EXA_FRESH_DEPLOYMENT=false
+  log_msg "Existing /exa runtime found at $EXA_DATA_DIR; skipping first-deployment init params"
+fi
+
 # Calculate checksum
 CURRENT_SHA=$(sha256sum "$DB_CONTAINER_TARBALL" | cut -d' ' -f1)
 log_msg "Tarball checksum: $CURRENT_SHA"
@@ -300,7 +377,7 @@ if [ "$RELOAD_NEEDED" = "true" ]; then
   log_msg "Cleaning up old DB container and images..."
   
   # Stop and remove the specific DB container if it exists
-  if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
+  if db_container_exists; then
     log_msg "Stopping and removing existing DB container: $DB_CONTAINER_NAME"
     podman stop "$DB_CONTAINER_NAME" 2>/dev/null || true
     podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
@@ -349,7 +426,7 @@ if [ "$RELOAD_NEEDED" = "true" ]; then
 fi
 
 # Check if container is already running (e.g. a prior init-db.sh run this boot)
-if podman ps --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
+if podman ps --format "{{.Names}}" 2>/dev/null | grep -q "^${DB_CONTAINER_NAME}$"; then
   log_msg "Container already running"
   start_db_log_follower
   update_output_ports
@@ -362,20 +439,9 @@ fi
 # an old instance, and doing so risks the Nano entrypoint's interactive
 # "existing certs" confirmation prompt, which has no documented non-interactive
 # override and would hang with no TTY attached.
-if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
+if db_container_exists; then
   log_msg "Removing stopped container to recreate it fresh"
   podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
-fi
-
-recover_incomplete_initial_create
-
-# Nano's init params=... (and the initial SYS password options) only apply on
-# the first deployment of a fresh /exa runtime; on a populated /exa they're
-# meant to be omitted since the values are already persisted in exasol.conf.
-EXA_FRESH_DEPLOYMENT=true
-if [ -f "$EXA_CONFIG_FILE" ]; then
-  EXA_FRESH_DEPLOYMENT=false
-  log_msg "Existing /exa runtime found at $EXA_DATA_DIR; skipping first-deployment init params"
 fi
 
 # Use the predictable tagged image name
