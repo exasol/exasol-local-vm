@@ -142,6 +142,43 @@ func TestWriteVersionCheckRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestRefreshInitDBScriptUpdatesOnlyDatabaseInitializer(t *testing.T) {
+	sharedDir := t.TempDir()
+	initDir := filepath.Join(sharedDir, "init")
+	if err := os.MkdirAll(initDir, 0755); err != nil {
+		t.Fatalf("failed to create init directory: %v", err)
+	}
+
+	initDBPath := filepath.Join(initDir, "init-db.sh")
+	if err := os.WriteFile(initDBPath, []byte("old initializer"), 0644); err != nil {
+		t.Fatalf("failed to seed old init-db.sh: %v", err)
+	}
+	sshKeyPath := filepath.Join(sharedDir, "authorized_keys")
+	const sshKey = "preserve this SSH key\n"
+	if err := os.WriteFile(sshKeyPath, []byte(sshKey), 0600); err != nil {
+		t.Fatalf("failed to seed authorized_keys: %v", err)
+	}
+
+	if err := refreshInitDBScript(sharedDir); err != nil {
+		t.Fatalf("refreshInitDBScript() error = %v", err)
+	}
+
+	updatedScript, err := os.ReadFile(initDBPath)
+	if err != nil {
+		t.Fatalf("failed to read refreshed init-db.sh: %v", err)
+	}
+	if string(updatedScript) == "old initializer" || len(updatedScript) == 0 {
+		t.Fatalf("init-db.sh was not refreshed")
+	}
+	preservedKey, err := os.ReadFile(sshKeyPath)
+	if err != nil {
+		t.Fatalf("failed to read authorized_keys: %v", err)
+	}
+	if string(preservedKey) != sshKey {
+		t.Fatalf("authorized_keys changed during init-db.sh refresh: got %q", preservedKey)
+	}
+}
+
 func TestWaitForSSHServiceAcceptsSSHBanner(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
