@@ -1,7 +1,7 @@
 # Copyright 2026 Exasol AG
 # SPDX-License-Identifier: MIT
 
-FROM fedora
+FROM fedora:44
 
 RUN dnf install -y \
     cpio \
