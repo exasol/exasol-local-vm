@@ -1,7 +1,7 @@
 # Copyright 2026 Exasol AG
 # SPDX-License-Identifier: MIT
 
-FROM alpine AS base
+FROM alpine:3.22 AS base
 
 ### Install dependencies
 
