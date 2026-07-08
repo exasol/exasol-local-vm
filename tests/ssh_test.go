@@ -61,60 +61,9 @@ func TestSSHKeyGeneration(t *testing.T) {
 	}
 }
 
-// TestSSHPortAvailableAfterStart verifies that the VM exposes an SSH listener
-// on the loopback forwarder port reported in the init output after `launcher start`.
-func TestSSHPortAvailableAfterStart(t *testing.T) {
-	requireIntegration(t)
-
-	f := NewLauncherFixture(t)
-	defer f.Cleanup()
-
-	f.Init()
-	f.StartVM(2, 4096, 10)
-
-	sshPort := readSSHPortFromVMState(t, f)
-	addr := fmt.Sprintf("127.0.0.1:%d", sshPort)
-
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
-	if err != nil {
-		t.Fatalf("failed to dial forwarded SSH port %s: %v", addr, err)
-	}
-	defer conn.Close()
-
-	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		t.Fatalf("failed to set read deadline: %v", err)
-	}
-
-	banner := make([]byte, 256)
-	n, err := conn.Read(banner)
-	if err != nil {
-		t.Fatalf("failed to read SSH banner from %s: %v", addr, err)
-	}
-	if !strings.HasPrefix(string(banner[:n]), "SSH-") {
-		t.Fatalf("unexpected SSH banner from %s: %q", addr, string(banner[:n]))
-	}
-}
-
-// TestSSHLoginWithGeneratedKey verifies that a shell command can be executed
-// inside the VM over SSH using the key pair produced by `launcher init`.
-func TestSSHLoginWithGeneratedKey(t *testing.T) {
-	requireIntegration(t)
-
-	f := NewLauncherFixture(t)
-	defer f.Cleanup()
-
-	f.Init()
-	f.StartVM(2, 4096, 10)
-
-	output := strings.TrimSpace(runSSHCommand(t, f, "echo hello"))
-	if output != "hello" {
-		t.Fatalf("unexpected SSH command output: got %q, want %q", output, "hello")
-	}
-}
-
-// TestSSHPortForwarding verifies that the loopback TCP forwarder correctly
-// proxies a connection from the host into the guest network.
-func TestSSHPortForwarding(t *testing.T) {
+// TestSSHConnectivityAfterStart verifies the SSH listener, generated-key login,
+// and loopback TCP forwarding with a single VM boot.
+func TestSSHConnectivityAfterStart(t *testing.T) {
 	requireIntegration(t)
 
 	f := NewLauncherFixture(t)
@@ -126,32 +75,62 @@ func TestSSHPortForwarding(t *testing.T) {
 	forwardedPort := readSSHPortFromVMState(t, f)
 	addr := fmt.Sprintf("127.0.0.1:%d", forwardedPort)
 
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
-	if err != nil {
-		t.Fatalf("failed to dial forwarded port %s: %v", addr, err)
-	}
-	defer conn.Close()
+	t.Run("ssh listener exposes banner", func(t *testing.T) {
+		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+		if err != nil {
+			t.Fatalf("failed to dial forwarded SSH port %s: %v", addr, err)
+		}
+		defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		t.Fatalf("failed to set deadline: %v", err)
-	}
+		if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			t.Fatalf("failed to set read deadline: %v", err)
+		}
 
-	buf := make([]byte, 256)
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("failed to read server greeting from %s: %v", addr, err)
-	}
-	if !strings.HasPrefix(string(buf[:n]), "SSH-") {
-		t.Fatalf("unexpected server greeting on forwarded port %s: %q", addr, string(buf[:n]))
-	}
+		banner := make([]byte, 256)
+		n, err := conn.Read(banner)
+		if err != nil {
+			t.Fatalf("failed to read SSH banner from %s: %v", addr, err)
+		}
+		if !strings.HasPrefix(string(banner[:n]), "SSH-") {
+			t.Fatalf("unexpected SSH banner from %s: %q", addr, string(banner[:n]))
+		}
+	})
 
-	if _, err := io.WriteString(conn, "SSH-2.0-integration-test\r\n"); err != nil {
-		t.Fatalf("failed to write client banner to %s: %v", addr, err)
-	}
+	t.Run("generated key can log in", func(t *testing.T) {
+		output := strings.TrimSpace(runSSHCommand(t, f, "echo hello"))
+		if output != "hello" {
+			t.Fatalf("unexpected SSH command output: got %q, want %q", output, "hello")
+		}
+	})
 
-	if _, err := runSSHCommandCapture(t, f, "true"); err != nil {
-		t.Fatalf("forwarded SSH command failed: %v", err)
-	}
+	t.Run("loopback forwarder proxies SSH", func(t *testing.T) {
+		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+		if err != nil {
+			t.Fatalf("failed to dial forwarded port %s: %v", addr, err)
+		}
+		defer conn.Close()
+
+		if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			t.Fatalf("failed to set deadline: %v", err)
+		}
+
+		buf := make([]byte, 256)
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Fatalf("failed to read server greeting from %s: %v", addr, err)
+		}
+		if !strings.HasPrefix(string(buf[:n]), "SSH-") {
+			t.Fatalf("unexpected server greeting on forwarded port %s: %q", addr, string(buf[:n]))
+		}
+
+		if _, err := io.WriteString(conn, "SSH-2.0-integration-test\r\n"); err != nil {
+			t.Fatalf("failed to write client banner to %s: %v", addr, err)
+		}
+
+		if _, err := runSSHCommandCapture(t, f, "true"); err != nil {
+			t.Fatalf("forwarded SSH command failed: %v", err)
+		}
+	})
 }
 
 func runSSHCommandCapture(t *testing.T, f *LauncherFixture, command string) (string, error) {
