@@ -323,6 +323,7 @@ func createSparseDataDisk(path string, sizeGB int) error {
 
 // LoopbackForwarder forwards TCP connections from host to guest
 type LoopbackForwarder struct {
+	name       string
 	listener   net.Listener
 	guestHost  string
 	guestPort  int
@@ -333,7 +334,7 @@ type LoopbackForwarder struct {
 
 // StartLoopbackForwarder starts a TCP proxy from hostPort to guestHost:guestPort
 // If hostPort is 0, the OS will allocate a free port dynamically
-func StartLoopbackForwarder(ctx context.Context, hostPort int, guestHost string, guestPort int) (*LoopbackForwarder, error) {
+func StartLoopbackForwarder(ctx context.Context, name string, hostPort int, guestHost string, guestPort int) (*LoopbackForwarder, error) {
 	listener, err := (&net.ListenConfig{}).Listen(
 		ctx,
 		"tcp",
@@ -344,6 +345,7 @@ func StartLoopbackForwarder(ctx context.Context, hostPort int, guestHost string,
 	}
 
 	forwarder := &LoopbackForwarder{
+		name:      name,
 		listener:  listener,
 		guestHost: guestHost,
 		guestPort: guestPort,
@@ -352,6 +354,49 @@ func StartLoopbackForwarder(ctx context.Context, hostPort int, guestHost string,
 	go forwarder.acceptLoop(ctx)
 
 	return forwarder, nil
+}
+
+// classifyDialErr turns a raw dial error into the small state vocabulary
+// ("reachable", "refused", "blocked", or "timeout") reported over the status
+// socket, rather than exposing OS-specific errors.
+func classifyDialErr(err error) string {
+	if err == nil {
+		return "reachable"
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return "refused"
+	}
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return "blocked"
+	}
+
+	// Unrecognized failure: signal a problem rather than silently
+	// reporting reachable.
+	return "blocked"
+}
+
+// Probe dials the guest address on its own, independent of any real client
+// connection, so health-check can report state even when nothing is
+// currently forwarding traffic through this port.
+func (f *LoopbackForwarder) Probe(ctx context.Context, timeout time.Duration) string {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", fmt.Sprintf("%s:%d", f.guestHost, f.guestPort))
+	if err == nil {
+		conn.Close()
+	}
+
+	return classifyDialErr(err)
 }
 
 // Port returns the actual host port being listened on
@@ -403,6 +448,8 @@ func (f *LoopbackForwarder) proxyConnection(ctx context.Context, clientConn net.
 		fmt.Sprintf("%s:%d", f.guestHost, f.guestPort),
 	)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] Warning: %s forwarder could not reach guest %s:%d (%s): %v\n",
+			time.Now().Format("15:04:05"), f.name, f.guestHost, f.guestPort, classifyDialErr(err), err)
 		return
 	}
 	defer guestConn.Close()
@@ -569,6 +616,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "                                        is not supported.")
 		fmt.Fprintln(os.Stderr, "  stop                              Stop running VM")
 		fmt.Fprintln(os.Stderr, "  status                            Print JSON {\"running\": bool}")
+		fmt.Fprintln(os.Stderr, "  health-check                      Print JSON {\"ports\": {\"<name>\": {\"state\": ...}}}")
+		fmt.Fprintln(os.Stderr, "                                    after freshly probing every forwarded port")
 		fmt.Fprintln(os.Stderr, "  resize-data <size>                Resize data disk to SIZE GB (VM must be stopped)")
 		os.Exit(1)
 	}
@@ -638,6 +687,8 @@ func main() {
 		err = stopCmd()
 	case "status":
 		err = statusCmd()
+	case "health-check":
+		err = healthCheckCmd()
 	case "resize-data":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: mac-runner resize-data <new_size_gb>")
@@ -1453,7 +1504,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 		var forwarder *LoopbackForwarder
 		if overridePort, hasOverride := portOverrides[portName]; hasOverride {
 			// User specified an exact host port — hard failure if it cannot be bound.
-			forwarder, err = StartLoopbackForwarder(ctx, overridePort, vmIP, guestPort)
+			forwarder, err = StartLoopbackForwarder(ctx, portName, overridePort, vmIP, guestPort)
 			if err != nil {
 				for _, f := range forwarders {
 					f.Close()
@@ -1463,9 +1514,9 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 			}
 		} else {
 			// Default: try same port as the VM, fall back to OS-assigned.
-			forwarder, err = StartLoopbackForwarder(ctx, guestPort, vmIP, guestPort)
+			forwarder, err = StartLoopbackForwarder(ctx, portName, guestPort, vmIP, guestPort)
 			if err != nil {
-				forwarder, err = StartLoopbackForwarder(ctx, 0, vmIP, guestPort)
+				forwarder, err = StartLoopbackForwarder(ctx, portName, 0, vmIP, guestPort)
 			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
@@ -1474,6 +1525,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 		}
 
 		forwarders[portName] = forwarder
+		registerForwarder(portName, forwarder)
 		hostPort := forwarder.Port()
 		hostPorts[portName] = hostPort
 		fmt.Printf("%s forwarding: 127.0.0.1:%d -> %s:%d\n", portName, hostPort, vmIP, guestPort)
@@ -1535,9 +1587,78 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	return nil
 }
 
-// startStatusListener opens a Unix domain socket and serves {"request":"status"}
-// queries with {"status":"running"} for as long as the daemon is alive.
-// Stale sockets from a previous run are removed on entry.
+const (
+	// healthCheckPerPortTimeout bounds a single forwarder's probe dial, so a
+	// blocked/hanging guest connection cannot stall the whole health-check.
+	healthCheckPerPortTimeout = 2 * time.Second
+	// healthCheckConnDeadline bounds the whole health-check request/response,
+	// generous enough for every forwarder's probe to run concurrently and
+	// still finish comfortably inside it.
+	healthCheckConnDeadline = 10 * time.Second
+	// statusConnDeadline bounds the cheap, non-probing "status" request.
+	statusConnDeadline = 5 * time.Second
+)
+
+var (
+	forwarderRegistryMu sync.RWMutex
+	forwarderRegistry   = map[string]*LoopbackForwarder{}
+)
+
+// registerForwarder makes a forwarder visible to health-check requests on
+// the status socket, keyed by its service name (e.g. "ssh", "db", "ui").
+func registerForwarder(name string, forwarder *LoopbackForwarder) {
+	forwarderRegistryMu.Lock()
+	defer forwarderRegistryMu.Unlock()
+	forwarderRegistry[name] = forwarder
+}
+
+func forwarderSnapshot() map[string]*LoopbackForwarder {
+	forwarderRegistryMu.RLock()
+	defer forwarderRegistryMu.RUnlock()
+
+	snapshot := make(map[string]*LoopbackForwarder, len(forwarderRegistry))
+	for name, forwarder := range forwarderRegistry {
+		snapshot[name] = forwarder
+	}
+
+	return snapshot
+}
+
+// portHealthResponse is the per-port shape returned by a health-check request.
+type portHealthResponse struct {
+	State string `json:"state"`
+}
+
+// probeForwarders always dials fresh rather than returning each forwarder's
+// last-observed state, so a port nothing has recently connected through
+// (e.g. SSH during a plain start/connect) still gets a current answer.
+func probeForwarders(ctx context.Context) map[string]portHealthResponse {
+	snapshot := forwarderSnapshot()
+	result := make(map[string]portHealthResponse, len(snapshot))
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for name, forwarder := range snapshot {
+		wg.Add(1)
+		go func(name string, forwarder *LoopbackForwarder) {
+			defer wg.Done()
+			state := forwarder.Probe(ctx, healthCheckPerPortTimeout)
+			mu.Lock()
+			result[name] = portHealthResponse{State: state}
+			mu.Unlock()
+		}(name, forwarder)
+	}
+	wg.Wait()
+
+	return result
+}
+
+// startStatusListener serves {"request":"status"} -> {"status":"running"}
+// and {"request":"health-check"} -> {"ports": {"<name>": {"state": "..."}}}
+// on a Unix domain socket. health-check is kept separate from status, and
+// only dials out when explicitly requested, so routine status polling never
+// pays for (or triggers) a network probe. Stale sockets from a previous run
+// are removed on entry.
 func startStatusListener() error {
 	os.Remove(vmSocketPath)
 	ln, err := net.Listen("unix", vmSocketPath)
@@ -1554,14 +1675,24 @@ func startStatusListener() error {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
-				c.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+				c.SetDeadline(time.Now().Add(statusConnDeadline)) //nolint:errcheck
 				var req struct {
 					Request string `json:"request"`
 				}
-				if err := json.NewDecoder(c).Decode(&req); err != nil || req.Request != "status" {
+				if err := json.NewDecoder(c).Decode(&req); err != nil {
 					return
 				}
-				json.NewEncoder(c).Encode(map[string]string{"status": "running"}) //nolint:errcheck
+
+				switch req.Request {
+				case "status":
+					json.NewEncoder(c).Encode(map[string]string{"status": "running"}) //nolint:errcheck
+				case "health-check":
+					c.SetDeadline(time.Now().Add(healthCheckConnDeadline)) //nolint:errcheck
+					ports := probeForwarders(context.Background())
+					json.NewEncoder(c).Encode(map[string]any{"ports": ports}) //nolint:errcheck
+				default:
+					return
+				}
 			}(conn)
 		}
 	}()
@@ -1588,6 +1719,49 @@ func isVMRunning() bool {
 		return false
 	}
 	return resp.Status == "running"
+}
+
+// queryHealthCheck asks the daemon to perform a fresh reachability probe of
+// every forwarded port. The client deadline is kept above
+// healthCheckConnDeadline so the daemon's own bound is what actually
+// determines the outcome, not a client-side race against it.
+func queryHealthCheck() (map[string]portHealthResponse, error) {
+	const clientDeadline = healthCheckConnDeadline + 2*time.Second
+
+	conn, err := net.DialTimeout("unix", vmSocketPath, 2*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to VM socket: %w", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(clientDeadline)) //nolint:errcheck
+
+	if err := json.NewEncoder(conn).Encode(map[string]string{"request": "health-check"}); err != nil {
+		return nil, fmt.Errorf("failed to send health-check request: %w", err)
+	}
+
+	var resp struct {
+		Ports map[string]portHealthResponse `json:"ports"`
+	}
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("failed to decode health-check response: %w", err)
+	}
+
+	return resp.Ports, nil
+}
+
+func healthCheckCmd() error {
+	ports, err := queryHealthCheck()
+	if err != nil {
+		return err
+	}
+
+	out, err := json.Marshal(map[string]any{"ports": ports})
+	if err != nil {
+		return fmt.Errorf("failed to marshal health-check result: %w", err)
+	}
+	fmt.Println(string(out))
+
+	return nil
 }
 
 func statusCmd() error {
