@@ -1,12 +1,14 @@
 // Copyright 2026 Exasol AG
 // SPDX-License-Identifier: MIT
 
-//go:build darwin
+//go:build darwin || windows
 
-// Package integration contains end-to-end tests for the mac-runner launcher binary.
-// Tests require the notarized artifact zip produced by the build-packages CI workflow.
-// By default the fixture looks for ../dist/mac-runner-aarch64.zip (the path the
-// workflow writes it to); override with the LAUNCHER_ZIP env var.
+// Package integration contains end-to-end tests for the launcher binaries.
+// Tests require the notarized artifact zip produced by the build-packages CI
+// workflow. By default the fixture looks for the current platform's zip under
+// ../dist/; override with the LAUNCHER_ZIP env var. Platform-specific bits
+// (default zip path, binary name, SSH/data-disk helpers) live in
+// fixture_darwin_test.go and fixture_windows_test.go.
 package integration
 
 import (
@@ -17,9 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -35,9 +35,17 @@ type LauncherFixture struct {
 	t         *testing.T
 }
 
-// NewLauncherFixture locates the mac-runner-aarch64.zip artifact, unzips it into
-// a fresh temporary directory, and returns a ready-to-use fixture.
-// If the zip cannot be found the test is skipped.
+// vmState is the on-disk shape of vm-state.json (the subset the tests care
+// about). Only .ports is guaranteed populated on all platforms; on mac it
+// also carries an "ssh" key which is absent on windows.
+type vmState struct {
+	Ports map[string]int `json:"ports"`
+}
+
+// NewLauncherFixture locates the platform-appropriate launcher zip
+// (launcherZipDefault + LAUNCHER_ZIP env var), unzips it into a fresh
+// temporary directory, and returns a ready-to-use fixture. If the zip
+// cannot be found the test is skipped.
 func NewLauncherFixture(t *testing.T) *LauncherFixture {
 	t.Helper()
 
@@ -47,7 +55,7 @@ func NewLauncherFixture(t *testing.T) *LauncherFixture {
 
 	zipPath := findLauncherZip(t)
 
-	workDir, err := os.MkdirTemp("", "mac-runner-test-*")
+	workDir, err := os.MkdirTemp("", "launcher-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp work dir: %v", err)
 	}
@@ -57,10 +65,12 @@ func NewLauncherFixture(t *testing.T) *LauncherFixture {
 		t.Fatalf("failed to unzip launcher artifact %s: %v", zipPath, err)
 	}
 
-	binaryPath := filepath.Join(workDir, "launcher")
+	binaryPath := filepath.Join(workDir, launcherBinaryName)
+	// os.Chmod on windows only affects the read-only attribute (which we
+	// do not need to touch on a fresh extract), but the call is harmless.
 	if err := os.Chmod(binaryPath, 0755); err != nil {
 		os.RemoveAll(workDir)
-		t.Fatalf("failed to chmod launcher binary: %v", err)
+		t.Fatalf("failed to chmod launcher binary %s: %v", binaryPath, err)
 	}
 
 	return &LauncherFixture{
@@ -70,15 +80,14 @@ func NewLauncherFixture(t *testing.T) *LauncherFixture {
 	}
 }
 
-// Init runs `launcher init` in WorkDir, extracting the embedded VM package and
-// init assets and generating an SSH key pair.
+// Init runs `launcher init` in WorkDir.
 func (f *LauncherFixture) Init() {
 	f.t.Helper()
 	f.run("init")
 }
 
 // StartVM runs `launcher start <cpu> <ramMB> <dataSizeGB>` and waits for it to
-// return. Marks the VM as running so Cleanup will call Stop.
+// return. Marks the launcher as running so Cleanup will call Stop.
 func (f *LauncherFixture) StartVM(cpu, ramMB, dataSizeGB int) {
 	f.t.Helper()
 	f.run("start",
@@ -104,7 +113,7 @@ func (f *LauncherFixture) StartVMWithPorts(cpu, ramMB, dataSizeGB int, ports str
 
 // StartVMExpectError runs `launcher start` with the given extra flags/args and
 // returns any error rather than fataling, so callers can assert on failure cases.
-// The VM is not marked as running regardless of outcome.
+// The launcher is not marked as running regardless of outcome.
 func (f *LauncherFixture) StartVMExpectError(cpu, ramMB, dataSizeGB int, extraArgs ...string) error {
 	f.t.Helper()
 	args := append([]string{"start"}, extraArgs...)
@@ -128,7 +137,8 @@ func (f *LauncherFixture) StopVM() {
 	f.vmRunning = false
 }
 
-// Status runs `launcher status` and returns whether the VM reports itself as running.
+// Status runs `launcher status` and returns whether the launcher reports the
+// container as running.
 func (f *LauncherFixture) Status() bool {
 	f.t.Helper()
 	cmd := exec.Command(f.BinaryPath, "status")
@@ -146,29 +156,6 @@ func (f *LauncherFixture) Status() bool {
 	return result.Running
 }
 
-// KillVM sends SIGKILL to the daemon process identified by vm.pid.
-// Use this to simulate an unclean shutdown; prefer StopVM for graceful stops.
-func (f *LauncherFixture) KillVM() {
-	f.t.Helper()
-	pidPath := filepath.Join(f.WorkDir, "vm.pid")
-	pidData, err := os.ReadFile(pidPath)
-	if err != nil {
-		f.t.Fatalf("KillVM: failed to read %s: %v", pidPath, err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
-	if err != nil {
-		f.t.Fatalf("KillVM: invalid pid in %s: %v", pidPath, err)
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		f.t.Fatalf("KillVM: failed to find process %d: %v", pid, err)
-	}
-	if err := proc.Signal(syscall.SIGKILL); err != nil {
-		f.t.Fatalf("KillVM: failed to SIGKILL process %d: %v", pid, err)
-	}
-	f.vmRunning = false
-}
-
 // VMState reads and parses vm-state.json from WorkDir.
 func (f *LauncherFixture) VMState() vmState {
 	f.t.Helper()
@@ -183,76 +170,29 @@ func (f *LauncherFixture) VMState() vmState {
 	return state
 }
 
-// SSHCaptureDiagnostics SSHes into the running VM and collects diagnostic
-// information (dmesg, Podman state, container logs) into failures/<testName>/diagnostics.txt.
-// Best-effort: logs warnings on error rather than fataling. Safe to call even
-// if the VM never got far enough to write vm-state.json (e.g. Cleanup running
-// after an early failure), unlike VMState which fatals when it's missing.
-func (f *LauncherFixture) SSHCaptureDiagnostics(testName string) {
+// ResizeData runs `launcher resize-data <newSizeGB>` and returns any error.
+// The launcher's stderr is included in the returned error so callers can
+// inspect the human-readable rejection message (e.g. "shrinking is not supported").
+func (f *LauncherFixture) ResizeData(newSizeGB int) error {
 	f.t.Helper()
-	stateData, err := os.ReadFile(filepath.Join(f.WorkDir, "vm-state.json"))
-	if err != nil {
-		if !os.IsNotExist(err) {
-			f.t.Logf("SSHCaptureDiagnostics: could not read vm-state.json: %v", err)
-		}
-		return
-	}
-	var state vmState
-	if err := json.Unmarshal(stateData, &state); err != nil {
-		f.t.Logf("SSHCaptureDiagnostics: could not parse vm-state.json: %v", err)
-		return
-	}
-	sshPort := state.Ports["ssh"]
-	if sshPort == 0 {
-		f.t.Logf("SSHCaptureDiagnostics: no ssh port in vm-state.json, skipping")
-		return
-	}
-	dest := filepath.Join("failures", testName)
-	if err := os.MkdirAll(dest, 0755); err != nil {
-		f.t.Logf("SSHCaptureDiagnostics: could not create dir %s: %v", dest, err)
-		return
-	}
-	const script = `set +e
-echo '=== dmesg ==='
-dmesg
-echo '=== /proc/mounts ==='
-cat /proc/mounts
-echo '=== df -h ==='
-df -h
-echo '=== podman info ==='
-podman info
-echo '=== podman ps -a ==='
-podman ps -a
-echo '=== podman inspect exasol-local-db ==='
-podman inspect exasol-local-db 2>&1
-echo '=== podman logs exasol-local-db ==='
-podman logs exasol-local-db 2>&1`
-	cmd := exec.Command("ssh",
-		"-i", f.SSHKeyPath(),
-		"-p", strconv.Itoa(sshPort),
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes",
-		"root@127.0.0.1",
-		fmt.Sprintf("sh -c %s", shellQuote(script)),
-	)
+	cmd := exec.Command(f.BinaryPath, "resize-data", fmt.Sprintf("%d", newSizeGB))
 	cmd.Dir = f.WorkDir
 	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		f.t.Logf("resize-data output:\n%s", strings.TrimSpace(string(out)))
+	}
 	if err != nil {
-		f.t.Logf("SSHCaptureDiagnostics: ssh error: %v", err)
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
-	diagPath := filepath.Join(dest, "diagnostics.txt")
-	if writeErr := os.WriteFile(diagPath, out, 0644); writeErr != nil {
-		f.t.Logf("SSHCaptureDiagnostics: could not write %s: %v", diagPath, writeErr)
-		return
-	}
-	f.t.Logf("SSHCaptureDiagnostics: saved %s (%d bytes)", diagPath, len(out))
+	return nil
 }
 
-// CopyLogsToFailuresDir copies VM log files and the guest-shared directory's
-// logs from WorkDir into failures/<testName>/ so they survive fixture cleanup
-// and can be inspected after a test failure.
+// CopyLogsToFailuresDir copies launcher log files and any host-shared
+// directory contents from WorkDir into failures/<testName>/ so they survive
+// fixture cleanup and can be inspected after a test failure. Files that do
+// not exist on this platform are silently skipped, so the same helper works
+// unchanged on mac (vm.log, vm-console.log, vm-shared/) and windows
+// (vm-state.json only).
 func (f *LauncherFixture) CopyLogsToFailuresDir(testName string) {
 	f.t.Helper()
 	dest := filepath.Join("failures", testName)
@@ -264,11 +204,8 @@ func (f *LauncherFixture) CopyLogsToFailuresDir(testName string) {
 		f.copyFileToDir(filepath.Join(f.WorkDir, name), filepath.Join(dest, name))
 	}
 
-	// vm-shared is the VirtioFS folder shared with the guest; it holds
-	// init.log, the DB container's streamed logs, and other guest-written
-	// state that's often the only record of what happened during a boot that
-	// never came up (e.g. SSH never answering). Skip vm-shared/init, which is
-	// just the (large, static) assets the host copied in, not guest output.
+	// vm-shared is the mac VirtioFS folder shared with the guest. Skipped
+	// entirely on windows because the directory does not exist.
 	sharedDir := filepath.Join(f.WorkDir, "vm-shared")
 	sharedDest := filepath.Join(dest, "vm-shared")
 	entries, err := os.ReadDir(sharedDir)
@@ -338,44 +275,28 @@ func (f *LauncherFixture) copyPathToDir(src, dst string) {
 	})
 }
 
-// ResizeData runs `launcher resize-data <newSizeGB>` and returns any error.
-// The launcher's stderr is included in the returned error so callers can
-// inspect the human-readable rejection message (e.g. "shrinking is not supported").
-func (f *LauncherFixture) ResizeData(newSizeGB int) error {
-	f.t.Helper()
-	cmd := exec.Command(f.BinaryPath, "resize-data", fmt.Sprintf("%d", newSizeGB))
-	cmd.Dir = f.WorkDir
-	out, err := cmd.CombinedOutput()
-	if len(out) > 0 {
-		f.t.Logf("resize-data output:\n%s", strings.TrimSpace(string(out)))
-	}
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// Cleanup captures diagnostics for a failed test (while the VM can still be
-// reached over SSH), then stops the VM if it is running and removes WorkDir.
+// Cleanup captures diagnostics for a failed test (while the launcher / VM can
+// still be reached), then stops the launcher if it is running and removes
+// WorkDir. SSHCaptureDiagnostics is a no-op on windows.
 func (f *LauncherFixture) Cleanup() {
 	if f.t.Failed() {
 		f.SSHCaptureDiagnostics(f.t.Name())
 		f.CopyLogsToFailuresDir(f.t.Name())
 	}
 	if f.vmRunning {
-		_ = exec.Command(f.BinaryPath, "stop").Run()
+		// cmd.Dir MUST be f.WorkDir so the launcher's stopCmd can find
+		// resources/config.json (relative path). Without it, stopCmd
+		// prints "No resources/config.json; nothing to stop." and
+		// no-ops — which on windows leaks the globally-named
+		// exasol-local-db container into the next test and cascades
+		// into "Container is already running" failures for
+		// TestPortOverride*, TestStatusLifecycle, and TestDBConnection.
+		// StopVM/run() sets cmd.Dir; this fallback path must too.
+		cmd := exec.Command(f.BinaryPath, "stop")
+		cmd.Dir = f.WorkDir
+		_ = cmd.Run()
 	}
 	os.RemoveAll(f.WorkDir)
-}
-
-// SSHKeyPath returns the path to the generated private key after Init.
-func (f *LauncherFixture) SSHKeyPath() string {
-	return filepath.Join(f.WorkDir, "vm-ssh-key")
-}
-
-// DataDiskPath returns the expected path of the VM data disk after StartVM.
-func (f *LauncherFixture) DataDiskPath() string {
-	return filepath.Join(f.WorkDir, "vm", "data.img")
 }
 
 // requireIntegration is kept as a no-op helper for compatibility with existing
@@ -397,8 +318,9 @@ func (f *LauncherFixture) run(args ...string) {
 	}
 }
 
-// launcherBinaryPath returns the path to the launcher binary, preferring the
-// LAUNCHER_BINARY env var and falling back to the default build output location.
+// findLauncherZip returns the path to the platform-appropriate launcher zip.
+// Honors the LAUNCHER_ZIP env var override; falls back to launcherZipDefault
+// (defined per platform in fixture_{darwin,windows}_test.go).
 func findLauncherZip(t *testing.T) string {
 	t.Helper()
 
@@ -409,17 +331,15 @@ func findLauncherZip(t *testing.T) string {
 		t.Skipf("LAUNCHER_ZIP=%q not found; skipping", p)
 	}
 
-	// Default: dist/mac-runner-aarch64.zip at the repo root.
 	// go test sets the working directory to the package directory (tests/),
 	// so ../dist/ resolves to the repo root's dist/ directory.
-	defaultPath := filepath.Join("..", "dist", "mac-runner-aarch64.zip")
-	if _, err := os.Stat(defaultPath); err != nil {
+	if _, err := os.Stat(launcherZipDefault); err != nil {
 		t.Skipf(
-			"launcher zip not found at %s; download the mac-launcher artifact from CI or set LAUNCHER_ZIP",
-			defaultPath,
+			"launcher zip not found at %s; download the launcher artifact from CI or set LAUNCHER_ZIP",
+			launcherZipDefault,
 		)
 	}
-	return defaultPath
+	return launcherZipDefault
 }
 
 // unzipTo extracts all files from zipPath into destDir, preserving permissions.

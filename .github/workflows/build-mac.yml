@@ -1,9 +1,16 @@
 # Copyright 2026 Exasol AG
 # SPDX-License-Identifier: MIT
 
-name: Build Packages
+name: Build Mac Launcher
 
 on:
+  # TEMPORARY (Phase 15 iteration): trigger on push to this feature
+  # branch so we can test the workflow without needing build-mac.yml to
+  # exist on the default branch (a GitHub prerequisite for
+  # workflow_dispatch). REMOVE this `push:` block before merging to main.
+  push:
+    branches:
+      - gb.windows-launcher
   workflow_dispatch:
     inputs:
       skip-linux-build:
@@ -15,6 +22,15 @@ on:
         type: string
         required: false
   workflow_call:
+    inputs:
+      skip-linux-build:
+        description: 'Skip building Linux packages (use existing artifact)'
+        type: boolean
+        default: false
+      previous-run-id:
+        description: 'Previous workflow run ID to download Linux packages from.'
+        type: string
+        required: false
     secrets:
       IOS_PKCS12_IDENTITY_CERTIFICATE_BASE64_ENCODED:
         required: true
@@ -95,7 +111,7 @@ jobs:
           task download-db-container IMG_ARCH=aarch64
           echo "✓ Container tarball downloaded to release/"
           ls -lh release/exasol-nano-db-aarch64.tar.gz
-      
+
       - name: Verify release artifacts
         run: |
           if [ ! -d release ]; then
@@ -224,7 +240,7 @@ jobs:
             
             # Get list of successful runs and check each one for build-disk-images job
             RUN_IDS=$(gh run list \
-              --workflow build-packages.yml \
+              --workflow build-mac.yml \
               --branch "${{ github.ref_name }}" \
               --status success \
               --limit 20 \
@@ -474,3 +490,4 @@ jobs:
           path: tests/failures
           if-no-files-found: ignore
           retention-days: 7
+
