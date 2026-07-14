@@ -2,39 +2,56 @@
 
 ## Overview
 
-The release process uses a reusable workflow pattern with two workflows:
+The release process uses a reusable-workflow pattern with three workflows:
 
-1. **build-packages.yml** - Reusable workflow that builds all artifacts
-2. **release.yml** - Release workflow that calls build-packages.yml and creates GitHub releases
+1. **build-mac.yml** — Reusable workflow that builds the mac launcher (and its embedded Linux disk image).
+2. **build-windows.yml** — Reusable workflow that builds the windows launcher. Fully independent of `build-mac.yml`; installs podman-for-windows on the runner and pulls the container tarball inline.
+3. **release.yml** — Release workflow that calls both build workflows in parallel and creates GitHub releases.
 
 ## How It Works
 
-### Build Packages Workflow (`build-packages.yml`)
+### Build Mac Launcher Workflow (`build-mac.yml`)
 
 **Triggers:**
-- Manual: `workflow_dispatch` - Can be triggered manually from Actions tab
-- Reusable: `workflow_call` - Can be called by other workflows (like release.yml)
+- Manual: `workflow_dispatch` — Can be triggered manually from the Actions tab, or via `task ci-build-mac-launcher`.
+- Reusable: `workflow_call` — Called by `release.yml`.
 
 **Jobs:**
-1. `build-disk-images` - Builds VM disk images on Ubuntu
-2. `build-mac-launcher` - Builds, signs, and notarizes macOS launcher on macOS runner
+1. `build-disk-images` — Builds VM disk images on Ubuntu (skippable via `skip-linux-build`).
+2. `build-mac-launcher` — Builds, signs, and notarizes the macOS launcher on macOS runner.
+3. `test-mac-launcher` — Runs integration tests on a self-hosted mac ARM64 runner.
 
 **Outputs:**
-- `linux-packages-artifact` - Artifact name for Linux packages
-- `mac-launcher-artifact` - Artifact name for macOS launcher
+- `linux-packages-artifact` — Artifact name for Linux packages.
+- `mac-launcher-artifact` — Artifact name for macOS launcher.
+
+### Build Windows Launcher Workflow (`build-windows.yml`)
+
+**Triggers:**
+- Manual: `workflow_dispatch` — Can be triggered manually, or via `task ci-build-windows-launcher`.
+- Reusable: `workflow_call` — Called by `release.yml`.
+
+**Jobs:**
+1. `build-windows-launcher` — On `windows-latest`: installs podman-for-windows via winget, starts a WSL2 machine, pulls the x86_64 Nano container tarball, builds and signs the launcher.
+2. `test-windows-launcher` — Runs integration tests on `windows-latest`, installing podman-for-windows again on the fresh runner.
+
+**Outputs:**
+- `windows-launcher-artifact` — Artifact name for Windows launcher.
 
 ### Release Workflow (`release.yml`)
 
 **Trigger:**
-- Automatically when you push a version tag (e.g., `v1.0.0`, `v2.1.3`)
+- Automatically when you push a version tag (e.g., `v1.0.0`, `v2.1.3`).
 
 **Jobs:**
-1. `build` - Calls build-packages.yml workflow (inherits secrets)
-2. `create-release` - Downloads artifacts and creates GitHub release
+1. `validate-tag` — Checks the tag matches `vMAJOR.MINOR.PATCH[-pre-release]`.
+2. `build-mac` — Calls `build-mac.yml` (inherits secrets).
+3. `build-windows` — Calls `build-windows.yml` in parallel with `build-mac` (inherits secrets).
+4. `create-release` — Downloads both artifacts and creates the GitHub release.
 
 **Protected Environment:**
-- Uses `environment: release` which requires approval (configure in repository settings)
-- Only has `contents: write` permission for creating releases
+- Uses `environment: release` which requires approval (configure in repository settings).
+- Only has `contents: write` permission for creating releases.
 
 ## Creating a Release
 

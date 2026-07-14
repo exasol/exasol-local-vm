@@ -1,0 +1,501 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
+name: Build Windows Launcher
+
+# Self-contained windows launcher build + test pipeline. Fully
+# independent of build-mac.yml (which builds the mac launcher and its
+# embedded Linux disk image): the container tarball the windows launcher
+# embeds is pulled directly on the windows runner via podman-for-windows,
+# so this workflow has no cross-OS artifact dependencies.
+#
+# The dev helper `task ci-build-windows-launcher` dispatches this
+# workflow. Release.yml calls it via workflow_call in parallel with
+# build-mac.yml.
+
+on:
+  # TEMPORARY (Phase 15 iteration): trigger on push to this feature
+  # branch so we can test the workflow without needing build-windows.yml
+  # to exist on the default branch (a GitHub prerequisite for
+  # workflow_dispatch). REMOVE this `push:` block before merging to main.
+  push:
+    branches:
+      - gb.windows-launcher
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      # SSL.com eSigner cloud code-signing credentials. All optional so
+      # the workflow still runs on PRs from forks (where secrets are not
+      # forwarded) and produces a valid unsigned binary; the sign/verify
+      # steps below are gated on env.ESIGN_USERNAME != ''.
+      ESIGN_USERNAME:
+        required: false
+      ESIGN_PASSWORD:
+        required: false
+      ESIGN_CREDENTIAL_ID:
+        required: false
+      ESIGN_TOTP_SECRET:
+        required: false
+    outputs:
+      windows-launcher-artifact:
+        description: "Name of the Windows launcher artifact"
+        value: ${{ jobs.build-windows-launcher.outputs.artifact-name }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-windows-launcher:
+    runs-on: windows-latest
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-id }}
+
+    # Prefer bash for parity with the mac launcher build's shell
+    # scripting. windows-latest ships Git for Windows which provides
+    # bash + tar + xz + sha256sum.
+    defaults:
+      run:
+        shell: bash
+
+    # Promote the eSigner username secret into a job-level env var so the
+    # sign/verify step-level `if:` conditions can gate on it. GitHub
+    # Actions does NOT allow the `secrets` context in step-level or
+    # job-level `if:` expressions (it rejects the workflow at parse time
+    # with 'Unrecognized named-value: secrets') — but the `env` context
+    # IS allowed in `if:`, and `secrets` IS allowed in `env:` values.
+    # Only the username is promoted here; the actual sign secrets stay
+    # in `secrets.*` and are read directly by the SSLcom action's inputs
+    # so they never appear in the job env (which would leak them into
+    # every subsequent step's process environment).
+    env:
+      ESIGN_USERNAME: ${{ secrets.ESIGN_USERNAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: launcher/windows/go.sum
+
+      - name: Install Task
+        shell: pwsh
+        run: |
+          choco install go-task -y
+          task --version
+
+      - name: Install podman-for-windows
+        # Installs podman + starts a WSL2-backed machine so the
+        # `task download-db-container` step in the build below can
+        # `podman pull --platform linux/amd64` and `podman save` the
+        # x86_64 Nano container tarball directly on this runner. This
+        # replaces the old cross-workflow dependency where the tarball
+        # was pre-staged by build-disk-images on ubuntu.
+        #
+        # CI installs at machine scope (winget's default when running
+        # as admin, which the runner does). The launcher's own runtime
+        # install (Phase 14, ensurePodmanInstalled in main.go) uses
+        # --scope user for the non-admin end-user case.
+        shell: pwsh
+        run: |
+          # Install podman via winget with two hardening measures against
+          # windows-latest's flaky winget behaviour:
+          #  1. --source winget pins the search to the official winget
+          #     community source. Without this, winget falls back to
+          #     'msstore' when the winget source refresh transiently
+          #     fails, and msstore then blocks on an interactive
+          #     'accept geographic region' prompt that even
+          #     --accept-source-agreements does not silence.
+          #  2. Retry loop for the source-refresh flake itself. Symptom
+          #     we hit: 'Failed in attempting to update the source: winget'
+          #     followed by 'No packages were found among the working
+          #     sources.'. Empirically transient — sleeping and retrying
+          #     succeeds within a couple of attempts.
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          $attempt = 0
+          while ($true) {
+            $attempt++
+            Write-Host "winget install attempt $attempt / $maxAttempts"
+            winget install --exact --id RedHat.Podman `
+              --source winget `
+              --silent `
+              --accept-source-agreements `
+              --accept-package-agreements
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -ge $maxAttempts) {
+              Write-Error "winget install failed after $maxAttempts attempts (last exit code $LASTEXITCODE)"
+              exit 1
+            }
+            Write-Host "winget exit code $LASTEXITCODE; sleeping 10 s before retry"
+            Start-Sleep -Seconds 10
+          }
+
+          $podmanDir = "$env:ProgramFiles\RedHat\Podman"
+          if (-not (Test-Path $podmanDir)) {
+            Write-Error "podman install directory not found at $podmanDir"
+            exit 1
+          }
+          $env:PATH = "$podmanDir;$env:PATH"
+          "$podmanDir" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          podman --version
+
+          # windows-latest gives each job a clean VM, so init is always
+          # the first-time path here.
+          podman machine init --disk-size 40
+          # Rootful mode. Bypasses `pasta` for port forwarding and uses
+          # the WSL2 kernel's iptables/nftables path instead. Rootless
+          # + pasta (podman 5.x default) resets TLS handshakes at the
+          # container port on our test image, so long-lived TCP
+          # connections like the Exasol driver's wss:// never complete
+          # ServerHello. See ci-downloads/podman-diagnostics/ from run
+          # 29811407643 for the pasta-side ClientHello -> RST evidence.
+          # `--rootful` does NOT require Windows admin; the podman
+          # machine still runs inside the current user's WSL2, only the
+          # user inside the machine becomes root.
+          podman machine set --rootful
+          podman machine start
+
+      - name: Build windows launcher
+        # `task build-windows-launcher IMG_ARCH=x86_64` chains
+        #   download-db-container → stage-windows-init-assets → build.sh
+        # download-db-container is what needs the podman machine started
+        # by the previous step. Build script is signing-agnostic; signing
+        # runs as a separate step below via the SSLcom composite action
+        # so secrets never touch the shell script. Local developer builds
+        # always produce an unsigned binary.
+        run: task build-windows-launcher IMG_ARCH=x86_64
+
+      - name: Sign windows launcher
+        # Skipped on PR builds from forks (secrets are not passed to
+        # forked workflow runs). External contributors' PRs still
+        # produce a valid unsigned binary in the artifact; the same
+        # build against a trusted branch re-signs it here in place.
+        # env.ESIGN_USERNAME (not secrets.ESIGN_USERNAME) because
+        # Actions rejects the `secrets` context in `if:` expressions.
+        # See the job-level env: block for the promotion.
+        if: env.ESIGN_USERNAME != ''
+        # Pinned to v1.3.2 (release from 2025-12-22). CodeSignTool talks
+        # to SSL.com's HSM: the private key never leaves SSL.com's
+        # infrastructure, and no PFX is materialised on the runner.
+        uses: sslcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        with:
+          command:       sign
+          username:      ${{ secrets.ESIGN_USERNAME }}
+          password:      ${{ secrets.ESIGN_PASSWORD }}
+          credential_id: ${{ secrets.ESIGN_CREDENTIAL_ID }}
+          totp_secret:   ${{ secrets.ESIGN_TOTP_SECRET }}
+          file_path:     ${{ github.workspace }}/release/launcher/windows/x86_64/launcher.exe
+          # override=true overwrites the input file with the signed copy
+          # so the same path can be picked up by the packaging step below.
+          override:      'true'
+
+      - name: Verify Authenticode signature
+        if: env.ESIGN_USERNAME != ''
+        shell: pwsh
+        run: |
+          # signtool.exe is preinstalled with the Windows SDK on the
+          # windows-latest image; discover the newest x64 copy under the
+          # SDK's per-version tree rather than hard-coding a path.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*\x64\signtool.exe' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) {
+            Write-Error "signtool.exe not found under Windows Kits\10\bin"
+            exit 1
+          }
+          Write-Host "Using signtool: $signtool"
+          & $signtool verify /pa /v release/launcher/windows/x86_64/launcher.exe
+
+      - name: Package windows launcher zip
+        shell: pwsh
+        run: |
+          # PowerShell Compress-Archive is the native equivalent of the
+          # mac 'ditto -c -k .' step: pack the contents of the release
+          # directory (launcher.exe and any siblings) at the root of the
+          # zip, not the directory itself.
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive `
+            -Path release/launcher/windows/x86_64/* `
+            -DestinationPath dist/windows-runner-x86_64.zip `
+            -Force
+
+      - name: Compute checksum
+        run: |
+          set -euo pipefail
+          # sha256sum ships with Git for Windows and produces the same
+          # '<hex>  <path>\n' shape as the mac 'shasum -a 256' step, so
+          # downstream verifiers work identically on both platforms.
+          sha256sum dist/windows-runner-x86_64.zip > dist/windows-runner-x86_64.zip.sha256
+          cat dist/windows-runner-x86_64.zip.sha256
+
+      - name: Verify launcher artifacts
+        run: |
+          ls -lh dist/windows-runner-x86_64.zip
+          ls -lh dist/windows-runner-x86_64.zip.sha256
+
+      - name: Upload windows launcher
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-launcher
+          path: |
+            dist/windows-runner-x86_64.zip
+            dist/windows-runner-x86_64.zip.sha256
+          retention-days: 7
+
+  test-windows-launcher:
+    # GitHub-hosted windows-latest, with podman-for-windows installed on
+    # the fly via winget below. See windows-runner-plan.md § "Refactor
+    # Phase 13" for why we prefer this over the earlier self-hosted-
+    # runner plan.
+    runs-on: windows-latest
+    needs: build-windows-launcher
+    if: ${{ always() && needs.build-windows-launcher.result == 'success' }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Install podman-for-windows
+        shell: pwsh
+        run: |
+          # Install the podman CLI via winget. windows-latest ships
+          # winget in PATH; the flags avoid the interactive source /
+          # package agreement prompts.
+          # --source winget + retry loop: see the identical block in
+          # build-windows-launcher above for the rationale.
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          $attempt = 0
+          while ($true) {
+            $attempt++
+            Write-Host "winget install attempt $attempt / $maxAttempts"
+            winget install --exact --id RedHat.Podman `
+              --source winget `
+              --silent `
+              --accept-source-agreements `
+              --accept-package-agreements
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -ge $maxAttempts) {
+              Write-Error "winget install failed after $maxAttempts attempts (last exit code $LASTEXITCODE)"
+              exit 1
+            }
+            Write-Host "winget exit code $LASTEXITCODE; sleeping 10 s before retry"
+            Start-Sleep -Seconds 10
+          }
+
+          # winget doesn't refresh PATH for the current shell, so
+          # persist podman's install location to $GITHUB_PATH for
+          # subsequent steps and add it to our own $env:PATH so
+          # `podman --version` below resolves.
+          $podmanDir = "$env:ProgramFiles\RedHat\Podman"
+          if (-not (Test-Path $podmanDir)) {
+            Write-Error "podman install directory not found at $podmanDir"
+            exit 1
+          }
+          $env:PATH = "$podmanDir;$env:PATH"
+          "$podmanDir" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          podman --version
+
+          # Initialize a fresh WSL2-backed machine with 40 GB of disk.
+          # windows-latest runners give each job a clean VM, so init is
+          # always the first-time path here.
+          podman machine init --disk-size 40
+          # Rootful mode - see the build-windows-launcher job for the
+          # detailed rationale (bypasses pasta's TLS-handshake-reset
+          # bug on rootless port forwarding).
+          podman machine set --rootful
+          podman machine start
+
+      - name: Download windows launcher artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-launcher
+          path: dist
+
+      - name: Install Task
+        shell: pwsh
+        run: |
+          choco install go-task -y
+          task --version
+
+      - name: Ensure podman machine is running
+        run: |
+          set -euo pipefail
+          # Defensive sanity check after the winget install +
+          # `podman machine start` above: fail early if the machine is
+          # not running, rather than waiting for every test to fail via
+          # podman.MachineRunning() inside the launcher.
+          if ! podman machine inspect --format '{{.State}}' | grep -qi '^running$'; then
+            echo "Starting podman machine..."
+            podman machine start
+          fi
+          podman machine inspect --format '{{.State}}'
+
+      - name: Run integration tests
+        run: task test-launcher-integration
+
+      - name: Collect podman diagnostics on failure
+        # Runs only when a prior step failed (typically the integration
+        # tests). Captures podman-side state that the Go fixture cannot
+        # see: container logs, port bindings, machine state, and the
+        # Windows-side view of what's listening on the launcher's
+        # forwarded ports. Everything is written to tests/failures so
+        # it rides along in the test-failure-logs-windows artifact.
+        if: failure()
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $out = "tests/failures/podman-diagnostics"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          Write-Host "=== podman machine inspect ==="
+          podman machine inspect > "$out/machine-inspect.txt" 2>&1
+          Get-Content "$out/machine-inspect.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman ps -a ==="
+          podman ps -a > "$out/ps-a.txt" 2>&1
+          Get-Content "$out/ps-a.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman port exasol-local-db ==="
+          podman port exasol-local-db > "$out/port.txt" 2>&1
+          Get-Content "$out/port.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman logs exasol-local-db (last 500 lines) ==="
+          # --tail keeps the artifact small; full logs would be many MB
+          # for a hung/looping DB init.
+          podman logs --tail 500 exasol-local-db > "$out/container-logs.txt" 2>&1
+          Get-Content "$out/container-logs.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman inspect exasol-local-db ==="
+          podman inspect exasol-local-db > "$out/container-inspect.json" 2>&1
+
+          Write-Host "=== podman volume ls / inspect ==="
+          podman volume ls > "$out/volume-ls.txt" 2>&1
+          podman volume inspect exasol-nano-data > "$out/volume-inspect.json" 2>&1
+
+          Write-Host "=== netstat -ano (Windows host) ==="
+          # What is actually listening on the Windows side of gvproxy?
+          # Filter to the launcher's default DB port (8563) plus any
+          # ephemeral overrides we might have used.
+          netstat -ano | Select-String -Pattern ':8563|:59955' > "$out/netstat.txt"
+          Get-Content "$out/netstat.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== gvproxy processes ==="
+          Get-Process -Name gvproxy -ErrorAction SilentlyContinue |
+            Select-Object Id,ProcessName,Path |
+            Out-File -Encoding utf8 "$out/gvproxy-processes.txt"
+          Get-Content "$out/gvproxy-processes.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== Test-NetConnection 127.0.0.1:8563 ==="
+          $tnc = Test-NetConnection -ComputerName 127.0.0.1 -Port 8563 -InformationLevel Detailed 2>&1 | Out-String
+          $tnc | Out-File -Encoding utf8 "$out/test-netconnection-8563.txt"
+          Write-Host $tnc
+
+          Write-Host "=== Test-NetConnection localhost:8563 ==="
+          $tnc = Test-NetConnection -ComputerName localhost -Port 8563 -InformationLevel Detailed 2>&1 | Out-String
+          $tnc | Out-File -Encoding utf8 "$out/test-netconnection-localhost-8563.txt"
+          Write-Host $tnc
+
+          # Two-vantage probe of the DB's TLS handshake:
+          #   1. From the Windows host via gvproxy ([::1]:8563).
+          #   2. From inside the WSL2 backing VM directly (bypasses gvproxy).
+          #
+          # If (1) fails and (2) succeeds → gvproxy is mangling the TLS
+          # bytes.
+          # If both fail with matching error → DB itself is aborting.
+          # If both succeed → something specific to the Go driver.
+          #
+          # openssl s_client is preferred over curl because it reports the
+          # exact TLS handshake step that fails (ServerHello, cert, key
+          # exchange, ...) rather than a generic 'handshake failed'.
+          #
+          # Native-exe output is captured into a variable then written to
+          # a file explicitly. Earlier attempts used the backtick line
+          # continuation with `*>` redirection which mislabeled outputs
+          # across steps — do NOT reintroduce that pattern.
+
+          function Probe-Tls {
+              param([string]$label, [string]$outFile, [scriptblock]$cmd)
+              Write-Host "=== $label ==="
+              try {
+                  $captured = & $cmd 2>&1 | Out-String
+              } catch {
+                  $captured = "PROBE FAILED: $_"
+              }
+              $captured | Out-File -Encoding utf8 $outFile
+              Write-Host $captured
+          }
+
+          Probe-Tls "curl.exe from Windows host: https://localhost:8563" `
+              "$out/curl-from-windows-host.txt" `
+              { curl.exe -kv --max-time 15 https://localhost:8563/ }
+
+          # openssl.exe is preinstalled on windows-latest via Git for
+          # Windows; falls back to a helpful error if missing.
+          Probe-Tls "openssl s_client from Windows host: localhost:8563" `
+              "$out/openssl-from-windows-host.txt" `
+              {
+                  # -showcerts prints the server's cert chain.
+                  # </dev/null is a Unix idiom — the PowerShell
+                  # equivalent is redirecting from `$null`, which pushes
+                  # EOF on stdin so openssl exits after the handshake.
+                  '' | openssl.exe s_client -connect localhost:8563 -showcerts -brief
+              }
+
+          # WSL-side probes bypass gvproxy entirely — they run inside the
+          # podman-machine-default distro (Fedora CoreOS) and talk
+          # directly to the port the podman machine is publishing on its
+          # own loopback.
+          Probe-Tls "curl from inside WSL2 (podman-machine-default): https://localhost:8563" `
+              "$out/curl-from-wsl.txt" `
+              { wsl.exe --distribution podman-machine-default --exec curl -kv --max-time 15 https://localhost:8563/ }
+
+          Probe-Tls "openssl s_client from inside WSL2 (podman-machine-default): localhost:8563" `
+              "$out/openssl-from-wsl.txt" `
+              {
+                  # -brief keeps output compact; -showcerts is dropped
+                  # here to save space since the openssl-from-windows
+                  # variant above already captures the chain.
+                  wsl.exe --distribution podman-machine-default --exec sh -c "echo '' | openssl s_client -connect localhost:8563 -brief"
+              }
+
+          Probe-Tls "netstat inside WSL2" `
+              "$out/wsl-netstat.txt" `
+              { wsl.exe --distribution podman-machine-default --exec sh -c "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null" }
+
+          Probe-Tls "podman info" `
+              "$out/podman-info.txt" `
+              { podman info }
+
+          Probe-Tls "container HostConfig.PortBindings" `
+              "$out/container-port-bindings.json" `
+              { podman inspect exasol-local-db --format '{{json .HostConfig.PortBindings}}' }
+
+      - name: Upload test failure logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Distinct name from the mac workflow's 'test-failure-logs'
+          # so upload-artifact does not error if both workflows happen
+          # to be running for the same commit.
+          name: test-failure-logs-windows
+          path: tests/failures
+          if-no-files-found: ignore
+          retention-days: 7

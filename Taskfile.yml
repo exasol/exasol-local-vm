@@ -43,7 +43,11 @@ tasks:
       - test "$(sed -n 's/^nano_base_tag=//p' release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata)" = "{{.NANO_BASE_TAG}}"
       - test release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz -nt launcher/assets/download-db-container.sh
     cmds:
-      - NANO_BASE_TAG="{{.NANO_BASE_TAG}}" ./launcher/assets/download-db-container.sh "{{.IMG_ARCH}}"
+      # Prefix with `bash` (not just `./script.sh`) so this works on
+      # Windows too: Task's exec path cannot resolve Unix shebangs, but
+      # bash.exe (Git for Windows, on PATH on windows-latest) can read
+      # the script directly. Same works verbatim on Linux/macOS.
+      - NANO_BASE_TAG="{{.NANO_BASE_TAG}}" bash ./launcher/assets/download-db-container.sh "{{.IMG_ARCH}}"
 
   stage-init-assets:
     desc: Copy database container tarball from release/ to launcher/assets/init for {{.IMG_ARCH}}
@@ -63,6 +67,26 @@ tasks:
       - cmp -s release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata launcher/assets/init/exasol-nano-db.tar.gz.metadata
     cmds:
       - ./launcher/assets/stage-init-assets.sh "{{.IMG_ARCH}}"
+
+  stage-windows-init-assets:
+    desc: Copy database container tarball from release/ to launcher/assets/windows/init for {{.IMG_ARCH}}
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: download-db-container
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    status:
+      - test -f launcher/assets/windows/init/exasol-nano-db.tar.gz
+      - test -f launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata
+      - test launcher/assets/windows/init/exasol-nano-db.tar.gz -nt release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz
+      - cmp -s release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata
+    cmds:
+      # bash prefix so this works on Windows too; see download-db-container above.
+      - bash ./launcher/assets/stage-windows-init-assets.sh "{{.IMG_ARCH}}"
 
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages for {{.IMG_ARCH}}
@@ -140,23 +164,15 @@ tasks:
       - ./host/run/stop-qemu-container.sh
 
   test-launcher-integration:
-    desc: Run launcher integration tests in ./tests
+    desc: |
+      Run launcher integration tests in ./tests. The fixture auto-detects the
+      host platform and looks for the corresponding launcher zip under
+      ../dist/ (mac-runner-aarch64.zip on macOS, windows-runner-x86_64.zip on
+      Windows). Override with the LAUNCHER_ZIP env var. Cross-platform tests
+      run on both hosts; the mac-only ones (SSH, raw disk image, forceful
+      kill of the launcher daemon) are gated by //go:build darwin.
     cmds:
       - cd tests && go test -timeout 30m ./...
-
-  package-linux:
-    desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
-    run: when_changed
-    requires:
-      vars:
-        - name: IMG_ARCH
-          enum: [x86_64, aarch64]
-    deps:
-      - task: ensure-vm-image
-        vars:
-          IMG_ARCH: "{{.IMG_ARCH}}"
-    cmds:
-      - ./host/package/package-linux.sh "{{.IMG_ARCH}}"
 
   package-mac:
     desc: Package the raw UEFI disk for macOS/vfkit users
@@ -185,35 +201,45 @@ tasks:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
 
-  package-windows:
-    desc: Package the VHDX disk for Windows/Hyper-V users
+  build-windows-launcher:
+    desc: Build the windows launcher binary (cross-compiled; podman-for-windows only supports x86_64)
     run: when_changed
     requires:
       vars:
         - name: IMG_ARCH
           enum: [x86_64]
+    cmds:
+      - task: stage-windows-init-assets
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      # bash prefix so this works on Windows too; see download-db-container above.
+      - bash ./host/package/build-windows-launcher.sh "{{.IMG_ARCH}}"
+
+  test-windows-launcher-unit:
+    desc: Run Go unit tests for the windows launcher (stages init-assets.tar.xz so the //go:embed is satisfied)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64]
     deps:
-      - task: ensure-vm-image
+      - task: stage-windows-init-assets
         vars:
           IMG_ARCH: "{{.IMG_ARCH}}"
     cmds:
-      - ./host/package/package-windows.sh "{{.IMG_ARCH}}"
+      # Stage the embedded blob the //go:embed in launcher/windows/main.go
+      # references. The tarball is left in place afterwards so subsequent
+      # 'go test' / 'go build' invocations in launcher/windows/ succeed
+      # without re-staging; the file is .gitignored so it never lands in
+      # source control.
+      - tar -C launcher/assets/windows -cf - init | xz -9 --extreme > launcher/windows/init-assets.tar.xz
+      - cd launcher/windows && go test ./...
 
   package:
     desc: Build all distributable packages
     deps:
-      - task: package-linux
-        vars:
-          IMG_ARCH: aarch64
-      - task: package-linux
-        vars:
-          IMG_ARCH: x86_64
       - task: package-mac
         vars:
           IMG_ARCH: aarch64
-      - task: package-windows
-        vars:
-          IMG_ARCH: x86_64
 
   clean:
     desc: Remove generated files
@@ -240,4 +266,27 @@ tasks:
           {{end}}
         {{else}}
           ./host/github/ci-build-mac-launcher.sh
+        {{end}}
+
+  ci-build-windows-launcher:
+    desc: Run Build Packages workflow on current branch and download Windows launcher
+    vars:
+      # If you are only changing windows launcher code, you can skip the linux tarball
+      # build to speed up the workflow. You must have a recent successful linux build
+      # on the same branch for the workflow to reuse instead.
+      SKIP_LINUX_BUILD: '{{.SKIP_LINUX_BUILD | default "false"}}'
+      # If SKIP_LINUX_BUILD is true, you can optionally specify a previous workflow
+      # run ID to download the shared release-packages artifact from instead of the
+      # latest successful run.
+      PREVIOUS_RUN_ID: '{{.PREVIOUS_RUN_ID | default ""}}'
+    cmds:
+      - |
+        {{if eq .SKIP_LINUX_BUILD "true"}}
+          {{if ne .PREVIOUS_RUN_ID ""}}
+            ./host/github/ci-build-windows-launcher.sh --skip-linux-build --use-run-id {{.PREVIOUS_RUN_ID}}
+          {{else}}
+            ./host/github/ci-build-windows-launcher.sh --skip-linux-build
+          {{end}}
+        {{else}}
+          ./host/github/ci-build-windows-launcher.sh
         {{end}}

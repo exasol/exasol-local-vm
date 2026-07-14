@@ -10,3 +10,10 @@ release/
 # Staged at build time by host/build/build-artifacts.sh, removed on exit.
 container/container.tar.gz
 ci-downloads/*
+# Staged at build time by launcher/assets/stage-init-assets.sh (mac) and
+# launcher/assets/stage-windows-init-assets.sh (windows); embedded into the
+# launcher binary and not committed.
+launcher/assets/init/exasol-nano-db.tar.gz
+launcher/assets/init/exasol-nano-db.tar.gz.metadata
+launcher/assets/windows/init/exasol-nano-db.tar.gz
+launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata
