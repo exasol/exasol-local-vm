@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,7 +240,7 @@ func TestBuildPodmanRunArgsExactArgv(t *testing.T) {
 		Restart:       "always",
 		Params:        []string{"maxConnectionsLicenseLimit=20"},
 	}
-	got := buildPodmanRunArgs(cfg, "docker.io/exasol/nano:2026.2.0-nano.2", 8563)
+	got := buildPodmanRunArgs(cfg, "docker.io/exasol/nano:2026.2.0-nano.2", map[string]int{"db": 8563})
 	want := []string{
 		"run", "-d",
 		"--name", "exasol-local-db",
@@ -258,10 +260,8 @@ func TestBuildPodmanRunArgsExactArgv(t *testing.T) {
 }
 
 // TestBuildPodmanRunArgsHostPortMayDifferFromContainerPort verifies the
-// hostDBPort argument controls only the left-hand side of -p; the
-// container-side port remains what config.json declared. Phase 7 will
-// exercise this path with real overrides; Phase 6 already relies on it
-// for the (host == container) default case.
+// per-service host port controls only the left-hand side of -p; the
+// container-side port remains what config.json declared.
 func TestBuildPodmanRunArgsHostPortMayDifferFromContainerPort(t *testing.T) {
 	cfg := dbContainerConfig{
 		ContainerName: "c",
@@ -271,8 +271,7 @@ func TestBuildPodmanRunArgsHostPortMayDifferFromContainerPort(t *testing.T) {
 		SecurityOpt:   "unmask=ALL",
 		Restart:       "always",
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", 9090)
-	// Find -p and verify the mapping.
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 9090})
 	var mapping string
 	for i, tok := range got {
 		if tok == "-p" && i+1 < len(got) {
@@ -282,6 +281,32 @@ func TestBuildPodmanRunArgsHostPortMayDifferFromContainerPort(t *testing.T) {
 	}
 	if mapping != "9090:8563" {
 		t.Errorf("expected -p 9090:8563 (host:container), got %q", mapping)
+	}
+}
+
+// TestBuildPodmanRunArgsMultiPortsAreDeterministic covers the case a
+// future config schema adds a second service (e.g. metrics). Service
+// ordering must be alphabetical so the argv — and the tests that
+// assert on it — stay reproducible.
+func TestBuildPodmanRunArgsMultiPortsAreDeterministic(t *testing.T) {
+	cfg := dbContainerConfig{
+		ContainerName: "c",
+		Ports:         map[string]int{"db": 8563, "metrics": 9100},
+		ShmSize:       "1g",
+		PidsLimit:     "-1",
+		SecurityOpt:   "unmask=ALL",
+		Restart:       "always",
+	}
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563, "metrics": 9100})
+	// Collect all -p mappings in the order they appear.
+	var mappings []string
+	for i := 0; i < len(got); i++ {
+		if got[i] == "-p" && i+1 < len(got) {
+			mappings = append(mappings, got[i+1])
+		}
+	}
+	if !stringsEqual(mappings, []string{"8563:8563", "9100:9100"}) {
+		t.Errorf("expected mappings [8563:8563 9100:9100] in alphabetical order, got %v", mappings)
 	}
 }
 
@@ -299,7 +324,7 @@ func TestBuildPodmanRunArgsOmitsParamsWhenEmpty(t *testing.T) {
 		Restart:       "always",
 		// no Params
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", 8563)
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563})
 	for _, tok := range got {
 		if strings.HasPrefix(tok, "params=") {
 			t.Errorf("did not expect a params= token when config has no params, got argv %v", got)
@@ -324,7 +349,7 @@ func TestBuildPodmanRunArgsJoinsMultipleParamsWithSpace(t *testing.T) {
 		Restart:       "always",
 		Params:        []string{"a=1", "b=2", "c=3"},
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", 8563)
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563})
 	last := got[len(got)-1]
 	if last != "params=a=1 b=2 c=3" {
 		t.Errorf("expected joined params token, got %q", last)
@@ -359,4 +384,211 @@ func stringsEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// --- Phase 7: --ports parsing, validation, and selection ---------------
+
+func TestParsePortOverridesHappyPaths(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want map[string]int
+	}{
+		{"empty", "", map[string]int{}},
+		{"whitespace only", "   ", map[string]int{}},
+		{"single", "db:9090", map[string]int{"db": 9090}},
+		{"multi", "db:9090,ssh:2222", map[string]int{"db": 9090, "ssh": 2222}},
+		{"tolerates spaces", " db : 9090 , ssh : 2222 ", map[string]int{"db": 9090, "ssh": 2222}},
+		{"skips trailing comma", "db:9090,,", map[string]int{"db": 9090}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePortOverrides(tc.in)
+			if err != nil {
+				t.Fatalf("parsePortOverrides(%q) error = %v", tc.in, err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("size mismatch: want %v, got %v", tc.want, got)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("key %q: want %d, got %d", k, v, got[k])
+				}
+			}
+		})
+	}
+}
+
+func TestParsePortOverridesErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string // substring the error must contain
+	}{
+		{"missing colon", "db9090", "expected <service>:<port>"},
+		{"empty service", ":9090", "empty service name"},
+		{"non-numeric port", "db:abc", "invalid port"},
+		{"port zero", "db:0", "invalid port"},
+		{"port too high", "db:70000", "invalid port"},
+		{"negative port", "db:-1", "invalid port"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parsePortOverrides(tc.in)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should contain %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestValidatePortOverridesUnknownServiceIncludesName(t *testing.T) {
+	cfg := dbContainerConfig{Ports: map[string]int{"db": 8563}}
+	err := validatePortOverrides(map[string]int{"nonexistent": 9090}, cfg)
+	if err == nil {
+		t.Fatal("expected error for unknown service")
+	}
+	// tests/ports_test.go TestPortOverrideFailsForUnknownService asserts
+	// the error message contains the offending service name.
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("error should name the unknown service, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "db") {
+		t.Errorf("error should list known services, got %v", err)
+	}
+}
+
+func TestValidatePortOverridesAcceptsKnownService(t *testing.T) {
+	cfg := dbContainerConfig{Ports: map[string]int{"db": 8563}}
+	if err := validatePortOverrides(map[string]int{"db": 9090}, cfg); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if err := validatePortOverrides(map[string]int{}, cfg); err != nil {
+		t.Errorf("empty overrides should validate: %v", err)
+	}
+}
+
+// freePort returns a currently-unbound TCP port on 127.0.0.1 by asking
+// the OS to allocate one and immediately releasing it. There is a
+// small race window but the ephemeral port range makes collisions
+// extremely unlikely in practice.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
+// holdPort binds a TCP listener on 127.0.0.1 and registers a cleanup
+// that closes it. The port is guaranteed unbindable by anyone else
+// for the duration of the test.
+func holdPort(t *testing.T) (port int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold port: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// TestSelectHostPortExplicitOverrideFree covers Phase 7 verification
+// case (1): explicit override to a free port returns exactly that port.
+func TestSelectHostPortExplicitOverrideFree(t *testing.T) {
+	requested := freePort(t)
+	got, err := selectHostPort("db", 8563, map[string]int{"db": requested})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != requested {
+		t.Errorf("expected requested port %d, got %d", requested, got)
+	}
+}
+
+// TestSelectHostPortExplicitOverrideBusy covers Phase 7 verification
+// case (2): explicit override to a busy port must fail hard with an
+// error naming the service and the fact that --ports supplied it.
+func TestSelectHostPortExplicitOverrideBusy(t *testing.T) {
+	busy := holdPort(t)
+	_, err := selectHostPort("db", 8563, map[string]int{"db": busy})
+	if err == nil {
+		t.Fatalf("expected error binding busy port %d", busy)
+	}
+	if !strings.Contains(err.Error(), "db") {
+		t.Errorf("error should name the service, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "--ports") {
+		t.Errorf("error should mention --ports, got %v", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d", busy)) {
+		t.Errorf("error should name the requested port %d, got %v", busy, err)
+	}
+}
+
+// TestSelectHostPortDefaultFree covers Phase 7 verification case (3):
+// no override, container port free, chosen host port == container port.
+func TestSelectHostPortDefaultFree(t *testing.T) {
+	containerPort := freePort(t)
+	got, err := selectHostPort("db", containerPort, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != containerPort {
+		t.Errorf("expected default (container) port %d, got %d", containerPort, got)
+	}
+}
+
+// TestSelectHostPortDefaultBusyFallsBack covers Phase 7 verification
+// case (4): no override, container port busy, chosen host port is a
+// different (random) port > 0.
+func TestSelectHostPortDefaultBusyFallsBack(t *testing.T) {
+	busy := holdPort(t)
+	got, err := selectHostPort("db", busy, nil)
+	if err != nil {
+		t.Fatalf("unexpected fallback error: %v", err)
+	}
+	if got == busy {
+		t.Errorf("expected a fallback different from busy port %d, got %d", busy, got)
+	}
+	if got <= 0 || got > 65535 {
+		t.Errorf("fallback port %d out of range", got)
+	}
+}
+
+// TestSelectAllHostPortsPopulatesEveryServiceExactlyOnce sanity-checks
+// the wrapper that startCmd actually calls.
+func TestSelectAllHostPortsPopulatesEveryServiceExactlyOnce(t *testing.T) {
+	cfg := dbContainerConfig{Ports: map[string]int{"db": freePort(t), "metrics": freePort(t)}}
+	chosen, err := selectAllHostPorts(cfg, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(chosen) != 2 {
+		t.Fatalf("expected 2 chosen ports, got %v", chosen)
+	}
+	if chosen["db"] == 0 || chosen["metrics"] == 0 {
+		t.Errorf("missing port assignment: %v", chosen)
+	}
+}
+
+// TestSelectAllHostPortsExplicitBusyAborts ensures a single-service
+// failure surfaces immediately rather than being masked by successful
+// selections for other services.
+func TestSelectAllHostPortsExplicitBusyAborts(t *testing.T) {
+	busy := holdPort(t)
+	cfg := dbContainerConfig{Ports: map[string]int{"db": freePort(t), "metrics": freePort(t)}}
+	_, err := selectAllHostPorts(cfg, map[string]int{"db": busy})
+	if err == nil {
+		t.Fatal("expected error when explicit db override is busy")
+	}
+	if !strings.Contains(err.Error(), "db") {
+		t.Errorf("error should mention db: %v", err)
+	}
 }

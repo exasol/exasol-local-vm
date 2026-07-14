@@ -6,10 +6,10 @@
 // same on-disk contract and integration tests used by the mac launcher can
 // be reused on windows.
 //
-// Phase 6 status: init and start (core path) are implemented. stop /
-// status / resize-data remain stubs. --ports overrides and
-// --version-check-* flags are not yet propagated to podman — later
-// phases wire them in.
+// Phase 7 status: init and start (with --ports overrides + probe/fallback
+// port selection) are implemented. stop / status / resize-data remain
+// stubs. --version-check-* flags are still not propagated to podman
+// (Phase 9 wires them in).
 package main
 
 import (
@@ -21,8 +21,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -241,26 +243,23 @@ func startCmd(
 	versionCheckOptions VersionCheckOptions,
 ) error {
 	// Positional args (cpu, ram, data_size) are accepted for CLI parity
-	// with the mac launcher but ignored in Phase 6: podman-for-windows
+	// with the mac launcher but ignored in Phase 7: podman-for-windows
 	// sizes its backing VM globally, and Phase 9 wires data_size_gb into
 	// the resources/data-size.txt sidecar. Silently accept for now.
 	_ = cpuCountStr
 	_ = ramSizeStr
 	_ = dataSizeGB
 
-	// --ports overrides and --version-check-* flags are Phase 7 / Phase 9
-	// respectively. Reject an explicit --ports value so users are not
-	// misled into thinking overrides took effect; --version-check-* is
-	// benign to ignore because our defaults match mac defaults.
-	if portsOverride != "" {
-		return fmt.Errorf("--ports override is not yet implemented on windows (Phase 7)")
-	}
+	// --version-check-* flags are Phase 9. Silently accepted because our
+	// defaults (Enabled=true, mac endpoint) match the mac launcher's
+	// default behavior.
 	_ = versionCheckOptions
 
-	if err := podman.Available(); err != nil {
-		return err
-	}
-	if err := podman.MachineRunning(); err != nil {
+	// Parse --ports first so syntax errors surface before the podman
+	// prerequisite checks; users then get a clean diagnostic without
+	// having to fix podman just to see the parse failure.
+	overrides, err := parsePortOverrides(portsOverride)
+	if err != nil {
 		return err
 	}
 
@@ -269,20 +268,33 @@ func startCmd(
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", configPath, err)
 	}
-	dbPort, ok := cfg.Ports["db"]
-	if !ok || dbPort <= 0 {
-		return fmt.Errorf("invalid config %s: db.ports.db missing or not positive", configPath)
+
+	// Every override must name a service the container actually exposes.
+	// TestPortOverrideFailsForUnknownService requires the error text to
+	// include the offending service name. Kept before the podman prereq
+	// checks so a typo in --ports is surfaced without needing a working
+	// podman-for-windows machine.
+	if err := validatePortOverrides(overrides, cfg); err != nil {
+		return err
 	}
 
-	// Idempotency: if the container is already running, refresh vm-state.json
-	// and return without touching the podman state.
+	if err := podman.Available(); err != nil {
+		return err
+	}
+	if err := podman.MachineRunning(); err != nil {
+		return err
+	}
+
+	// Idempotency: if the container is already running, leave vm-state.json
+	// alone (rewriting with newly-selected ports would clobber the real
+	// bindings from the previous start).
 	running, err := podman.ContainerRunning(cfg.ContainerName)
 	if err != nil {
 		return fmt.Errorf("failed to check container state: %w", err)
 	}
 	if running {
-		fmt.Printf("Container %q is already running; nothing to do.\n", cfg.ContainerName)
-		return writeVMState(map[string]int{"db": dbPort})
+		fmt.Printf("Container %q is already running; leaving vm-state.json untouched.\n", cfg.ContainerName)
+		return nil
 	}
 
 	// A stopped container with the same name would make `podman run` fail
@@ -299,6 +311,16 @@ func startCmd(
 		}
 	}
 
+	// Reserve host ports before invoking podman so we hard-fail on an
+	// explicit --ports collision, and pick a random fallback if the
+	// default is taken. There is an unavoidable TOCTOU window between
+	// closing our probe listener and podman binding the port; matches
+	// the mac launcher's behavior.
+	hostPorts, err := selectAllHostPorts(cfg, overrides)
+	if err != nil {
+		return err
+	}
+
 	fmt.Println("Loading DB container image...")
 	tarballPath := filepath.Join(resourcesDir, cfg.TarballName)
 	imageRef, err := podman.LoadImage(tarballPath)
@@ -307,13 +329,15 @@ func startCmd(
 	}
 	fmt.Printf("Loaded image: %s\n", imageRef)
 
-	args := buildPodmanRunArgs(cfg, imageRef, dbPort)
-	fmt.Printf("Starting container %q with db port %d...\n", cfg.ContainerName, dbPort)
+	args := buildPodmanRunArgs(cfg, imageRef, hostPorts)
+	for _, svc := range sortedKeys(hostPorts) {
+		fmt.Printf("Publishing %s: 127.0.0.1:%d -> container:%d\n", svc, hostPorts[svc], cfg.Ports[svc])
+	}
 	if err := podman.Run(args); err != nil {
 		return err
 	}
 
-	if err := writeVMState(map[string]int{"db": dbPort}); err != nil {
+	if err := writeVMState(hostPorts); err != nil {
 		return err
 	}
 	fmt.Printf("Started. VM state written to %s\n", vmStatePath)
@@ -359,12 +383,14 @@ func loadContainerConfig(path string) (dbContainerConfig, error) {
 // init-db.sh#L396) so future divergence between the two paths is
 // intentional and reviewable.
 //
-// Phase 6 scope: no --ports overrides, no --version-check-* args, no
-// per-run params gating on "fresh deployment". Later phases extend this
-// function; keep the signature and return-slice ordering stable so
-// tests stay tight.
-func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostDBPort int) []string {
-	containerDBPort := cfg.Ports["db"]
+// hostPorts maps each service name (`db`, and any future siblings) to
+// the host-side port chosen by selectAllHostPorts. Container-side ports
+// come from cfg.Ports. Services are emitted in alphabetical order so
+// the argv is deterministic and test-assertable.
+//
+// Phase 7 scope: no --version-check-* args, no per-run params gating on
+// "fresh deployment". Phase 9 extends this function.
+func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostPorts map[string]int) []string {
 	args := []string{
 		"run", "-d",
 		"--name", cfg.ContainerName,
@@ -372,17 +398,150 @@ func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostDBPort int) 
 		"--pids-limit=" + cfg.PidsLimit,
 		"--security-opt", cfg.SecurityOpt,
 		"--restart", cfg.Restart,
-		"-p", fmt.Sprintf("%d:%d", hostDBPort, containerDBPort),
-		"-v", dataVolumeName + ":/exa",
+	}
+	for _, svc := range sortedKeys(cfg.Ports) {
+		containerPort := cfg.Ports[svc]
+		hostPort, ok := hostPorts[svc]
+		if !ok {
+			// Defensive: caller should always populate hostPorts for every
+			// service in cfg.Ports. Fall through to the container port.
+			hostPort = containerPort
+		}
+		args = append(args, "-p", fmt.Sprintf("%d:%d", hostPort, containerPort))
+	}
+	args = append(args,
+		"-v", dataVolumeName+":/exa",
 		imageRef,
 		"init",
-	}
+	)
 	if len(cfg.Params) > 0 {
 		// Nano's `init params='k=v ...'` interface: single argv token,
 		// space-joined values. See init-db.sh's DB_PARAMS assignment.
 		args = append(args, "params="+strings.Join(cfg.Params, " "))
 	}
 	return args
+}
+
+// parsePortOverrides parses a comma-separated list of "service:port"
+// pairs into a map. Copied from launcher/mac/main.go so the two
+// launchers accept identical --ports syntax; TestPortOverride* in
+// tests/ports_test.go exercises this shape on both platforms.
+func parsePortOverrides(s string) (map[string]int, error) {
+	overrides := make(map[string]int)
+	if strings.TrimSpace(s) == "" {
+		return overrides, nil
+	}
+	for _, entry := range strings.Split(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid port override %q: expected <service>:<port>", entry)
+		}
+		service := strings.TrimSpace(parts[0])
+		portStr := strings.TrimSpace(parts[1])
+		if service == "" {
+			return nil, fmt.Errorf("empty service name in port override %q", entry)
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid port in override %q: must be an integer 1-65535", entry)
+		}
+		overrides[service] = port
+	}
+	return overrides, nil
+}
+
+// validatePortOverrides errors if any override refers to a service that
+// is not present in cfg.Ports. Required to satisfy the mac test
+// TestPortOverrideFailsForUnknownService which asserts the error text
+// contains the offending service name so users can spot typos.
+func validatePortOverrides(overrides map[string]int, cfg dbContainerConfig) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+	known := sortedKeys(cfg.Ports)
+	knownSet := make(map[string]struct{}, len(known))
+	for _, k := range known {
+		knownSet[k] = struct{}{}
+	}
+	for _, svc := range sortedKeys(overrides) {
+		if _, ok := knownSet[svc]; !ok {
+			return fmt.Errorf("unknown service %q in --ports override; known services: %v", svc, known)
+		}
+	}
+	return nil
+}
+
+// selectHostPort chooses the host-side port for a single named service.
+//
+// Behavior matches the mac launcher's port-selection semantics:
+//   - If overrides[serviceName] is set, we probe-bind that exact port
+//     and hard-fail on collision. The error text mentions the service
+//     name and that --ports supplied the value.
+//   - Otherwise we probe-bind containerPort. If that fails (port in
+//     use), we fall back to a random OS-assigned port via net.Listen
+//     on ":0". If even that fails (very unusual — no free port on the
+//     loopback), we return a wrapped error.
+//
+// The probe listener is closed before the function returns so podman
+// can bind the port. There is an unavoidable TOCTOU race window
+// between our close and podman's bind; the mac path has the same race
+// and it has not been observed to matter in practice.
+func selectHostPort(serviceName string, containerPort int, overrides map[string]int) (int, error) {
+	if requested, ok := overrides[serviceName]; ok {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", requested))
+		if err != nil {
+			return 0, fmt.Errorf(
+				"cannot bind host port %d for service %q (requested via --ports): %w",
+				requested, serviceName, err,
+			)
+		}
+		_ = ln.Close()
+		return requested, nil
+	}
+	// Default: try the container port first.
+	if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", containerPort)); err == nil {
+		_ = ln.Close()
+		return containerPort, nil
+	}
+	// Fall back to an OS-assigned free port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate a fallback host port for service %q: %w", serviceName, err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port, nil
+}
+
+// selectAllHostPorts computes the host-side port for every service in
+// cfg.Ports. Aborts on the first selection failure so an explicit
+// --ports collision is not masked by the remaining services being
+// processed.
+func selectAllHostPorts(cfg dbContainerConfig, overrides map[string]int) (map[string]int, error) {
+	chosen := make(map[string]int, len(cfg.Ports))
+	for _, svc := range sortedKeys(cfg.Ports) {
+		hostPort, err := selectHostPort(svc, cfg.Ports[svc], overrides)
+		if err != nil {
+			return nil, err
+		}
+		chosen[svc] = hostPort
+	}
+	return chosen, nil
+}
+
+// sortedKeys returns the map's string keys in ascending lexical order.
+// Used everywhere we need deterministic iteration for testability.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // VMState is the on-disk shape of vm-state.json, the file the shared
