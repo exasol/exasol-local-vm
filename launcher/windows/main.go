@@ -1,438 +1,203 @@
 // Copyright 2026 Exasol AG
 // SPDX-License-Identifier: MIT
 
-//go:generate sh -c 'cp "$DISK_IMG" disk.tar.xz'
-
+// Package main is the windows-runner launcher: a CLI that delegates
+// container lifecycle to a natively installed podman-for-windows so the
+// same on-disk contract and integration tests used by the mac launcher can
+// be reused on windows.
+//
+// Phase 2 skeleton: this file locks in the subcommand surface (matching
+// launcher/mac/main.go byte-for-byte where the semantics carry over) but
+// every subcommand body is a stub that returns "not implemented on windows
+// yet". Later phases fill each stub in.
 package main
 
 import (
-	"archive/tar"
-	"bytes"
-	_ "embed"
-	"encoding/json"
+	"flag"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
-
-	"github.com/ulikunitz/xz"
+	"strconv"
 )
 
-//go:embed disk.tar.xz
-var disk_img []byte
+// InitOutput is the JSON shape written by the guest-side init scripts on
+// mac. It is mirrored here so windows can produce compatible state files
+// once start is implemented; kept small and pure-data so the skeleton has
+// no external dependencies.
+type InitOutput struct {
+	IP    string         `json:"ip"`
+	Ports map[string]int `json:"ports"`
+}
 
-//go:embed start-vm.ps1
-var startVmScript string
+// RuntimeConfig matches the mac vm-config.json schema; ssh_private_key is
+// left empty on windows because there is no guest VM to SSH into.
+type RuntimeConfig struct {
+	SSHPrivateKey string `json:"ssh_private_key"`
+}
 
-//go:embed create-shared-vhd.ps1
-var createSharedVhdScript string
+// VersionCheckRuntimeConfig mirrors the mac schema so any shared tooling
+// that reads the file finds the same shape. Windows may or may not emit
+// this file — that is decided in a later phase.
+type VersionCheckRuntimeConfig struct {
+	Enabled         bool   `json:"enabled"`
+	IntervalSeconds int    `json:"interval_seconds"`
+	Identity        string `json:"identity"`
+	URL             string `json:"url"`
+	OperatingSystem string `json:"operating_system"`
+}
+
+// VersionCheckOptions carries the parsed --version-check-* flag values.
+type VersionCheckOptions struct {
+	Enabled         bool
+	IntervalSeconds int
+	Identity        string
+	URL             string
+}
+
+const (
+	defaultVersionCheckIntervalSeconds = 86400
+	defaultVersionCheckIdentity        = "NONE"
+)
+
+var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
+
+func defaultVersionCheckOptions() VersionCheckOptions {
+	return VersionCheckOptions{
+		Enabled:         true,
+		IntervalSeconds: defaultVersionCheckIntervalSeconds,
+		Identity:        defaultVersionCheckIdentity,
+		URL:             defaultVersionCheckURL,
+	}
+}
+
+// errNotImplemented is returned by every subcommand until later phases
+// wire in real behavior. Kept as a sentinel so tests can assert on it.
+func errNotImplemented(subcommand string) error {
+	return fmt.Errorf("%s: not implemented on windows yet", subcommand)
+}
+
+func initCmd(sshKeyPath string) error {
+	_ = sshKeyPath
+	return errNotImplemented("init")
+}
+
+func startCmd(
+	cpuCountStr string,
+	ramSizeStr string,
+	dataSizeGB int,
+	portsOverride string,
+	versionCheckOptions VersionCheckOptions,
+) error {
+	_ = cpuCountStr
+	_ = ramSizeStr
+	_ = dataSizeGB
+	_ = portsOverride
+	_ = versionCheckOptions
+	return errNotImplemented("start")
+}
+
+func stopCmd() error {
+	return errNotImplemented("stop")
+}
+
+func statusCmd() error {
+	return errNotImplemented("status")
+}
+
+func resizeDataDiskCmd(sizeArg string) error {
+	_ = sizeArg
+	return errNotImplemented("resize-data")
+}
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: windows-runner <command>")
-		fmt.Println("Available commands: init, start, stop")
+		fmt.Fprintln(os.Stderr, "Usage: windows-runner <command> [options]")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Commands:")
+		fmt.Fprintln(os.Stderr, "  init [--ssh-key <private-key>]    Initialize launcher working directory")
+		fmt.Fprintln(os.Stderr, "  start [--ports <svc>:<port>,...] <cpu> <ram> <data_size_gb>")
+		fmt.Fprintln(os.Stderr, "                                    Start the DB container via podman-for-windows.")
+		fmt.Fprintln(os.Stderr, "                                    CPU count, RAM size (MB), and data disk size in")
+		fmt.Fprintln(os.Stderr, "                                    GB are accepted for CLI parity with the mac")
+		fmt.Fprintln(os.Stderr, "                                    launcher; podman sizes its own backing VM.")
+		fmt.Fprintln(os.Stderr, "                                    --ports overrides which host port is bound")
+		fmt.Fprintln(os.Stderr, "                                    for a named service (e.g. --ports db:9090).")
+		fmt.Fprintln(os.Stderr, "                                    Unspecified services use the same port as the")
+		fmt.Fprintln(os.Stderr, "                                    container, falling back to a random port if")
+		fmt.Fprintln(os.Stderr, "                                    unavailable.")
+		fmt.Fprintln(os.Stderr, "  stop                              Stop the running DB container")
+		fmt.Fprintln(os.Stderr, "  status                            Print JSON {\"running\": bool}")
+		fmt.Fprintln(os.Stderr, "  resize-data <size>                Record a new data size in GB (container must be stopped)")
 		os.Exit(1)
 	}
 
+	var err error
 	switch os.Args[1] {
 	case "init":
-		initCmd()
+		initFlags := flag.NewFlagSet("init", flag.ContinueOnError)
+		initFlags.SetOutput(os.Stderr)
+		sshKeyPath := initFlags.String("ssh-key", "", "Use an existing SSH private key instead of generating one")
+		initFlags.Usage = func() {
+			fmt.Fprintln(os.Stderr, "Usage: windows-runner init [--ssh-key <private-key>]")
+			initFlags.PrintDefaults()
+		}
+		if parseErr := initFlags.Parse(os.Args[2:]); parseErr != nil {
+			os.Exit(2)
+		}
+		if initFlags.NArg() != 0 {
+			fmt.Fprintf(os.Stderr, "Unexpected init argument: %s\n", initFlags.Arg(0))
+			initFlags.Usage()
+			os.Exit(2)
+		}
+		err = initCmd(*sshKeyPath)
 	case "start":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: windows-runner start <cpu_count> <ram_size> [shared_dir]")
+		startFlags := flag.NewFlagSet("start", flag.ContinueOnError)
+		startFlags.SetOutput(os.Stderr)
+		portsFlag := startFlags.String("ports", "", "Host port overrides: <service>:<port>[,<service>:<port>...]")
+		versionCheckOptions := defaultVersionCheckOptions()
+		startFlags.BoolVar(&versionCheckOptions.Enabled, "version-check-enabled", versionCheckOptions.Enabled, "Enable scheduled local database version checks")
+		startFlags.IntVar(&versionCheckOptions.IntervalSeconds, "version-check-interval-seconds", versionCheckOptions.IntervalSeconds, "Interval in seconds for scheduled local database version checks")
+		startFlags.StringVar(&versionCheckOptions.Identity, "version-check-identity", versionCheckOptions.Identity, "Identity string for scheduled local database version checks")
+		startFlags.StringVar(&versionCheckOptions.URL, "version-check-url", versionCheckOptions.URL, "Version-check URL override for scheduled local database version checks")
+		startFlags.Usage = func() {
+			fmt.Fprintln(os.Stderr, "Usage: windows-runner start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
+			startFlags.PrintDefaults()
+		}
+		if parseErr := startFlags.Parse(os.Args[2:]); parseErr != nil {
+			os.Exit(2)
+		}
+		if startFlags.NArg() != 3 {
+			fmt.Fprintf(os.Stderr, "Error: expected 3 positional arguments, got %d\n", startFlags.NArg())
+			startFlags.Usage()
+			os.Exit(2)
+		}
+		dataSizeGB, parseErr := strconv.Atoi(startFlags.Arg(2))
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid data_size_gb: %v\n", parseErr)
 			os.Exit(1)
 		}
-		sharedDir := ""
-		if len(os.Args) >= 5 {
-			sharedDir = os.Args[4]
+		if dataSizeGB <= 0 {
+			fmt.Fprintln(os.Stderr, "Error: data_size_gb must be a positive integer")
+			os.Exit(1)
 		}
-		startCmd(os.Args[2], os.Args[3], sharedDir)
+		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag, versionCheckOptions)
 	case "stop":
-		stopCmd()
+		err = stopCmd()
+	case "status":
+		err = statusCmd()
+	case "resize-data":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: windows-runner resize-data <new_size_gb>")
+			os.Exit(1)
+		}
+		err = resizeDataDiskCmd(os.Args[2])
 	default:
-		fmt.Printf("Unknown command: %s\n", os.Args[1])
-		fmt.Println("Available commands: init, start, stop")
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
+		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop, status, resize-data")
 		os.Exit(1)
 	}
-}
 
-// tailFile continuously reads from a file and writes new content to the writer
-// Similar to "tail -f" on Linux
-func tailFile(filePath string, writer io.Writer, done <-chan struct{}, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	var lastSize int64 = 0
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-done:
-			// Read any remaining content before returning
-			if file, err := os.Open(filePath); err == nil {
-				file.Seek(lastSize, 0)
-				io.Copy(writer, file)
-				file.Close()
-			}
-			return
-		case <-ticker.C:
-			// Check if file exists and has new content
-			if stat, err := os.Stat(filePath); err == nil {
-				if stat.Size() > lastSize {
-					if file, err := os.Open(filePath); err == nil {
-						file.Seek(lastSize, 0)
-						io.Copy(writer, file)
-						lastSize = stat.Size()
-						file.Close()
-					}
-				}
-			}
-		}
-	}
-}
-
-func createSharedVhd(sharedDir, vhdPath string) error {
-	absSharedDir, err := filepath.Abs(sharedDir)
 	if err != nil {
-		return fmt.Errorf("failed to get absolute path for shared dir: %w", err)
-	}
-	absVhdPath, err := filepath.Abs(vhdPath)
-	if err != nil {
-		return fmt.Errorf("failed to get absolute path for VHD: %w", err)
-	}
-
-	// Write create-shared-vhd.ps1 to temp file
-	tempCreateVhd := filepath.Join(os.TempDir(), "create-shared-vhd.ps1")
-	if err := os.WriteFile(tempCreateVhd, []byte(createSharedVhdScript), 0644); err != nil {
-		return fmt.Errorf("failed to write create-shared-vhd.ps1: %w", err)
-	}
-	defer os.Remove(tempCreateVhd)
-
-	// Create temp files for output/error capture
-	outFile := filepath.Join(os.TempDir(), fmt.Sprintf("vhd-output-%d.txt", os.Getpid()))
-	errFile := filepath.Join(os.TempDir(), fmt.Sprintf("vhd-error-%d.txt", os.Getpid()))
-	defer os.Remove(outFile)
-	defer os.Remove(errFile)
-
-	// Create empty files for tailing
-	os.WriteFile(outFile, []byte{}, 0644)
-	os.WriteFile(errFile, []byte{}, 0644)
-
-	// Start tailing output files in background
-	var wg sync.WaitGroup
-	done := make(chan struct{})
-
-	wg.Add(2)
-	go tailFile(outFile, os.Stdout, done, &wg)
-	go tailFile(errFile, os.Stderr, done, &wg)
-
-	// Execute PowerShell script with UAC elevation
-	psCommand := fmt.Sprintf(`Start-Process -FilePath "powershell" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "%s", "-sharedDir", "%s", "-vhdPath", "%s" -Verb RunAs -Wait -RedirectStandardOutput "%s" -RedirectStandardError "%s"`,
-		tempCreateVhd, absSharedDir, absVhdPath, outFile, errFile)
-
-	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psCommand)
-
-	cmdErr := cmd.Run()
-
-	// Signal tailers to stop and wait for them to finish
-	close(done)
-	wg.Wait()
-
-	if cmdErr != nil {
-		return fmt.Errorf("failed to create VHD (UAC elevation may have been denied): %w", cmdErr)
-	}
-
-	// Check if there were errors in the error file
-	if data, err := os.ReadFile(errFile); err == nil && len(data) > 0 {
-		return fmt.Errorf("VHD creation failed")
-	}
-
-	return nil
-}
-
-func initCmd() {
-	fmt.Println("Initializing VM...")
-	fmt.Println("Extracting disk image...")
-
-	// Create a reader from the embedded data
-	bytesReader := bytes.NewReader(disk_img)
-
-	// Create xz decompressor
-	xzReader, err := xz.NewReader(bytesReader)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create xz reader: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Create tar reader
-	tarReader := tar.NewReader(xzReader)
-
-	// Extract the first file from the tar archive (the disk image)
-	header, err := tarReader.Next()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read tar header: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Create output file in the working directory
-	outputPath := header.Name
-	outFile, err := os.Create(outputPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create output file: %v\n", err)
-		os.Exit(1)
-	}
-	defer outFile.Close()
-
-	// Copy the disk image data to the output file
-	written, err := io.Copy(outFile, tarReader)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to extract disk image: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Successfully extracted %s (%d bytes)\n", outputPath, written)
-
-	// Create vm-config.json with disk image path
-	config := map[string]string{
-		"disk_img": outputPath,
-	}
-
-	configData, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to marshal config: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := os.WriteFile("vm-config.json", configData, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to write vm-config.json: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Successfully initialized VM")
-	fmt.Println("Run 'windows-runner start <cpu_count> <ram_size> [shared_dir]' to start the VM")
-}
-
-func startCmd(cpuCount, ramSize, sharedDir string) {
-	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s", cpuCount, ramSize)
-	if sharedDir != "" {
-		fmt.Printf(", shared_dir=%s\n", sharedDir)
-	} else {
-		fmt.Println()
-	}
-
-	// Read vm-config.json
-	configData, err := os.ReadFile("vm-config.json")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read vm-config.json: %v\n", err)
-		os.Exit(1)
-	}
-
-	var config map[string]string
-	if err := json.Unmarshal(configData, &config); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse vm-config.json: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Get absolute path for disk image
-	diskPath, err := filepath.Abs(config["disk_img"])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get absolute path for disk: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Handle shared directory and VHD if provided
-	var sharedPath, vhdPath string
-	if sharedDir != "" {
-		// Create shared_dir if it doesn't exist
-		if _, err := os.Stat(sharedDir); os.IsNotExist(err) {
-			fmt.Printf("Creating shared directory: %s\n", sharedDir)
-			if err := os.MkdirAll(sharedDir, 0755); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to create shared directory: %v\n", err)
-				os.Exit(1)
-			}
-		}
-
-		// Get absolute path for shared directory
-		sharedPath, err = filepath.Abs(sharedDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to get absolute path for shared dir: %v\n", err)
-			os.Exit(1)
-		}
-
-		// Create or recreate VHD
-		vhdPath = "shared.vhdx"
-		if _, err := os.Stat(vhdPath); os.IsNotExist(err) {
-			fmt.Println("Creating VHD for shared directory...")
-			if err := createSharedVhd(sharedDir, vhdPath); err != nil {
-				fmt.Fprintf(os.Stderr, "%v\n", err)
-				os.Exit(1)
-			}
-		} else {
-			fmt.Println("Using existing shared VHD...")
-		}
-
-		// Get absolute path for VHD
-		vhdPath, err = filepath.Abs(vhdPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to get absolute path for VHD: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	vmName := "exasol-local-vm"
-
-	// Write embedded PowerShell script to temp file
-	tempScript := filepath.Join(os.TempDir(), "start-vm.ps1")
-	if err := os.WriteFile(tempScript, []byte(startVmScript), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to write PowerShell script: %v\n", err)
-		os.Exit(1)
-	}
-	defer os.Remove(tempScript)
-
-	// Create temp files for output/error capture
-	outFile := filepath.Join(os.TempDir(), fmt.Sprintf("vm-output-%d.txt", os.Getpid()))
-	errFile := filepath.Join(os.TempDir(), fmt.Sprintf("vm-error-%d.txt", os.Getpid()))
-	defer os.Remove(outFile)
-	defer os.Remove(errFile)
-
-	// Create empty files for tailing
-	os.WriteFile(outFile, []byte{}, 0644)
-	os.WriteFile(errFile, []byte{}, 0644)
-
-	// Start tailing output files in background
-	var wg sync.WaitGroup
-	done := make(chan struct{})
-
-	wg.Add(2)
-	go tailFile(outFile, os.Stdout, done, &wg)
-	go tailFile(errFile, os.Stderr, done, &wg)
-
-	// Execute PowerShell script with UAC elevation
-	var psCommand string
-	if vhdPath != "" {
-		psCommand = fmt.Sprintf(`Start-Process -FilePath "powershell" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "%s", "-vmName", "%s", "-cpuCount", "%s", "-ramSize", "%s", "-diskPath", "%s", "-sharedPath", "%s", "-vhdPath", "%s" -Verb RunAs -Wait -RedirectStandardOutput "%s" -RedirectStandardError "%s"`,
-			tempScript, vmName, cpuCount, ramSize, diskPath, sharedPath, vhdPath, outFile, errFile)
-	} else {
-		psCommand = fmt.Sprintf(`Start-Process -FilePath "powershell" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "%s", "-vmName", "%s", "-cpuCount", "%s", "-ramSize", "%s", "-diskPath", "%s" -Verb RunAs -Wait -RedirectStandardOutput "%s" -RedirectStandardError "%s"`,
-			tempScript, vmName, cpuCount, ramSize, diskPath, outFile, errFile)
-	}
-
-	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psCommand)
-
-	cmdErr := cmd.Run()
-
-	// Signal tailers to stop and wait for them to finish
-	close(done)
-	wg.Wait()
-
-	if cmdErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to start VM (UAC elevation may have been denied): %v\n", cmdErr)
-		os.Exit(1)
-	}
-
-	// Read output to parse IP address
-	outputData, err := os.ReadFile(outFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read VM output: %v\n", err)
-		os.Exit(1)
-	}
-	output := string(outputData)
-
-	// Check for errors
-	if errData, err := os.ReadFile(errFile); err == nil && len(errData) > 0 {
-		fmt.Fprintf(os.Stderr, "Failed to start VM\n")
-		os.Exit(1)
-	}
-
-	// Parse IP address from output
-	vmIP := "unknown"
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "VM_IP:") {
-			vmIP = strings.TrimSpace(strings.TrimPrefix(line, "VM_IP:"))
-			break
-		}
-	}
-
-	// Write vm-state.json with runtime configuration
-	vmState := map[string]string{
-		"vm_name":   vmName,
-		"vm_ip":     vmIP,
-		"cpu_count": cpuCount,
-		"ram_size":  ramSize,
-	}
-	if sharedDir != "" {
-		// Use relative path for shared directory
-		vmState["shared_dir"] = "./" + filepath.Base(sharedDir)
-		vmState["vhd_path"] = vhdPath
-	}
-
-	stateData, err := json.MarshalIndent(vmState, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to marshal vm-state: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := os.WriteFile("vm-state.json", stateData, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to write vm-state.json: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("VM started successfully")
-	if vmIP != "unknown" {
-		fmt.Printf("VM IP address: %s\n", vmIP)
-	}
-	fmt.Println("VM state written to vm-state.json")
-}
-
-func stopCmd() {
-	fmt.Println("Stopping VM...")
-
-	vmName := "exasol-local-vm"
-
-	// Create temp files for output/error capture
-	outFile := filepath.Join(os.TempDir(), fmt.Sprintf("stop-output-%d.txt", os.Getpid()))
-	errFile := filepath.Join(os.TempDir(), fmt.Sprintf("stop-error-%d.txt", os.Getpid()))
-	defer os.Remove(outFile)
-	defer os.Remove(errFile)
-
-	// Create empty files for tailing
-	os.WriteFile(outFile, []byte{}, 0644)
-	os.WriteFile(errFile, []byte{}, 0644)
-
-	// Start tailing output files in background
-	var wg sync.WaitGroup
-	done := make(chan struct{})
-
-	wg.Add(2)
-	go tailFile(outFile, os.Stdout, done, &wg)
-	go tailFile(errFile, os.Stderr, done, &wg)
-
-	// Execute PowerShell command to stop the VM with UAC elevation
-	psCommand := fmt.Sprintf(`Start-Process -FilePath "powershell" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Stop-VM -Name '%s' -Force" -Verb RunAs -Wait -RedirectStandardOutput "%s" -RedirectStandardError "%s"`,
-		vmName, outFile, errFile)
-
-	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psCommand)
-
-	cmdErr := cmd.Run()
-
-	// Signal tailers to stop and wait for them to finish
-	close(done)
-	wg.Wait()
-
-	if cmdErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to stop VM (UAC elevation may have been denied): %v\n", cmdErr)
-		os.Exit(1)
-	}
-
-	// Check for errors
-	if data, err := os.ReadFile(errFile); err == nil && len(data) > 0 {
-		fmt.Fprintf(os.Stderr, "Failed to stop VM\n")
-		os.Exit(1)
-	}
-
-	fmt.Println("VM stopped successfully")
 }
