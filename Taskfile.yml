@@ -64,6 +64,25 @@ tasks:
     cmds:
       - ./launcher/assets/stage-init-assets.sh "{{.IMG_ARCH}}"
 
+  stage-windows-init-assets:
+    desc: Copy database container tarball from release/ to launcher/assets/windows/init for {{.IMG_ARCH}}
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64, aarch64]
+    deps:
+      - task: download-db-container
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    status:
+      - test -f launcher/assets/windows/init/exasol-nano-db.tar.gz
+      - test -f launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata
+      - test launcher/assets/windows/init/exasol-nano-db.tar.gz -nt release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz
+      - cmp -s release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata
+    cmds:
+      - ./launcher/assets/stage-windows-init-assets.sh "{{.IMG_ARCH}}"
+
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages for {{.IMG_ARCH}}
     run: when_changed
