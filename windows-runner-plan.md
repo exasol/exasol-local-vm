@@ -1,0 +1,1359 @@
+We are creating a windows equivalent of the mac vm launcher in `launcher/mac/main.go`
+
+This is a CLI tool. The windows version must support the exact same subcommands with the exact same args.
+
+Unlike the mac version, which uses a virtual machine to run a podman container, the windows version must used the natively installed podman-for-windows installation.
+
+Tests that run on the mac version should also pass on the windows version.
+
+# Background
+
+## Required sub commands
+
+The mac launcher (`launcher/mac/main.go`) exposes the following subcommands
+via a single `flag`-based dispatcher in `main()`. The windows version must
+support the same set with matching flags, positional arguments, exit codes,
+and stdout/stderr contracts so the shared integration tests in `tests/` keep
+passing.
+
+- `init [--ssh-key <private-key>]`
+  - Prepares the working directory for a first-time launch.
+  - Without `--ssh-key`, generates a new ED25519 SSH keypair (private key at
+    `vm-ssh-key`, public key at `vm-shared/authorized_keys`).
+  - With `--ssh-key <path>`, adopts the provided private key: derives the
+    public key from it, writes `vm-shared/authorized_keys`, and records the
+    key path in `vm-config.json` (see `RuntimeConfig`).
+  - On mac it also extracts the embedded VM tarball (`vm-package.tar.xz`)
+    into `./vm/` and the embedded init assets (`init-assets.tar.xz`) into
+    `./vm-shared/`. On windows there is no VM tarball, but the init assets
+    (or an equivalent set of container-runtime bootstrap files) still need
+    to be materialized into `./vm-shared/` so that the same guest-side
+    scripts run.
+- `start [--ports <svc>:<port>,...] [--version-check-* flags] <cpu> <ram_mb> <data_size_gb>`
+  - Positional args: CPU count, RAM in MB, data disk size in GB (positive
+    integer).
+  - `--ports` overrides host-side port bindings for named services (for
+    example `--ports db:9090,ssh:2222`). Unspecified services default to the
+    guest port and fall back to a random free port if that host port is
+    unavailable.
+  - `--version-check-enabled`, `--version-check-interval-seconds`,
+    `--version-check-identity`, `--version-check-url` configure the periodic
+    version-check that the guest performs; the flag values are serialized as
+    `vm-shared/version-check.json` (`VersionCheckRuntimeConfig`).
+  - Handles the data disk lifecycle (create sparse / reuse / grow / reject
+    shrink). On windows the equivalent step will size/attach the podman
+    volume or VHD rather than a raw `data.img`.
+  - Spawns a background daemon that keeps the VM/container running until
+    `stop` is called and writes runtime state (chosen ports, PID, IP) so
+    other subcommands can find it.
+- `__daemon__ <cpu> <ram> [ports]` (mac-internal)
+  - Internal re-exec entry point used by `start` to run the vz-backed VM in
+    the background. The windows version does not need an identical
+    `__daemon__` subcommand, but the equivalent detached podman lifecycle
+    must be reachable through `start`/`stop` in the same way.
+- `stop`
+  - Requests a graceful shutdown of the running VM (waits up to 30s), then
+    forces stop if needed. Removes any transient runtime state files.
+- `status`
+  - Prints a single JSON object `{"running": bool}` on stdout. Used by the
+    integration tests to poll VM state.
+- `resize-data <size_gb>`
+  - Resizes the data disk to the requested size in GB. VM must be stopped.
+    Growing is allowed; shrinking is rejected. The windows implementation
+    will target its podman volume / VHD instead of the raw disk image.
+
+Exit code conventions to preserve on windows:
+
+- `0` on success.
+- `1` for runtime errors (also used for missing usage args in a few
+  legacy branches).
+- `2` for flag-parse errors and wrong positional argument counts.
+
+## Build proceedure
+
+The existing build proceedure for the mac version is managed in the
+`Taskfile.yml` with the following steps. All tasks are parameterized by
+`IMG_ARCH` (`aarch64` or `x86_64`); the released macOS build uses
+`aarch64`.
+
+1. `download-db-container IMG_ARCH=<arch>` — runs
+   [launcher/assets/download-db-container.sh](launcher/assets/download-db-container.sh),
+   which `podman pull`s `docker.io/exasol/nano:${NANO_BASE_TAG}` for the
+   requested platform, verifies the entrypoint is `/controller`, saves the
+   image with `podman save | gzip -9` to
+   `release/exasol-nano-db-<arch>.tar.gz` and writes a sibling `.metadata`
+   file. Cached by task status checks so it is only re-run when
+   `NANO_BASE_TAG` or the script changes.
+2. `stage-init-assets IMG_ARCH=<arch>` — runs
+   [launcher/assets/stage-init-assets.sh](launcher/assets/stage-init-assets.sh),
+   which reads `db.tarball_name` from
+   [launcher/assets/init/config.json](launcher/assets/init/config.json) and
+   copies the pulled tarball into
+   `launcher/assets/init/exasol-nano-db.tar.gz` so it can be embedded
+   alongside the init scripts.
+3. `build IMG_ARCH=<arch>` — runs `host/build/build-artifacts.sh`, which
+   produces kernel/initramfs/raw disk artifacts under `output/<arch>/`.
+   Only needed for mac (embedded VM image) — the windows launcher skips
+   this entirely.
+4. `package-mac IMG_ARCH=aarch64` — runs
+   [host/package/package-mac.sh](host/package/package-mac.sh), which
+   copies `output/aarch64/disk.img` into `package/mac-arm64/`, then
+   `tar | xz -9 --extreme`s the directory into
+   `release/mac-arm64.tar.xz`. This archive is what gets embedded as
+   `vm-package.tar.xz`.
+5. `build-mac-launcher IMG_ARCH=<arch>` — runs
+   [host/package/build-mac-launcher.sh](host/package/build-mac-launcher.sh),
+   which:
+   - Copies `release/mac-<arch>.tar.xz` to `launcher/mac/vm-package.tar.xz`.
+   - `tar | xz -9 --extreme`s `launcher/assets/init/` into
+     `launcher/mac/init-assets.tar.xz`.
+   - Runs `go mod tidy && go mod download && go build` with
+     `-trimpath -ldflags="-s -w"` targeting `GOOS=darwin GOARCH=<arm64|amd64>`,
+     writing the binary to `release/launcher/darwin/<arch>/launcher`.
+   - Removes the temporary `vm-package.tar.xz` and `init-assets.tar.xz`.
+   - Signs the resulting binary with `codesign` using
+     `entitlements.plist` (requires `MACOS_SIGN_KEYCHAIN` and
+     `MACOS_SIGN_IDENTITY`) and verifies the
+     `com.apple.security.virtualization` entitlement is present. CGO is
+     required because `github.com/Code-Hex/vz/v3` binds Apple's
+     Virtualization.framework, so `CGO_ENABLED=0` is not an option on mac.
+
+The mac launcher therefore embeds **two** things via `go:embed`:
+
+- `vm-package.tar.xz` — the UEFI raw disk image plus supporting artifacts
+  produced by the disk-image build pipeline. The windows launcher will
+  **not** embed anything analogous; it delegates VM/container execution to
+  the natively installed podman-for-windows and is decoupled from the disk
+  image pipeline in this repo.
+- `init-assets.tar.xz` — the `launcher/assets/init/` directory tree,
+  including `init.sh`, `init-db.sh`, `init-ip.sh`, `init-ssh.sh`,
+  `init-db-test.sh`, `config.json`, `init-output.json.template`, and the
+  staged `exasol-nano-db.tar.gz` database container image. Confirmed: the
+  Exasol database container image is embedded inside the launcher binary
+  (via the init assets tarball, not as a separate embed). The windows
+  launcher will need the same database container available to
+  podman-for-windows; whether it re-embeds the tarball or pulls it at
+  runtime is an open design choice for the windows implementation.
+
+## Github CI
+
+The mac launcher has the following CI workflows under `.github/workflows/`:
+
+- [lint.yml](.github/workflows/lint.yml) — runs on `pull_request` and
+  pushes to `main`. Currently only checks copyright/SPDX headers via
+  `tools/copyright_headers.py --check`. No mac-specific steps.
+- [build-packages.yml](.github/workflows/build-packages.yml) — triggered
+  via `workflow_dispatch` and `workflow_call`. Three jobs:
+  1. `build-disk-images` (ubuntu-latest) — installs `task`, runs
+     `task install-deps`, logs in to GHCR for the podman build cache,
+     then runs `task package-mac IMG_ARCH=aarch64` and
+     `task download-db-container IMG_ARCH=aarch64`, and uploads
+     `release/` (containing `mac-arm64.tar.xz`,
+     `exasol-nano-db-aarch64.tar.gz`, and its `.metadata`) as the
+     `release-packages` artifact. Can be skipped via the
+     `skip-linux-build` input to reuse a prior run's artifact — useful
+     when only the launcher Go code changes.
+  2. `build-mac-launcher` (macos-latest, needs `build-disk-images`) —
+     downloads the `release-packages` artifact (either from the current
+     run or, when `skip-linux-build` is set, from the latest successful
+     historical run on the same branch), sets up Go 1.22 with
+     `launcher/mac/go.sum` cache key, installs `task` via Homebrew,
+     configures the signing keychain via
+     [.github/actions/setup-macos-signing](.github/actions/setup-macos-signing/action.yml),
+     runs `task build-mac-launcher IMG_ARCH=aarch64`, `ditto`-zips the
+     `release/launcher/darwin/aarch64/` directory into
+     `dist/mac-runner-aarch64.zip`, notarizes with `xcrun notarytool
+     submit --wait` using App Store Connect API credentials, and uploads
+     the notarized zip plus its `.sha256` as the `mac-launcher` artifact.
+  3. `test-mac-launcher` (self-hosted mac ARM64 with virtualization,
+     needs `build-mac-launcher`) — downloads the `mac-launcher`
+     artifact, installs `task`, and runs `task
+     test-launcher-integration` (which executes `go test -timeout 30m
+     ./...` under `tests/`). Uploads `tests/failures/` on any outcome.
+- [release.yml](.github/workflows/release.yml) — triggered on `v*` tag
+  push. Validates the tag with a `vMAJOR.MINOR.PATCH[-pre]` regex,
+  re-uses `build-packages.yml` via `workflow_call`, then downloads the
+  `mac-launcher` artifact and publishes a GitHub Release (draft →
+  publish), marking it as prerelease when the tag has a pre-release
+  suffix.
+- [ci-build-mac-launcher.sh](host/github/ci-build-mac-launcher.sh)
+  (invoked via the `ci-build-mac-launcher` task) — helper for
+  developers to trigger the workflow from a local checkout and download
+  the resulting launcher artifact, with an option to skip the Linux
+  disk-image build for launcher-only iterations.
+
+## Additional useful background information
+
+- Directory layout at runtime (relative to the launcher's working dir):
+  `vm/` holds the extracted VM image (mac only); `vm-shared/` is the
+  host↔guest exchange folder that becomes `/mnt/host` inside the guest and
+  contains `authorized_keys`, `version-check.json`, `vm-init-output.json`,
+  and a `logs/` subdir; `vm-ssh-key` (or the user-provided key) is the SSH
+  private key; `vm-config.json` (`RuntimeConfig`) records the SSH key path
+  and other launcher state. The integration tests in `tests/` assume this
+  layout.
+- Guest bootstrap contract: after boot, `launcher/assets/init/init.sh`
+  drives `init-ip.sh`, `init-ssh.sh`, `init-db.sh`, and `init-db-test.sh`,
+  and writes `vm-shared/vm-init-output.json` following
+  `init-output.json.template` (JSON with `ip` and `ports`). The launcher
+  parses this via the `InitOutput` struct in `main.go` to learn the
+  guest-side IP and negotiated ports.
+- Integration tests: [tests/](tests/) is a standalone Go module
+  (`tests/go.mod`) with fixture-based tests
+  ([fixture_test.go](tests/fixture_test.go)) covering data persistence,
+  DB connectivity, port overrides, SSH, and status. These are the tests
+  that must also pass on windows; they invoke the launcher binary and
+  parse its stdout/stderr.
+- Go module: [launcher/mac/go.mod](launcher/mac/go.mod) targets Go 1.25.0
+  and depends on `github.com/Code-Hex/vz/v3` (mac-only, CGO),
+  `github.com/ulikunitz/xz` (pure-Go), and `golang.org/x/crypto`. The
+  windows launcher already has its own module at
+  [launcher/windows/go.mod](launcher/windows/main.go) — it will need to
+  drop the vz dependency and instead shell out to `podman.exe` (and
+  possibly the podman-for-windows machine tooling).
+- Podman-for-windows detail: the natively installed podman-for-windows
+  ships its own WSL2-backed Linux VM under the hood, so the windows
+  launcher effectively delegates the "VM" concern to podman and only
+  needs to manage the container lifecycle, port publishing, volume for
+  persistent data, and copying the init/SSH assets into the container.
+- Copyright header lint: every source file in this repo is expected to
+  carry the `// Copyright 2026 Exasol AG` / `SPDX-License-Identifier: MIT`
+  header enforced by `tools/copyright_headers.py`. New windows launcher
+  files must include the same header.
+
+
+# Pre-work refactor
+
+The current `launcher/assets` folder needs to be moved to `launcher/assets/mac`,
+so the windows-specific assets can live cleanly under
+`launcher/assets/windows` without name collisions. The move also requires
+updating:
+
+- [host/package/build-mac-launcher.sh](host/package/build-mac-launcher.sh) —
+  change the `tar -C "$ROOT_DIR/launcher/assets" -cf - init` line to
+  `tar -C "$ROOT_DIR/launcher/assets/mac" -cf - init`.
+- [launcher/assets/stage-init-assets.sh](launcher/assets/stage-init-assets.sh)
+  → [launcher/assets/mac/stage-init-assets.sh](launcher/assets/mac/stage-init-assets.sh);
+  update its `DEST_TARBALL` path and the `CONFIG_FILE` path.
+- [launcher/assets/download-db-container.sh](launcher/assets/download-db-container.sh)
+  → [launcher/assets/mac/download-db-container.sh](launcher/assets/mac/download-db-container.sh)
+  (or lifted to a shared location if we want to reuse it for windows — see
+  "Differences with the mac version" below).
+- [Taskfile.yml](Taskfile.yml) — update all `./launcher/assets/...` paths in
+  the `download-db-container`, `stage-init-assets`, and status checks.
+
+Alternative: keep the current `launcher/assets/{init,download-db-container.sh,stage-init-assets.sh}`
+layout, and only add a new sibling `launcher/assets/windows/` for
+windows-specific files. This avoids touching the mac build path and only
+requires new tasks. Recommendation: the alternative — because
+`download-db-container.sh` and its output (the `exasol-nano-db-<arch>.tar.gz`
+tarball) is genuinely shared between platforms, and moving it under `mac/`
+would misrepresent its scope. (NOTE: Okay, do this)
+
+# Windows version
+
+## Required sub commands
+
+The windows launcher will be in `launcher/windows/main.go` and exposes the
+following subcommands via a single `flag`-based dispatcher in `main()`.
+The windows version must support the same set with matching flags
+positional arguments, exit codes, and stdout/stderr contracts, because other projects outside of this codebase depend on the interface remaining stable, and so the
+shared integration tests in [tests/](tests/) can be reused (the tests
+currently have `//go:build darwin`; that constraint will be dropped or
+replaced with `darwin || windows` and any mac-only assertions guarded).
+
+- `init [--ssh-key <private-key>]`
+  - Prepares the working directory for a first-time launch.
+  - Extracts the embedded `init-assets.tar.xz` (see
+    [Build procedure](#build-proceedure-1)) into `./resources/` — this
+    contains at minimum `config.json` and `exasol-nano-db.tar.gz`. `./resources/`
+    is the windows analogue of the mac `./vm-shared/` + `./vm/` split (there
+    is no guest VM to sync with, so we do not need a `vm-shared/` folder).
+  - `--ssh-key` handling: reject the flag with a clear error message
+    (exit code 2) rather than silently accepting it. Recommended message:
+    `"--ssh-key is not supported on windows: there is no guest VM to SSH into"`.
+    Silently accepting the flag would mislead users who copy mac invocations
+    verbatim, and the two SSH-related integration tests
+    (`TestSSHKeyGeneration` and `TestSSHConnectivityAfterStart` in
+    [tests/ssh_test.go](tests/ssh_test.go)) will be excluded from the
+    windows run anyway. Alternative if strict compatibility is required:
+    accept and ignore the flag, print a stderr warning, and emit an empty
+    `vm-ssh-key` marker file so downstream tooling detects "no SSH".
+  - Writes a `vm-config.json` (`RuntimeConfig`) even on windows so `stop`
+    and `status` share the same on-disk contract as mac; on windows the
+    `ssh_private_key` field is left empty.
+- `start [--ports <svc>:<port>,...] [--version-check-* flags] <cpu> <ram_mb> <data_size_gb>`
+  - Positional args (`cpu`, `ram_mb`, `data_size_gb`) are **parsed and
+    validated** for compatibility but otherwise ignored, because
+    podman-for-windows sizes its own WSL2 backing VM globally via
+    `podman machine set`. Keeping the args required (rejecting missing or
+    non-integer values with exit code 2) preserves the CLI contract and
+    lets us surface the values in `--help` and logs without silently
+    diverging from the mac behavior.
+  - `--ports` overrides host-side port bindings. Windows uses native
+    podman `-p <host_port>:<container_port>` publishing. To match the mac
+    "unspecified services default to the guest port; fall back to a
+    random free port if unavailable" behavior, the launcher must probe
+    each requested host port with a `net.Listen("tcp", ":<port>")` (and
+    immediately close) *before* invoking `podman run`, and fall back to
+    `":0"` to obtain a free port. `TestPortOverrideFailsIfPortInUse` in
+    [tests/ports_test.go](tests/ports_test.go) requires an explicit
+    override to a busy port to be a hard failure (exit code 1) — do
+    **not** silently fall back in that case.
+  - `--version-check-*` flags: on mac these are serialized to
+    `vm-shared/version-check.json` and consumed by
+    [launcher/assets/init/init-db.sh](launcher/assets/init/init-db.sh)
+    which then translates them into `podman run … init
+    VERSION_CHECK_ENABLED=… VERSION_CHECK_ENDPOINT=…` args passed to the
+    Nano container. On windows, the launcher takes on the role that
+    `init-db.sh` plays on mac: it must translate the same flag values
+    directly into the `podman run` argv (see the guest-side script for
+    the exact key names).
+  - Data disk lifecycle: podman does not use a raw `data.img`. Use a
+    **named podman volume** (e.g. `exasol-nano-data`) mounted at `/exa`
+    inside the container, matching the guest-side
+    `-v "$EXA_DATA_DIR:/exa"` pattern in
+    [init-db.sh](launcher/assets/init/init-db.sh#L403). Named volumes
+    persist across `podman rm` and are the idiomatic podman-for-windows
+    approach; a VHD would only be relevant if we needed a fixed-size
+    block device, which the Exasol Nano image does not require (`/exa`
+    is a normal filesystem path). See the "Differences with the mac
+    version" section for how to reconcile this with `data_size_gb` and
+    `resize-data`.
+  - **No background daemon is needed**: unlike the mac version, which
+    must re-exec itself as `__daemon__` to keep the vz-backed VM alive,
+    `podman run -d` already detaches the container into the podman
+    service. The launcher simply invokes `podman run -d …` and returns.
+    (The prior draft said "a background daemon … is now needed" — that
+    was a typo; it is the opposite.) State that the mac daemon wrote
+    (e.g. `vm-state.json` with `Ports` and `PID`) still needs to be
+    written by the windows `start` command directly, because the tests
+    read `vm-state.json` to discover chosen ports.
+- `stop`
+  - Runs `podman stop --time 30 <container>` (30s graceful window),
+    followed by `podman rm <container>` to remove the stopped container
+    so a subsequent `start` can recreate it. Removes `vm-state.json` and
+    any other transient runtime state files. Idempotent — no error if
+    the container is already stopped/gone. The named data volume is
+    **preserved** so `TestDataPersistenceAcrossRestart` passes.
+- `status`
+  - Prints `{"running": true}` if `podman inspect --format '{{.State.Running}}'
+    <container>` returns `true`, otherwise `{"running": false}`.
+    Exits 0 in both cases. `TestStatusAfterForcefulKill` in
+    [tests/status_test.go](tests/status_test.go) exercises the case
+    where the launcher process is killed but the container might still
+    be running — on windows this is naturally correct because podman is
+    the source of truth, not any launcher-owned process.
+- `resize-data <size_gb>`
+  - See "Differences with the mac version" for the recommended handling
+    of `TestDataDiskGrowth` and `TestDataDiskShrinkRejected`. Short
+    version: record the requested size in a sidecar file
+    (`resources/data-size.txt`), enforce the "grow-only, no shrink" rule
+    against the recorded value, and have `start` reject a smaller
+    `data_size_gb` too. This preserves the test contract without
+    actually resizing anything (podman-for-windows sizes its WSL disk
+    globally, not per-volume).
+
+Exit code conventions to preserve on windows:
+
+- `0` on success.
+- `1` for runtime errors (also used for missing usage args in a few
+  legacy branches).
+- `2` for flag-parse errors and wrong positional argument counts.
+
+## Build proceedure
+
+The existing build proceedure for the mac version is managed in the
+`Taskfile.yml` with the following steps. All tasks are parameterized by
+`IMG_ARCH` (`aarch64` or `x86_64`); the released windows build uses
+`x86_64` (podman-for-windows ARM64 exists but is not a common
+deployment target).
+
+1. `download-db-container IMG_ARCH=x86_64` — runs the existing
+   [launcher/assets/download-db-container.sh](launcher/assets/download-db-container.sh)
+   (see "Pre-work refactor" — recommended to keep it in place and share
+   with mac). Produces `release/exasol-nano-db-x86_64.tar.gz` and its
+   `.metadata` sibling.
+2. `stage-windows-init-assets IMG_ARCH=x86_64` — new sibling of
+   `stage-init-assets`. Reads `db.tarball_name` from
+   `launcher/assets/windows/init/config.json` and copies
+   `release/exasol-nano-db-x86_64.tar.gz` to
+   `launcher/assets/windows/init/exasol-nano-db.tar.gz` so it can be
+   embedded.
+3. `build-windows-launcher IMG_ARCH=x86_64` — runs
+   `host/package/build-windows-launcher.sh`, which:
+   - `tar | xz -9 --extreme`s `launcher/assets/windows/init/` into
+     `launcher/windows/init-assets.tar.xz`.
+   - Runs `go mod tidy && go mod download && go build` with
+     `-trimpath -ldflags="-s -w"` and `CGO_ENABLED=0` (nothing on windows
+     needs CGO — no vz equivalent) targeting `GOOS=windows GOARCH=amd64`,
+     writing the binary to `release/launcher/windows/x86_64/launcher.exe`.
+   - Removes the temporary `init-assets.tar.xz`.
+   - Signs the binary with `signtool.exe sign` using a code-signing
+     certificate. See "Windows code signing" below.
+
+The windows launcher therefore embeds **one** thing via `go:embed`:
+
+- `init-assets.tar.xz` — the `launcher/assets/windows/init/` directory
+  tree, including `config.json` and the staged `exasol-nano-db.tar.gz`
+  database container image.
+
+### Windows code signing
+
+The mac launcher is signed with Apple's `codesign` and notarized via
+`notarytool`. The windows equivalent is Authenticode signing.
+
+**Signing infrastructure is already provisioned by IT.** This
+repository already carries four secrets that map onto SSL.com's
+[eSigner cloud code-signing](https://www.ssl.com/how-to/esigner-cloud-code-signing-with-codesigntool-command-line-guide/)
+service:
+
+- `ESIGN_USERNAME` — SSL.com account username
+- `ESIGN_PASSWORD` — SSL.com account password
+- `ESIGN_CREDENTIAL_ID` — id of the signing credential in SSL.com's HSM
+- `ESIGN_TOTP_SECRET` — shared secret from which the TOTP 2FA code is
+  generated at sign time
+
+With eSigner the private key never leaves SSL.com's HSM; the local
+signer (CodeSignTool, a Java CLI) authenticates over TLS, uploads the
+executable, and receives the signed binary back. No PFX file, no local
+key material, no HSM device to manage.
+
+Concretely for Phase 12:
+
+- Use the first-party GitHub Action
+  [`SSLcom/esigner-codesign`](https://github.com/SSLcom/esigner-codesign),
+  which vendors CodeSignTool and exposes the four secrets as inputs.
+  Pin to a commit SHA per this repo's convention for third-party
+  actions.
+- Timestamping is handled by CodeSignTool internally (it uses SSL.com's
+  RFC 3161 timestamp server by default); no timestamp URL secret is
+  needed.
+- Signature verification uses `signtool.exe verify /pa /v launcher.exe`
+  as a follow-up step — `signtool.exe` is preinstalled with the Windows
+  SDK on GitHub-hosted `windows-latest` runners.
+- The certificate SSL.com issues via eSigner is trusted by SmartScreen
+  once it accumulates reputation; no separate notarization step is
+  required on Windows.
+
+The prior draft of this subsection assumed a PFX-based signing model
+with new secrets (`WINDOWS_SIGN_PFX_BASE64`, `WINDOWS_SIGN_PFX_PASSWORD`).
+That model is superseded — IT has already provisioned eSigner, so
+Phase 12 uses the existing `ESIGN_*` secrets and no new secret
+provisioning is required.
+
+## Github CI
+
+The mac launcher has the following CI workflows under `.github/workflows/`.
+The windows version adds two jobs and reuses the shared release flow.
+
+- [lint.yml](.github/workflows/lint.yml) — runs on `pull_request` and
+  pushes to `main`. Checks copyright/SPDX headers via
+  `tools/copyright_headers.py --check`. No changes needed for windows —
+  the new `launcher/windows/*.go` and `launcher/assets/windows/**` files
+  will be picked up automatically as long as they carry the standard
+  header.
+- [build-packages.yml](.github/workflows/build-packages.yml) — add two
+  new jobs alongside `build-disk-images`, `build-mac-launcher`,
+  `test-mac-launcher`:
+  1. `build-windows-launcher` (`runs-on: windows-latest`, `needs:
+     build-disk-images`) — downloads the `release-packages` artifact
+     produced by `build-disk-images` (same as the mac job; the artifact
+     already contains `exasol-nano-db-x86_64.tar.gz` if we add
+     `task download-db-container IMG_ARCH=x86_64` to the
+     `build-disk-images` step). Sets up Go with
+     `cache-dependency-path: launcher/windows/go.sum`, installs `task`
+     (`choco install go-task` or `winget install Task.Task`), stages the
+     windows init assets, runs `task build-windows-launcher
+     IMG_ARCH=x86_64`, then packages the launcher as
+     `dist/windows-runner-x86_64.zip` and its `.sha256` sibling using
+     PowerShell `Compress-Archive` (the mac job uses `ditto` — same
+     effect, different tool). If a signing certificate is configured,
+     decodes `WINDOWS_SIGN_PFX_BASE64` to a temp `.pfx` and invokes
+     `signtool.exe sign` (see "Windows code signing" above). Uploads
+     the artifact as `windows-launcher`.
+
+     Note: there is **no** existing `.github/actions/setup-windows-signing`
+     composite action; one will need to be authored (analogous to
+     [.github/actions/setup-macos-signing](.github/actions/setup-macos-signing/action.yml))
+     that decodes the base64 PFX to a runner-temp file and exports
+     `WINDOWS_SIGN_PFX_PATH` and `WINDOWS_SIGN_PFX_PASSWORD` for the
+     build step to consume. Delete this note once the action exists.
+  2. `test-windows-launcher` (`runs-on: [self-hosted, Windows, X64,
+     podman]`, `needs: build-windows-launcher`) — downloads the
+     `windows-launcher` artifact, ensures podman-for-windows is
+     installed and its machine is running (`podman machine start` if
+     needed), installs `task` and Go, and runs `task
+     test-launcher-integration` (which executes `go test -timeout 30m
+     ./...` under `tests/`). Uploads `tests/failures/` on any outcome.
+     This job requires a self-hosted runner because the GitHub-hosted
+     `windows-latest` runners do not have podman-for-windows preinstalled
+     and enabling nested virtualization on them is not reliable.
+
+     `build-disk-images` should also start running `task
+     download-db-container IMG_ARCH=x86_64` so the windows job has a
+     tarball to embed. Verify the release-artifacts checks in the
+     workflow ("Verify release artifacts" step) are updated to require
+     the new file.
+- [release.yml](.github/workflows/release.yml) — triggered on `v*` tag
+  push. Validates the tag with a `vMAJOR.MINOR.PATCH[-pre]` regex,
+  re-uses `build-packages.yml` via `workflow_call`, then downloads
+  **both** the `mac-launcher` and `windows-launcher` artifacts and
+  publishes a GitHub Release (draft → publish), marking it as
+  prerelease when the tag has a pre-release suffix. Update the
+  `create-release` job's `download-artifact` step to also download
+  `windows-launcher` into `release-artifacts/windows/` and iterate over
+  it in the upload loop.
+- `host/github/ci-build-windows-launcher.sh` (new, invoked via a new
+  `ci-build-windows-launcher` task) — helper for developers to trigger
+  the workflow from a local checkout and download the resulting
+  launcher artifact. Model it on the existing
+  [host/github/ci-build-mac-launcher.sh](host/github/ci-build-mac-launcher.sh).
+  (The prior draft's parenthetical said "(invoked via the
+  `ci-build-mac-launcher` task)" — that was a copy-paste bug; the new
+  script has its own task name.)
+
+## Additional useful background information
+
+- Directory layout at runtime (relative to the launcher's working dir):
+  - `resources/` — extracted from the embedded `init-assets.tar.xz`
+    during `init`. Contains `config.json` and `exasol-nano-db.tar.gz`.
+    This replaces the mac split of `./vm/` (VM image, not needed on
+    windows) and `./vm-shared/` (guest-facing files, not needed on
+    windows because there is no separate guest).
+  - `vm-config.json` (`RuntimeConfig`) — same on-disk shape as mac; the
+    `ssh_private_key` field is empty on windows.
+  - `vm-state.json` — written by `start`, read by tests. Contains at
+    minimum `{"ports": {"db": <chosen_host_port>}}` so
+    `TestPortOverrideAssignsRequestedHostPort` and
+    `SSHCaptureDiagnostics` can locate the right port. On windows the
+    `ssh` key is absent.
+  - `resources/data-size.txt` (windows-only) — the last-known requested
+    data size in GB, used to enforce the grow-only rule (see
+    "Differences with the mac version").
+  - No `vm-ssh-key` file (there is no SSH on windows).
+- Guest bootstrap contract: on mac, `launcher/assets/init/init.sh`
+  drives `init-ip.sh`, `init-ssh.sh`, `init-db.sh`, and `init-db-test.sh`
+  inside the guest, and writes `vm-shared/vm-init-output.json`. On
+  windows there is no guest, so the launcher itself performs the
+  equivalent of `init-db.sh`: `podman load` the tarball, then `podman
+  run -d` with the same flags derived from `config.json` (`--shm-size`,
+  `--pids-limit`, `--security-opt`, `--restart`, `-p db:db`, `-v
+  <volume>:/exa`, `init` args including `VERSION_CHECK_*`). Refer to
+  [init-db.sh](launcher/assets/init/init-db.sh#L396) for the canonical
+  argv shape.
+- Integration tests: [tests/](tests/) is a standalone Go module
+  (`tests/go.mod`) with fixture-based tests
+  ([fixture_test.go](tests/fixture_test.go)) covering data persistence,
+  DB connectivity, port overrides, SSH, and status. The current file
+  is tagged `//go:build darwin`; adding a parallel
+  `fixture_windows_test.go` with `//go:build windows` and a
+  `LAUNCHER_ZIP` env var of `../dist/windows-runner-x86_64.zip` is the
+  cleanest split. Tests requiring SSH (`TestSSHKeyGeneration`,
+  `TestSSHConnectivityAfterStart`) get `//go:build darwin` build tags
+  so they compile only on mac.
+- Go module: [launcher/mac/go.mod](launcher/mac/go.mod) targets Go 1.25.0
+  and depends on `github.com/Code-Hex/vz/v3` (mac-only, CGO),
+  `github.com/ulikunitz/xz` (pure-Go), and `golang.org/x/crypto`. The
+  windows launcher already has its own module at
+  [launcher/windows/go.mod](launcher/windows/go.mod) — it will drop the
+  vz dependency and instead shell out to `podman.exe` via `os/exec`.
+  The current [launcher/windows/main.go](launcher/windows/main.go) is a
+  stale scaffold (it embeds a `disk.tar.xz` and PowerShell scripts, all
+  from an earlier "run our own Hyper-V VM" design); it should be
+  rewritten from scratch rather than incrementally patched.
+- Podman-for-windows detail: the natively installed podman-for-windows
+  ships its own WSL2-backed Linux VM under the hood, so the windows
+  launcher effectively delegates the "VM" concern to podman and only
+  needs to manage the container lifecycle, port publishing, and named
+  volume for persistent data. This has an important consequence for
+  `data_size_gb`: podman-for-windows sizes its WSL2 disk **globally**
+  via `podman machine init --disk-size` / `podman machine set
+  --disk-size`, not per-volume. A per-container "data disk size" is not
+  a first-class concept.
+- Copyright header lint: every source file in this repo is expected to
+  carry the `// Copyright 2026 Exasol AG` / `SPDX-License-Identifier: MIT`
+  header enforced by `tools/copyright_headers.py`. New windows launcher
+  files must include the same header.
+
+## Differences with the mac version
+
+Concrete behavioral differences that the windows implementation and its
+tests must acknowledge. Each item is either a compatibility shim
+(preserves the mac CLI contract without a semantic equivalent on
+windows) or a genuinely different semantic that the tests must be
+updated to allow.
+
+- **No guest VM, no SSH.** Mac launches a `vz`-backed VM whose guest OS
+  runs `sshd` for diagnostics; the SSH keypair generated by `init` is
+  consumed by that sshd. Windows has no guest OS of its own — the
+  podman-for-windows WSL2 VM is opaque and shared. Consequence:
+  `--ssh-key` is unsupported (rejected with exit 2), no
+  `vm-ssh-key`/`authorized_keys` files are created, and
+  `TestSSHKeyGeneration` + `TestSSHConnectivityAfterStart` are
+  darwin-only.
+- **No embedded VM image.** Mac embeds `vm-package.tar.xz` (~hundreds of
+  MB of kernel + rootfs); windows does not. The windows launcher binary
+  will be roughly the size of the embedded `exasol-nano-db.tar.gz` plus
+  the Go runtime, still substantial (~300 MB range depending on the
+  Nano image size).
+- **No launcher-owned background process.** Mac re-execs itself as
+  `__daemon__` to host the vz VM. Windows delegates lifecycle to the
+  podman service; `start` returns after `podman run -d` and there is no
+  launcher PID to track. Tests that assume killing the launcher affects
+  VM state (`TestStatusAfterForcefulKill`) are already correct here
+  because they only check what `status` reports.
+- **`data_size_gb` semantics.** Mac sizes a raw `data.img` file and the
+  guest formats it as ext4. Windows uses a podman named volume backed
+  by the WSL2 disk, which does not have a per-volume size. Recommended
+  compatibility shim:
+  - `start <cpu> <ram> <data_size_gb>` records `data_size_gb` in
+    `resources/data-size.txt` on first run.
+  - Subsequent `start` calls enforce the grow-only rule against that
+    recorded value: equal → OK, larger → OK (update the file), smaller
+    → error (exit 1 with the same message the mac uses). This preserves
+    `TestDataDiskCreatedOnFirstStart`, `TestDataDiskSizeMatchReusesExisting`,
+    and `TestDataDiskShrinkRejected` without actually managing a disk
+    image.
+  - `TestDataDiskGrowth` currently checks the on-disk size of
+    `vm/data.img` before and after `resize-data`. On windows that file
+    does not exist. Options: (a) mark the test darwin-only, or (b) have
+    windows create a zero-byte `resources/data.img` sized via
+    `os.Truncate` purely as a compatibility marker so the size check
+    passes. Recommendation: (a), mark it darwin-only; option (b) is
+    dishonest about what the launcher is actually managing.
+  - `resize-data <size_gb>` on windows: updates
+    `resources/data-size.txt` after the same grow-only check, requires
+    the container to be stopped (matches mac).
+- **`--ports` fallback.** Mac's fallback to a random port when the
+  requested port is unavailable relies on the vfkit/gvproxy layer;
+  windows must replicate this in Go before invoking `podman run` (probe
+  with `net.Listen`, pick `:0` on collision unless the port came from
+  an explicit `--ports` override — those must fail hard). The chosen
+  ports go into `vm-state.json`.
+- **Version check plumbing.** Mac writes
+  `vm-shared/version-check.json` and lets the guest-side `init-db.sh`
+  translate it. Windows translates the flags into `podman run` argv
+  directly and does not need a `version-check.json` file. Skip creating
+  it on windows unless a test explicitly reads it.
+- **`podman-for-windows` prerequisite.** The windows launcher must fail
+  early with a clear error if `podman.exe` is not on `PATH` or if
+  `podman machine inspect` shows no running machine. Suggested error:
+  `"podman-for-windows is required but no running machine was found; run 'podman machine init && podman machine start' first"`.
+- **Container image tag.** The mac path pulls `docker.io/exasol/nano`
+  for `linux/arm64`; the windows path pulls the same image for
+  `linux/amd64`. Both consume the same `NANO_BASE_TAG` from
+  `Taskfile.yml`, so the `podman save` output shape is identical. No
+  code change beyond passing `IMG_ARCH=x86_64`.
+- **CI runner requirements.** Mac tests run on self-hosted mac ARM64
+  with the `virtualization` label. Windows tests need a self-hosted
+  Windows runner (x64) with podman-for-windows installed and its
+  machine started before job dispatch. Label suggestion: `[self-hosted,
+  Windows, X64, podman]`.
+- **Signing model.** Mac uses `codesign` + `notarytool` with an Apple
+  Developer ID and the `com.apple.security.virtualization` entitlement.
+  Windows uses `signtool.exe` + Authenticode with an EV/standard code
+  signing certificate; no entitlements concept. See "Windows code
+  signing" above.
+
+
+# Implementation phases
+
+Each phase is scoped as a single reviewable commit within a larger PR. Each
+phase ends in a verifiable green state (build/lint/tests pass) and must not
+break the mac build path or the existing integration test suite. Phases are
+ordered so that later phases depend only on earlier ones; the launcher can
+be built and iterated on locally from Phase 2 onward, and can be dogfooded
+end-to-end from Phase 8 onward.
+
+The list follows the "Alternative" pre-work refactor confirmed in the
+Pre-work section (do **not** move `launcher/assets/` — add a sibling
+`launcher/assets/windows/` instead).
+
+## Phase 1 — Windows asset scaffolding (no launcher changes)
+
+Purpose: land the shared build machinery for windows-side assets without
+touching the mac build path or any Go code. This unblocks all later
+phases and can ship independently.
+
+- Create [launcher/assets/windows/init/config.json](launcher/assets/windows/init/config.json)
+  as a copy of the current mac
+  [launcher/assets/init/config.json](launcher/assets/init/config.json)
+  (same schema — `db.tarball_name`, `db.container_name`, `db.ports.db`,
+  `db.shm_size`, `db.pids_limit`, `db.security_opt`, `db.restart`,
+  `db.params`). Diverge later if windows needs different values.
+- Add [launcher/assets/stage-windows-init-assets.sh](launcher/assets/stage-windows-init-assets.sh)
+  modeled on [stage-init-assets.sh](launcher/assets/stage-init-assets.sh),
+  but writing to `launcher/assets/windows/init/` and reading its own
+  `config.json`.
+- Add `stage-windows-init-assets` task to [Taskfile.yml](Taskfile.yml)
+  mirroring the existing `stage-init-assets` task, with the same
+  `download-db-container` dependency and status checks.
+- Add `launcher/assets/windows/init/exasol-nano-db.tar.gz` and
+  `launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata` to
+  `.gitignore` (mirror the mac entries).
+
+Verification: `task stage-windows-init-assets IMG_ARCH=x86_64` produces
+`launcher/assets/windows/init/exasol-nano-db.tar.gz`; `task lint`
+passes; the existing `task package-mac` still succeeds.
+
+## Phase 2 — Reset the windows launcher module to a compilable skeleton
+
+Purpose: replace the stale Hyper-V-era
+[launcher/windows/main.go](launcher/windows/main.go) with a subcommand
+dispatcher that has the exact same CLI surface as
+[launcher/mac/main.go](launcher/mac/main.go) but stubs every subcommand
+with an `"not implemented on windows yet"` error (exit 1). No behavior
+yet — this phase is about locking in the interface.
+
+- Delete `launcher/windows/create-shared-vhd.ps1` and
+  `launcher/windows/start-vm.ps1` (unused scaffolding).
+- Rewrite `launcher/windows/main.go`:
+  - `main()` dispatcher matching the mac switch on `os.Args[1]`
+    covering `init`, `start`, `stop`, `status`, `resize-data`.
+  - `flag.NewFlagSet` groups matching the mac flag names for `init`
+    (`--ssh-key`) and `start` (`--ports`, `--version-check-*`).
+  - Positional arg parsing and exit-code contract (0/1/2) matching the
+    mac.
+  - Each subcommand body: `return fmt.Errorf("not implemented on
+    windows yet")`.
+- Rewrite [launcher/windows/go.mod](launcher/windows/go.mod) to drop
+  the vz-adjacent deps; keep `github.com/ulikunitz/xz`. Match Go 1.25.0
+  for parity with mac.
+- Add a placeholder `launcher/windows/init-assets.tar.xz` in
+  `.gitignore`, and add a minimal `//go:embed` block that reads it (a
+  tiny zero-byte tarball can be committed as a fixture for local
+  builds, but preferred: use a build-time script that writes it — see
+  Phase 3).
+
+Verification: `cd launcher/windows && GOOS=windows GOARCH=amd64
+CGO_ENABLED=0 go build ./...` succeeds (with an empty
+`init-assets.tar.xz` present); running the binary with any subcommand
+prints the "not implemented" error and exits 1; `--help` prints usage
+matching the mac usage text.
+
+## Phase 3 — Build script and CI-independent packaging
+
+Purpose: wire up the windows launcher build so a signed-ish
+distributable can be produced locally from `task`. Still no runtime
+behavior beyond Phase 2.
+
+- Add [host/package/build-windows-launcher.sh](host/package/build-windows-launcher.sh)
+  modeled on
+  [build-mac-launcher.sh](host/package/build-mac-launcher.sh):
+  tars `launcher/assets/windows/init/` → `launcher/windows/init-assets.tar.xz`,
+  runs `GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath
+  -ldflags="-s -w" -o release/launcher/windows/x86_64/launcher.exe .`,
+  cleans up the temp tarball.
+  Signing block is stubbed with a `TODO(sign)` comment guarded on
+  `${WINDOWS_SIGN_PFX_PATH:-}` being non-empty; if unset, skip signing
+  with a warning (do not fail).
+- Add `build-windows-launcher` task to `Taskfile.yml` with
+  `stage-windows-init-assets` as its `deps`.
+- Add `launcher/windows/init-assets.tar.xz` to `.gitignore`.
+
+Verification: `task build-windows-launcher IMG_ARCH=x86_64` on a Linux
+or macOS dev machine produces `release/launcher/windows/x86_64/launcher.exe`;
+the binary is a valid PE (`file` reports "PE32+ executable"). Running
+the binary is not verified here — that is Phase 8+.
+
+## Phase 4 — `init` subcommand
+
+Purpose: first user-visible behavior. Extracts the embedded init
+assets and writes the shared runtime config.
+
+- Implement `initCmd` in `launcher/windows/main.go`:
+  - Reject `--ssh-key` with exit code 2 and the message in the
+    Required-sub-commands section.
+  - Extract `init-assets.tar.xz` into `./resources/` using the same
+    `xz` + `archive/tar` code shape as the mac `extractTarXZ`
+    (recommend copying it verbatim — the two codebases will drift, but
+    that is acceptable at this stage).
+  - Write `vm-config.json` with an empty `ssh_private_key` field.
+  - Print `Initialized. Run 'launcher start <cpu> <ram_mb>
+    <data_size_gb>' to start.` on success.
+
+Verification: unit tests in `launcher/windows/main_test.go` covering
+(1) `--ssh-key` rejection, (2) `resources/config.json` and
+`resources/exasol-nano-db.tar.gz` extraction, (3) `vm-config.json`
+contents. `go test ./launcher/windows/...` passes on the CI host (Linux
+runner is fine because none of this requires podman).
+
+## Phase 5 — Podman-for-windows prerequisites and container image load
+
+Purpose: everything the `start` command needs from podman before the
+container itself is launched. Kept in its own phase because it is
+mockable and lets `start` in Phase 6 focus on argv construction.
+
+- Add a `podman` helper package (`launcher/windows/internal/podman/`)
+  with:
+  - `Available() error` — runs `podman.exe --version`; error explains
+    how to install podman-for-windows.
+  - `MachineRunning() error` — runs `podman machine inspect --format
+    '{{.State}}'`; error explains `podman machine start`.
+  - `LoadImage(tarballPath string) (imageRef string, err error)` —
+    runs `podman load -i <path>` and parses the `Loaded image: <ref>`
+    output.
+  - `ContainerExists(name string) (bool, error)`,
+    `ContainerRunning(name string) (bool, error)`,
+    `Stop(name string, timeout time.Duration) error`,
+    `Rm(name string) error`.
+
+Verification: unit tests using a fake `podman` shim on `PATH` (a shell
+script that prints canned output) exercise each helper. No live podman
+required in CI.
+
+## Phase 6 — `start` subcommand (core path)
+
+Purpose: get the container running end-to-end with default ports and
+no version-check flags. Data-size and ports overrides come in later
+phases so this phase is small.
+
+- Implement `startCmd`:
+  - Parse positional args, validate ranges (matching mac error
+    messages).
+  - Call `podman.Available()` and `podman.MachineRunning()`.
+  - Load `resources/exasol-nano-db.tar.gz` via `podman.LoadImage` if
+    not already present.
+  - Build `podman run -d` argv from `resources/config.json`
+    (`--shm-size`, `--pids-limit`, `--security-opt`, `--restart`, `-p
+    <db_port>:<db_port>`, `-v exasol-nano-data:/exa`, image ref, `init`
+    args). Reference:
+    [init-db.sh](launcher/assets/init/init-db.sh#L396).
+  - Write `vm-state.json` with `{"ports": {"db": <db_port>}}`.
+  - Idempotent: if the container is already running, no-op with a
+    log line.
+
+Verification: unit tests for argv construction (given a fixture
+`config.json`, assert the exact `podman run` argv). Manual smoke test
+on a windows dev machine: `launcher init && launcher start 4 4096 10
+&& launcher status` returns `{"running": true}` and `podman ps` shows
+the container.
+
+## Phase 7 — `--ports` overrides with availability probing
+
+Purpose: match the mac semantics for host port selection.
+
+- Extract the port selection logic (probe with `net.Listen`, fall back
+  to `:0` when unspecified, hard-fail when explicit) into a helper so
+  it is unit-testable independently of podman.
+- Feed the selected host port into the `-p <host>:<container>` argv
+  and into `vm-state.json`.
+
+Verification: unit tests for the helper covering (1) explicit override
+to a free port, (2) explicit override to a busy port → error, (3) no
+override, default port free → default port, (4) no override, default
+port busy → random port. Integration tests
+`TestPortOverrideAssignsRequestedHostPort`,
+`TestPortOverrideFailsIfPortInUse`, and
+`TestPortOverrideFailsForUnknownService` in
+[tests/ports_test.go](tests/ports_test.go) pass on windows once Phase
+10 wires them up.
+
+## Phase 8 — `stop` and `status`
+
+Purpose: complete the lifecycle so the launcher is dogfoodable.
+
+- Implement `stopCmd`: `podman stop --time 30 <container>`, then
+  `podman rm <container>`; idempotent; remove `vm-state.json`.
+- Implement `statusCmd`: query `podman inspect --format
+  '{{.State.Running}}'`; print `{"running": true|false}`; exit 0
+  regardless.
+
+Verification: unit tests against the fake podman shim; manual smoke
+test of `launcher start && launcher status && launcher stop &&
+launcher status`.
+
+## Phase 9 — `--version-check-*` flags, `data_size_gb` sidecar, and `resize-data`
+
+Purpose: bring the remaining CLI surface up to parity with the mac
+launcher.
+
+- `--version-check-*` flags: extend the `podman run` argv builder from
+  Phase 6 to append the `VERSION_CHECK_*` init args matching the
+  guest-side `init-db.sh` behavior. No `version-check.json` file is
+  written.
+- `data_size_gb` sidecar (`resources/data-size.txt`): on first `start`,
+  write the size. On subsequent `start`, reject smaller values with
+  the mac error message; accept equal or larger.
+- `resize-data`: enforce the same grow-only rule; require the
+  container to be stopped (call `podman.ContainerRunning` and error if
+  true).
+
+Verification: unit tests for argv construction covering all
+`--version-check-*` combinations, and for the sidecar contract
+covering create / reuse / grow / shrink. Integration tests
+`TestDataDiskCreatedOnFirstStart`,
+`TestDataDiskSizeMatchReusesExisting`, and `TestDataDiskShrinkRejected`
+pass on windows.
+
+## Phase 10 — Shared integration test suite (windows build tags)
+
+Purpose: unlock the tests in [tests/](tests/) for the windows launcher
+without duplicating them.
+
+- Rename [tests/fixture_test.go](tests/fixture_test.go) to
+  `fixture_common_test.go` with `//go:build darwin || windows` and
+  extract the mac-specific `zipPath` default (`../dist/mac-runner-aarch64.zip`)
+  into a small platform-dispatch helper. Add
+  `fixture_windows_test.go` with `//go:build windows` supplying
+  `../dist/windows-runner-x86_64.zip` as the default. Both honor
+  `LAUNCHER_ZIP`.
+- Add `//go:build darwin` to [tests/ssh_test.go](tests/ssh_test.go)
+  and to `TestDataDiskGrowth` in
+  [tests/data_persistence_test.go](tests/data_persistence_test.go).
+  Leave everything else at `//go:build darwin || windows`.
+- Add `test-launcher-integration` task branches (or environment
+  detection) to invoke `go test` correctly on both platforms.
+
+Verification: `go test ./tests/...` still passes on mac with the mac
+zip present; `go test ./tests/...` on windows with the windows zip
+present passes for all non-darwin-only tests.
+
+## Phase 11 — CI: `build-windows-launcher` and `test-windows-launcher` jobs
+
+Purpose: land the CI plumbing without signing (signing is Phase 12).
+
+- Add `task download-db-container IMG_ARCH=x86_64` and
+  `task stage-windows-init-assets IMG_ARCH=x86_64` calls to the
+  `build-disk-images` job in
+  [.github/workflows/build-packages.yml](.github/workflows/build-packages.yml)
+  so the x86_64 tarball is included in the `release-packages` artifact.
+  Extend the "Verify release artifacts" step to require the new file.
+- Add a `build-windows-launcher` job (`runs-on: windows-latest`,
+  `needs: build-disk-images`) that downloads `release-packages`,
+  stages the windows init assets from the downloaded tarball, runs
+  `task build-windows-launcher IMG_ARCH=x86_64`, `Compress-Archive`s
+  the result into `dist/windows-runner-x86_64.zip` with a `.sha256`
+  sibling, and uploads them as the `windows-launcher` artifact. No
+  signing yet — the build script's signing block skips cleanly when
+  the signing env vars are unset.
+- Add a `test-windows-launcher` job (`runs-on: [self-hosted, Windows,
+  X64, podman]`, `needs: build-windows-launcher`) that downloads the
+  `windows-launcher` artifact, ensures the podman machine is running,
+  and runs `task test-launcher-integration`. Uploads `tests/failures/`
+  on any outcome.
+- Update [.github/workflows/release.yml](.github/workflows/release.yml)
+  `create-release` job to also download the `windows-launcher`
+  artifact into `release-artifacts/windows/` and include it in the
+  upload loop.
+- Add [host/github/ci-build-windows-launcher.sh](host/github/ci-build-windows-launcher.sh)
+  modeled on
+  [ci-build-mac-launcher.sh](host/github/ci-build-mac-launcher.sh),
+  and a matching `ci-build-windows-launcher` task in `Taskfile.yml`.
+
+Verification: `workflow_dispatch` the `build-packages` workflow;
+`build-windows-launcher` produces an unsigned `windows-runner-x86_64.zip`;
+`test-windows-launcher` runs the full integration suite against it and
+passes (assuming a self-hosted runner is registered).
+
+## Phase 12 — Windows code signing via SSL.com eSigner
+
+Purpose: sign the released binary using the SSL.com eSigner cloud
+code-signing service already provisioned in this repository by IT
+(see the `ESIGN_*` secret set enumerated in the "Windows code signing"
+subsection under Build procedure above).
+
+- Wire the four existing `ESIGN_*` secrets through the
+  `workflow_call.secrets:` block of
+  [.github/workflows/build-packages.yml](.github/workflows/build-packages.yml)
+  so [.github/workflows/release.yml](.github/workflows/release.yml) can
+  invoke a signed build via `secrets: inherit`.
+- In the `build-windows-launcher` job, add a signing step between
+  `Build windows launcher` and `Package windows launcher zip`,
+  invoking the
+  [`SSLcom/esigner-codesign`](https://github.com/SSLcom/esigner-codesign)
+  action (pinned to a commit SHA per this repo's convention for
+  third-party actions):
+
+  ```yaml
+  - name: Sign windows launcher
+    if: ${{ env.ESIGN_USERNAME != '' }}   # skip on forks that lack the secrets
+    env:
+      ESIGN_USERNAME: ${{ secrets.ESIGN_USERNAME }}
+    uses: sslcom/esigner-codesign@<commit-sha>
+    with:
+      command:       sign
+      username:      ${{ secrets.ESIGN_USERNAME }}
+      password:      ${{ secrets.ESIGN_PASSWORD }}
+      credential_id: ${{ secrets.ESIGN_CREDENTIAL_ID }}
+      totp_secret:   ${{ secrets.ESIGN_TOTP_SECRET }}
+      file_path:     ${{ github.workspace }}/release/launcher/windows/x86_64/launcher.exe
+      override:      true
+  ```
+
+  Signing runs *before* `Compress-Archive` so the packaged zip
+  contains the signed binary.
+- Add a verification step after signing:
+
+  ```yaml
+  - name: Verify Authenticode signature
+    if: ${{ env.ESIGN_USERNAME != '' }}
+    shell: pwsh
+    run: |
+      $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+        -Recurse -Filter signtool.exe |
+        Where-Object { $_.FullName -like '*x64*' } |
+        Select-Object -Last 1 -ExpandProperty FullName
+      & $signtool verify /pa /v release/launcher/windows/x86_64/launcher.exe
+  ```
+
+  Fails the job if the signature is missing when signing was
+  attempted.
+- Gating: the sign + verify steps are conditional on
+  `env.ESIGN_USERNAME` being non-empty. Secrets are not passed to PR
+  builds from forks, so those builds continue to produce an unsigned
+  binary and remain runnable; CI status stays green for external
+  contributors.
+- No `setup-windows-signing` composite action is authored — the
+  first-party `SSLcom/esigner-codesign` action already encapsulates
+  CodeSignTool installation, OTP generation, and the TLS round-trip
+  to SSL.com's HSM, so a local wrapper would add nothing.
+- The `WINDOWS_SIGN_PFX_*` env-var gate in
+  [host/package/build-windows-launcher.sh](host/package/build-windows-launcher.sh)
+  becomes dead code once Phase 12 lands (Phase 3 introduced it as a
+  placeholder before IT's eSigner setup was surfaced). Two options:
+  1. **Delete the block**, folding signing entirely into CI. Matches
+     how the mac launcher signing lives — no local signing path.
+  2. **Rewrite the block** to invoke CodeSignTool directly against the
+     `ESIGN_*` env vars, so a developer with SSL.com creds could sign
+     locally. Adds a Java dependency to local builds.
+
+  Recommendation: **option 1**. The eSigner-only model is simpler to
+  reason about, matches the mac path (CI-only signing), and avoids
+  taking on a Java runtime dependency for the local dev flow.
+
+Verification: a `workflow_dispatch` run of `build-packages` on `main`
+produces a signed `windows-runner-x86_64.zip`; extracting and running
+`signtool.exe verify /pa /v launcher.exe` locally confirms the
+signature chains to SSL.com's public root and includes a
+counter-signed RFC 3161 timestamp. Tagging `v0.0.0-testsign` on `main`
+publishes the signed zip in a GitHub Release draft.
+
+## Refactor Phase 13 — try GitHub-hosted runners for integration tests
+
+Purpose: reduce operational overhead by dropping the self-hosted
+Windows runner requirement introduced in Phase 11, *if*
+GitHub-hosted `windows-latest` runners can host podman-for-windows
+reliably enough for CI.
+
+Motivation: Phase 11's `test-windows-launcher` job uses a self-hosted
+runner because the initial plan assumed GitHub-hosted `windows-latest`
+can't run podman-for-windows (no pre-install + unreliable nested
+virtualization). That assumption is worth re-testing before we invest
+in provisioning and maintaining a self-hosted runner. Nested
+virtualization on Azure-backed Actions runners has improved over the
+past year, and installing podman-for-windows takes ~1–2 minutes via
+`winget` or `choco`. If the tests pass on GitHub-hosted runners, we
+avoid a runner-maintenance load entirely.
+
+Investigation steps:
+
+- On a scratch branch, change `test-windows-launcher`'s `runs-on` to
+  `windows-latest` and prepend an install step:
+
+  ```yaml
+  - name: Install podman-for-windows
+    shell: pwsh
+    run: |
+      winget install --id RedHat.Podman --silent `
+        --accept-source-agreements --accept-package-agreements
+      podman machine init --disk-size 40
+      podman machine start
+  ```
+
+- Trigger `workflow_dispatch` with `skip-linux-build=true` about five
+  times to measure:
+  - cold-run duration (target: <20 min end-to-end for the job)
+  - reliability across the runs (target: no runner-side flakes)
+  - whether the WSL2 backing VM comes up cleanly on the fresh runner
+    each time (podman-for-windows initializes it on first `podman
+    machine start`, which may hit the runner's disk-provisioning
+    limits)
+- If reliable: swap `runs-on` to `windows-latest`, delete the
+  self-hosted-runner note from the "CI runner requirements" bullet in
+  the "Differences with the mac version" section, and close the
+  follow-up ticket that tracks self-hosted-runner provisioning.
+- If unreliable: keep self-hosted, capture the observed failure mode
+  in a comment on the job so future revisits know what to check.
+
+Fallback plan: matrix the job for one release cycle with `runs-on:
+[windows-latest, self-hosted-windows]` and `fail-fast: false`. If
+both legs pass consistently, drop the self-hosted leg. This lets us
+switch away from the self-hosted runner without a hard cutover.
+
+Not blocking: Phase 12 signing works identically on either runner
+choice because eSigner signing is a network call to SSL.com's HSM —
+no runner-side podman requirement.
+
+
+# Architechtural draft
+
+Stakeholder-facing summary of the proposed windows launcher architecture.
+Kept intentionally short so the non-technical audience can approve the
+approach without wading through the implementation phases above.
+
+## One-line summary
+
+The windows launcher is a small Go CLI (`windows-runner`) that presents the
+same command-line interface as the existing macOS launcher, but delegates
+container execution to the user's natively installed **podman-for-windows**
+instead of shipping and running its own virtual machine.
+
+## Why this design
+
+- **Reuses what already ships on windows.** podman-for-windows is a
+  well-maintained, freely available product that provides a hardened
+  Linux container runtime through a bundled WSL2 backing VM. Building our
+  own VM stack on windows would duplicate infrastructure Microsoft and
+  Red Hat already maintain, and would require virtualization entitlements
+  and driver work we do not need for the mac release.
+- **Same CLI contract as the mac launcher.** `init`, `start`, `stop`,
+  `status`, `resize-data` all take the same flags and positional
+  arguments as their macOS counterparts and produce the same exit codes
+  and JSON output on stdout. External projects that scripting against the
+  mac launcher can adopt the windows one without changes.
+- **Same integration test suite.** The existing Go test module in
+  `tests/` runs against both launchers with only build-tag gating for
+  the two SSH-specific tests, so every future behavior change is
+  automatically validated on both platforms.
+- **Smaller distributable, simpler ops.** Because the windows launcher
+  does not ship a kernel/rootfs, its binary is roughly one-third the
+  size of the mac launcher and requires no code-signing entitlement for
+  virtualization — only a standard Authenticode signature.
+
+## What the launcher does at runtime
+
+```mermaid
+flowchart LR
+    U[User] -->|"windows-runner init"| L[Launcher]
+    U -->|"windows-runner start …"| L
+    U -->|"windows-runner status / stop"| L
+    L -->|"podman.exe run/stop/inspect"| P[podman-for-windows]
+    P -->|manages| W[WSL2 Linux VM]
+    W -->|runs| C[Exasol Nano container]
+    L -.->|extracts on init| R[(./resources/<br/>config + DB image)]
+    L -.->|writes| S[(vm-state.json,<br/>vm-config.json)]
+```
+
+1. `init` unpacks the embedded init assets (a container image tarball
+   plus a small JSON config) into a `resources/` folder next to the
+   binary. No SSH keys are generated because there is no separate guest
+   OS to log in to.
+2. `start` loads the DB container image into podman (once), then invokes
+   `podman run -d` with the exact same container-level settings the mac
+   launcher passes to the same image, plus any user-supplied port
+   overrides and version-check flags. Podman keeps the container alive
+   in its own service — the launcher itself does not run in the
+   background.
+3. `stop` and `status` are thin wrappers around `podman stop` / `podman
+   rm` / `podman inspect`.
+4. Persistent database data lives in a named podman volume, so restarts
+   preserve state exactly as on mac.
+
+## What stakeholders should know
+
+- **Prerequisite on end-user machines:** podman-for-windows must be
+  installed and its default machine started. The launcher checks this
+  and prints a clear installation hint if not. No other user-visible
+  dependencies.
+- **Feature parity is functional, not identity.** The two SSH tests
+  and the one raw-disk-file test do not apply on windows (no guest OS,
+  no raw disk); those are skipped via build tags. All other tests —
+  data persistence, port overrides, status lifecycle, DB connectivity
+  — run identically on both platforms.
+- **Distribution and signing follow the mac pattern.** The build
+  pipeline mirrors the existing mac workflow: a shared linux job
+  downloads the container image; a per-platform job builds and signs
+  the launcher; a self-hosted runner runs the integration tests
+  against the signed artifact.
+
+# jira Subticket descriptions
+
+Suggested Jira subticket text — one per stream of work. Each ticket is
+sized so it can be picked up by a single engineer and closed in a few
+days. All tickets share the parent epic "Windows launcher for
+exasol-nano-vm".
+
+## Tests
+
+**Title:** Make the shared integration test suite pass on Windows
+
+**Description:**
+
+The `tests/` Go module currently has `//go:build darwin` on its
+fixture and every test file. Extend the suite so the same tests
+exercise the new `windows-runner` binary on a self-hosted Windows
+runner without duplicating test bodies.
+
+Scope:
+
+- Split `tests/fixture_test.go` into a shared
+  `fixture_common_test.go` (`//go:build darwin || windows`) and a
+  small platform-specific `fixture_windows_test.go` /
+  `fixture_darwin_test.go` pair that supply the launcher zip path and
+  any platform-specific fixture setup. Continue honoring the
+  `LAUNCHER_ZIP` env var override on both.
+- Add `//go:build darwin` to
+  [tests/ssh_test.go](tests/ssh_test.go) in its entirety
+  (`TestSSHKeyGeneration`, `TestSSHConnectivityAfterStart`) because
+  the windows launcher has no guest OS to SSH into.
+- Add `//go:build darwin` to `TestDataDiskGrowth` in
+  [tests/data_persistence_test.go](tests/data_persistence_test.go)
+  because that test asserts on the byte size of `vm/data.img`, which
+  does not exist on windows (data lives in a podman volume). All
+  other data-persistence tests remain shared.
+- Update the `test-launcher-integration` Taskfile target so a bare
+  `task test-launcher-integration` picks the correct `LAUNCHER_ZIP`
+  default based on host OS.
+- Confirm the shared tests exercise the same behaviors on windows:
+  `TestPortOverrideAssignsRequestedHostPort`,
+  `TestPortOverrideFailsIfPortInUse`,
+  `TestPortOverrideFailsForUnknownService`,
+  `TestStatusLifecycle`, `TestStatusAfterForcefulKill`,
+  `TestDataDiskCreatedOnFirstStart`,
+  `TestDataDiskShrinkRejected`,
+  `TestDataDiskSizeMatchReusesExisting`,
+  `TestDataPersistenceAcrossRestart`, and the DB connectivity
+  tests in [tests/db_test.go](tests/db_test.go).
+
+Definition of done:
+
+- `go test ./tests/...` on macOS (with the mac zip present) passes
+  with the same coverage as before this change.
+- `go test ./tests/...` on Windows (with the windows zip present)
+  compiles and passes for every non-darwin-only test.
+- No test body is duplicated between platforms; platform gating is
+  done only through build tags and the fixture helper.
+- The two darwin-only tests are documented in the source comments
+  with a one-line reason (SSH not applicable / raw disk image not
+  applicable).
+
+Out of scope: implementing the windows launcher subcommands
+themselves — that is covered by the parent epic's phase tickets.
+
+## CI build process
+
+**Title:** Add a Windows launcher build, test, and release pipeline
+to GitHub Actions
+
+**Description:**
+
+Mirror the existing mac launcher CI flow so every PR and tag build
+also produces a Windows launcher artifact, exercises it against the
+shared integration suite, and — on a `v*` tag push — publishes it
+alongside the mac binary in the GitHub Release.
+
+Scope:
+
+- **`build-packages.yml` — `build-disk-images` job:** extend the
+  existing linux job to also run
+  `task download-db-container IMG_ARCH=x86_64`, so the shared
+  `release-packages` artifact carries `exasol-nano-db-x86_64.tar.gz`
+  and its `.metadata` sidecar. Update the "Verify release artifacts"
+  step to require both files.
+- **`build-packages.yml` — new `build-windows-launcher` job:**
+  - `runs-on: windows-latest`; `needs: build-disk-images`.
+  - Downloads the `release-packages` artifact (or a historical one
+    when the `skip-linux-build` input is set, matching the mac
+    behavior).
+  - Installs Go (cache key `launcher/windows/go.sum`) and
+    [go-task](https://taskfile.dev/) via `choco install go-task` or
+    `winget install Task.Task`.
+  - Runs `task build-windows-launcher IMG_ARCH=x86_64`.
+  - `Compress-Archive`s `release/launcher/windows/x86_64/` into
+    `dist/windows-runner-x86_64.zip` and writes a `.sha256`
+    sibling.
+  - Uploads both files as the `windows-launcher` artifact.
+  - Signing is out of scope for this ticket; the build script's
+    signing block is conditional on `${WINDOWS_SIGN_PFX_PATH:-}`
+    and skips cleanly when unset (signing is a follow-up ticket).
+- **`build-packages.yml` — new `test-windows-launcher` job:**
+  - `runs-on: [self-hosted, Windows, X64, podman]`; `needs:
+    build-windows-launcher`.
+  - Requires a self-hosted runner because GitHub-hosted
+    `windows-latest` runners do not ship podman-for-windows and
+    nested virtualization is unreliable on them. Provisioning that
+    runner is a **prerequisite** for this ticket and should be
+    tracked separately.
+  - Downloads the `windows-launcher` artifact, ensures the podman
+    machine is running (`podman machine start` if needed), and
+    runs `task test-launcher-integration`.
+  - Uploads `tests/failures/` on any outcome.
+- **`release.yml`:** update the `create-release` job to also
+  download the `windows-launcher` artifact into
+  `release-artifacts/windows/` and include those files in the
+  upload loop so tagged releases publish both mac and windows
+  binaries in one draft.
+- **Developer helper:** add
+  `host/github/ci-build-windows-launcher.sh` (modeled on
+  [ci-build-mac-launcher.sh](host/github/ci-build-mac-launcher.sh))
+  and a matching `ci-build-windows-launcher` Taskfile task, so
+  developers can trigger the workflow from a local checkout and
+  download the artifact.
+
+Definition of done:
+
+- A `workflow_dispatch` run of `build-packages` on a branch with
+  the windows launcher code produces `windows-runner-x86_64.zip`
+  (unsigned) uploaded as the `windows-launcher` artifact.
+- The `test-windows-launcher` job runs the full non-darwin-only
+  integration suite against that artifact on the self-hosted
+  runner and reports green.
+- Tagging `vX.Y.Z-<something>` on `main` publishes a draft release
+  containing both `mac-runner-aarch64.zip` and
+  `windows-runner-x86_64.zip` (plus their `.sha256` siblings).
+- The mac path (`build-mac-launcher`, `test-mac-launcher`,
+  `create-release` mac steps) remains functionally unchanged; only
+  the `build-disk-images` step is extended, and only additively.
+
+Out of scope: Authenticode / `signtool.exe` signing and the
+`setup-windows-signing` composite action — tracked as a follow-up
+ticket once the code-signing certificate is provisioned.
+
+
+# Post completion notes
+
+## Environment variables introduced by the build script
+
+> **Superseded by Phase 12.** The three env vars documented below were
+> introduced in Phase 3 as a placeholder against a PFX-based signing
+> model. Phase 12 adopts SSL.com eSigner (cloud signing via the
+> `ESIGN_*` secrets IT has already provisioned) and moves the signing
+> invocation entirely into the CI workflow. The recommended follow-up
+> is to delete the `WINDOWS_SIGN_PFX_*` block from the build script
+> (option 1 in Phase 12's plan) so there is only one signing path.
+> The table below is retained for historical context and to describe
+> the current script's behavior for anyone building locally between
+> now and the Phase 12 landing.
+
+[host/package/build-windows-launcher.sh](host/package/build-windows-launcher.sh)
+reads the following environment variables. All three are **optional**: when
+none are set the script builds an unsigned binary suitable for local
+testing and prints a warning. When they are set, the script invokes
+`signtool.exe sign` and `signtool.exe verify /pa /v` on the produced
+`launcher.exe`.
+
+| Variable | Required when signing | Default | Purpose |
+|---|---|---|---|
+| `WINDOWS_SIGN_PFX_PATH` | yes (gates the signing block) | *(unset → skip signing with a warning)* | Absolute path to the PKCS#12 (`.pfx`) code-signing certificate. Setting this to a non-empty value enables the signing step. |
+| `WINDOWS_SIGN_PFX_PASSWORD` | yes when the `.pfx` is encrypted | *(empty string)* | Password for the `.pfx`. Passed to `signtool.exe /p`. |
+| `WINDOWS_SIGN_TIMESTAMP_URL` | no | `http://timestamp.digicert.com` | RFC 3161 timestamp server URL. Passed to `signtool.exe /tr`. |
+
+Notes on the eSigner migration (Phase 12):
+
+- The four `ESIGN_*` secrets IT has already set on the repo
+  (`ESIGN_USERNAME`, `ESIGN_PASSWORD`, `ESIGN_CREDENTIAL_ID`,
+  `ESIGN_TOTP_SECRET`) map onto SSL.com's eSigner cloud code-signing
+  service. Phase 12 uses those secrets via the first-party
+  [`SSLcom/esigner-codesign`](https://github.com/SSLcom/esigner-codesign)
+  GitHub Action, so no new secrets need provisioning and no composite
+  action needs authoring.
+- The `WINDOWS_SIGN_TIMESTAMP_URL` variable becomes obsolete because
+  CodeSignTool talks to SSL.com's own timestamp server internally.
+- The `WINDOWS_SIGN_PFX_*` variables become obsolete because eSigner
+  keeps the private key in SSL.com's HSM; there is no PFX to load.
+
+The build script fails loudly if `WINDOWS_SIGN_PFX_PATH` is set but
+`signtool.exe` is not on `PATH`, so a misconfigured runner surfaces
+immediately rather than silently producing an unsigned binary.
