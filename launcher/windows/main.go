@@ -6,9 +6,9 @@
 // same on-disk contract and integration tests used by the mac launcher can
 // be reused on windows.
 //
-// Phase 7 status: init and start (with --ports overrides + probe/fallback
-// port selection) are implemented. stop / status / resize-data remain
-// stubs. --version-check-* flags are still not propagated to podman
+// Phase 8 status: init, start (with --ports overrides + probe/fallback
+// port selection), stop, and status are implemented. resize-data remains
+// a stub. --version-check-* flags are still not propagated to podman
 // (Phase 9 wires them in).
 package main
 
@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ulikunitz/xz"
 
@@ -568,11 +569,94 @@ func writeVMState(chosenPorts map[string]int) error {
 }
 
 func stopCmd() error {
-	return errNotImplemented("stop")
+	// Container name lives in resources/config.json. If init has never run
+	// in this working directory, there is nothing this launcher could have
+	// started — report success and only clean up vm-state.json if present.
+	configPath := filepath.Join(resourcesDir, "config.json")
+	cfg, err := loadContainerConfig(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Println("No resources/config.json; nothing to stop.")
+			return removeVMState()
+		}
+		return fmt.Errorf("failed to load %s: %w", configPath, err)
+	}
+
+	if err := podman.Available(); err != nil {
+		return err
+	}
+
+	// podman.Stop uses --ignore, so an absent or already-stopped container
+	// is a no-op with a clean exit. 30s matches the mac graceful window.
+	fmt.Printf("Stopping container %q...\n", cfg.ContainerName)
+	if err := podman.Stop(cfg.ContainerName, 30*time.Second); err != nil {
+		return err
+	}
+	// podman.Rm also uses --ignore, so removing a nonexistent container is
+	// a no-op. Removal keeps a subsequent start able to recreate the
+	// container with a fresh podman-run argv (e.g. updated port bindings).
+	// The named data volume is preserved so restart persistence survives.
+	if err := podman.Rm(cfg.ContainerName); err != nil {
+		return err
+	}
+
+	if err := removeVMState(); err != nil {
+		return err
+	}
+	fmt.Println("Stopped.")
+	return nil
+}
+
+// removeVMState deletes vm-state.json if present. A missing file is not an
+// error — stopCmd must be idempotent.
+func removeVMState() error {
+	if err := os.Remove(vmStatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to remove %s: %w", vmStatePath, err)
+	}
+	return nil
 }
 
 func statusCmd() error {
-	return errNotImplemented("status")
+	return statusCmdTo(os.Stdout)
+}
+
+// statusCmdTo writes {"running":bool} to w. Always exits 0 (returns nil)
+// unless w itself is broken — the shared integration tests rely on
+// `status` never erroring so they can poll it during teardown and
+// forceful-kill scenarios (TestStatusAfterForcefulKill).
+//
+// Any errors reaching podman are absorbed and treated as "not running":
+// if we cannot inspect the container, we conservatively report absence
+// rather than propagating an ambiguous signal to the test harness.
+func statusCmdTo(w io.Writer) error {
+	running := checkContainerRunning()
+	out, err := json.Marshal(map[string]bool{"running": running})
+	if err != nil {
+		// json.Marshal of a bool map cannot realistically fail; treat as
+		// a fatal internal error.
+		return fmt.Errorf("failed to marshal status: %w", err)
+	}
+	_, err = fmt.Fprintln(w, string(out))
+	return err
+}
+
+// checkContainerRunning returns whether the DB container is currently
+// running, absorbing every error mode (missing config, missing podman,
+// podman inspect failure) as "not running". Split out so statusCmdTo
+// stays focused on I/O.
+func checkContainerRunning() bool {
+	cfg, err := loadContainerConfig(filepath.Join(resourcesDir, "config.json"))
+	if err != nil {
+		return false
+	}
+	if err := podman.Available(); err != nil {
+		return false
+	}
+	running, err := podman.ContainerRunning(cfg.ContainerName)
+	if err != nil {
+		return false
+	}
+	return running
 }
 
 func resizeDataDiskCmd(sizeArg string) error {

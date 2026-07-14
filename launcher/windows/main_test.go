@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -590,5 +591,240 @@ func TestSelectAllHostPortsExplicitBusyAborts(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "db") {
 		t.Errorf("error should mention db: %v", err)
+	}
+}
+
+// --- Phase 8: stop and status ------------------------------------------
+
+// installFakePodman drops a POSIX shell shim named "podman" into a fresh
+// t.TempDir() and prepends it to PATH. Mirrors the helper of the same
+// name in internal/podman/podman_test.go so main-package tests can drive
+// the full stopCmd / statusCmd flow without pulling in the podman
+// package's test-only symbols.
+func installFakePodman(t *testing.T, body string) (argvLogPath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake podman shim uses a POSIX shell script; skipping on windows")
+	}
+
+	dir := t.TempDir()
+	argvLogPath = filepath.Join(dir, "argv.log")
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"" + argvLogPath + "\"; done\n" +
+		"printf -- '---\\n' >> \"" + argvLogPath + "\"\n" +
+		body + "\n"
+	binPath := filepath.Join(dir, "podman")
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake podman shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argvLogPath
+}
+
+// readArgvCalls parses the shim's log into one slice per podman invocation.
+func readArgvCalls(t *testing.T, logPath string) [][]string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("read argv log: %v", err)
+	}
+	var calls [][]string
+	var current []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "---" {
+			calls = append(calls, current)
+			current = nil
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		current = append(current, line)
+	}
+	return calls
+}
+
+// writeFixtureResources creates ./resources/config.json in the current
+// working directory with the canonical shipping schema. Used by
+// stop/status tests that need loadContainerConfig to succeed.
+func writeFixtureResources(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
+		t.Fatalf("mkdir resources: %v", err)
+	}
+	fixture := []byte(`{
+  "db": {
+    "container_name": "exasol-local-db",
+    "tarball_name": "exasol-nano-db.tar.gz",
+    "ports": { "db": 8563 },
+    "shm_size": "512mb",
+    "pids_limit": "-1",
+    "security_opt": "unmask=ALL",
+    "restart": "always",
+    "params": ["maxConnectionsLicenseLimit=20"]
+  }
+}`)
+	if err := os.WriteFile(filepath.Join(resourcesDir, "config.json"), fixture, 0o644); err != nil {
+		t.Fatalf("write fixture config: %v", err)
+	}
+}
+
+func TestStopCmdHappyPath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	if err := os.WriteFile(vmStatePath, []byte(`{"ports":{"db":8563}}`), 0o644); err != nil {
+		t.Fatalf("seed vm-state: %v", err)
+	}
+	// Fake podman: --version (Available) succeeds, stop/rm succeed.
+	logPath := installFakePodman(t, `exit 0`)
+
+	if err := stopCmd(); err != nil {
+		t.Fatalf("stopCmd: %v", err)
+	}
+
+	// vm-state.json must be gone.
+	if _, err := os.Stat(vmStatePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected %s removed, stat error was %v", vmStatePath, err)
+	}
+
+	calls := readArgvCalls(t, logPath)
+	// Expect: --version (Available), stop --ignore --time 30 <name>, rm --ignore <name>.
+	if len(calls) != 3 {
+		t.Fatalf("expected 3 podman calls, got %d: %v", len(calls), calls)
+	}
+	wantStop := []string{"stop", "--ignore", "--time", "30", "exasol-local-db"}
+	if !stringsEqual(calls[1], wantStop) {
+		t.Errorf("stop argv: want %v, got %v", wantStop, calls[1])
+	}
+	wantRm := []string{"rm", "--ignore", "exasol-local-db"}
+	if !stringsEqual(calls[2], wantRm) {
+		t.Errorf("rm argv: want %v, got %v", wantRm, calls[2])
+	}
+}
+
+func TestStopCmdIsIdempotentWhenVMStateAbsent(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	// No vm-state.json to start with.
+	installFakePodman(t, `exit 0`)
+	if err := stopCmd(); err != nil {
+		t.Fatalf("stopCmd (no vm-state): %v", err)
+	}
+	// A second stop must also succeed cleanly.
+	if err := stopCmd(); err != nil {
+		t.Fatalf("second stopCmd: %v", err)
+	}
+}
+
+func TestStopCmdWithoutConfigCleansStateFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	// No resources/config.json — init was never run in this dir.
+	if err := os.WriteFile(vmStatePath, []byte(`{"ports":{"db":8563}}`), 0o644); err != nil {
+		t.Fatalf("seed vm-state: %v", err)
+	}
+	// Even though podman would be invoked with a bogus binary, we should
+	// short-circuit before ever calling it. Point PATH at an empty dir to
+	// prove that.
+	t.Setenv("PATH", t.TempDir())
+
+	if err := stopCmd(); err != nil {
+		t.Fatalf("stopCmd without config: %v", err)
+	}
+	if _, err := os.Stat(vmStatePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected %s removed, stat error was %v", vmStatePath, err)
+	}
+}
+
+func TestStopCmdErrorsWhenPodmanUnavailable(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	if err := os.WriteFile(vmStatePath, []byte(`{"ports":{"db":8563}}`), 0o644); err != nil {
+		t.Fatalf("seed vm-state: %v", err)
+	}
+	// Empty PATH — Available() must fail.
+	t.Setenv("PATH", t.TempDir())
+
+	err := stopCmd()
+	if err == nil {
+		t.Fatal("expected error when podman is missing")
+	}
+	if !strings.Contains(err.Error(), "podman-for-windows is required") {
+		t.Errorf("error should mention prerequisite install: %v", err)
+	}
+	// vm-state.json is expected to remain — the user's environment is
+	// broken and we should not silently pretend we cleaned it up.
+	if _, err := os.Stat(vmStatePath); err != nil {
+		t.Errorf("expected %s preserved on error, stat error was %v", vmStatePath, err)
+	}
+}
+
+func TestStatusCmdReportsRunningTrue(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	// container exists → true, inspect → "true".
+	installFakePodman(t, `
+case "$2" in
+    exists) exit 0 ;;
+    inspect) echo "true"; exit 0 ;;
+esac
+exit 0
+`)
+	var buf bytes.Buffer
+	if err := statusCmdTo(&buf); err != nil {
+		t.Fatalf("statusCmdTo: %v", err)
+	}
+	got := strings.TrimSpace(buf.String())
+	if got != `{"running":true}` {
+		t.Errorf("stdout: want {\"running\":true}, got %q", got)
+	}
+}
+
+func TestStatusCmdReportsRunningFalseWhenContainerMissing(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	// --version 0; container exists 1 (absent) — inspect never called.
+	installFakePodman(t, `
+case "$2" in
+    exists) exit 1 ;;
+esac
+exit 0
+`)
+	var buf bytes.Buffer
+	if err := statusCmdTo(&buf); err != nil {
+		t.Fatalf("statusCmdTo: %v", err)
+	}
+	got := strings.TrimSpace(buf.String())
+	if got != `{"running":false}` {
+		t.Errorf("stdout: want {\"running\":false}, got %q", got)
+	}
+}
+
+func TestStatusCmdReportsFalseWhenPodmanUnavailable(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	t.Setenv("PATH", t.TempDir()) // no podman on PATH
+	var buf bytes.Buffer
+	if err := statusCmdTo(&buf); err != nil {
+		t.Fatalf("statusCmdTo: %v (must not error even when podman is missing)", err)
+	}
+	got := strings.TrimSpace(buf.String())
+	if got != `{"running":false}` {
+		t.Errorf("stdout: want {\"running\":false}, got %q", got)
+	}
+}
+
+func TestStatusCmdReportsFalseWithoutConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	// No resources/config.json.
+	var buf bytes.Buffer
+	if err := statusCmdTo(&buf); err != nil {
+		t.Fatalf("statusCmdTo without config: %v (must not error)", err)
+	}
+	got := strings.TrimSpace(buf.String())
+	if got != `{"running":false}` {
+		t.Errorf("stdout: want {\"running\":false}, got %q", got)
 	}
 }
