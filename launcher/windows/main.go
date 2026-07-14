@@ -6,18 +6,34 @@
 // same on-disk contract and integration tests used by the mac launcher can
 // be reused on windows.
 //
-// Phase 2 skeleton: this file locks in the subcommand surface (matching
-// launcher/mac/main.go byte-for-byte where the semantics carry over) but
-// every subcommand body is a stub that returns "not implemented on windows
-// yet". Later phases fill each stub in.
+// Phase 4 status: init is implemented. start / stop / status / resize-data
+// remain stubs and are filled in by later phases.
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	_ "embed"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+
+	"github.com/ulikunitz/xz"
 )
+
+// initAssets is the embedded launcher/assets/windows/init/ directory,
+// packaged by host/package/build-windows-launcher.sh into
+// launcher/windows/init-assets.tar.xz. It is extracted into ./resources/
+// by initCmd.
+//
+//go:embed init-assets.tar.xz
+var initAssets []byte
 
 // InitOutput is the JSON shape written by the guest-side init scripts on
 // mac. It is mirrored here so windows can produce compatible state files
@@ -56,6 +72,9 @@ type VersionCheckOptions struct {
 const (
 	defaultVersionCheckIntervalSeconds = 86400
 	defaultVersionCheckIdentity        = "NONE"
+
+	resourcesDir      = "resources"
+	runtimeConfigPath = "vm-config.json"
 )
 
 var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
@@ -75,9 +94,133 @@ func errNotImplemented(subcommand string) error {
 	return fmt.Errorf("%s: not implemented on windows yet", subcommand)
 }
 
+// exitError carries an explicit process exit code out of a subcommand.
+// main() type-asserts on it to distinguish flag-style errors (exit 2)
+// from ordinary runtime errors (exit 1).
+type exitError struct {
+	code int
+	msg  string
+}
+
+func (e *exitError) Error() string { return e.msg }
+
+func newExitError(code int, format string, args ...any) *exitError {
+	return &exitError{code: code, msg: fmt.Sprintf(format, args...)}
+}
+
+// writeRuntimeConfig serialises RuntimeConfig to runtimeConfigPath in cwd
+// as pretty-printed JSON. Mirrors the mac vm-config.json shape.
+func writeRuntimeConfig(config RuntimeConfig) error {
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal runtime config: %w", err)
+	}
+	if err := os.WriteFile(runtimeConfigPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write runtime config: %w", err)
+	}
+	return nil
+}
+
+// extractTarXZ extracts a tar.xz archive to the specified output directory.
+// pathTransform is an optional function to transform archive paths before
+// extracting; returning "" from pathTransform skips the entry. Copied from
+// launcher/mac/main.go per Phase 4 plan ("recommend copying it verbatim").
+func extractTarXZ(data []byte, outputDir string, pathTransform func(string) string) error {
+	xzReader, err := xz.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("failed to create xz reader: %w", err)
+	}
+
+	tarReader := tar.NewReader(xzReader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read tar header: %w", err)
+		}
+
+		outputPath := header.Name
+		if pathTransform != nil {
+			outputPath = pathTransform(header.Name)
+			if outputPath == "" {
+				continue
+			}
+		}
+		outputPath = filepath.Join(outputDir, outputPath)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(outputPath, 0755); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", outputPath, err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+				return fmt.Errorf("failed to create parent directory for %s: %w", outputPath, err)
+			}
+			outFile, err := os.Create(outputPath)
+			if err != nil {
+				return fmt.Errorf("failed to create file %s: %w", outputPath, err)
+			}
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				outFile.Close()
+				return fmt.Errorf("failed to write file %s: %w", outputPath, err)
+			}
+			outFile.Close()
+		}
+	}
+	return nil
+}
+
+// initCmd is the public entry point invoked by main(). It uses the
+// //go:embed'd initAssets blob so production builds always have the
+// canonical assets available.
 func initCmd(sshKeyPath string) error {
-	_ = sshKeyPath
-	return errNotImplemented("init")
+	return initCmdWithAssets(sshKeyPath, initAssets)
+}
+
+// initCmdWithAssets is the implementation split out so unit tests can
+// supply their own tarball bytes without touching the embedded blob.
+//
+// The tarball is expected to root at init/ (matching the layout produced
+// by build-windows-launcher.sh: 'tar -C launcher/assets/windows -cf - init').
+// The init/ prefix is stripped during extraction, so init/config.json ends
+// up at resources/config.json.
+func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
+	if sshKeyPath != "" {
+		return newExitError(2, "--ssh-key is not supported on windows: there is no guest VM to SSH into")
+	}
+
+	fmt.Println("Initializing windows launcher...")
+
+	if err := os.MkdirAll(resourcesDir, 0755); err != nil {
+		return fmt.Errorf("failed to create resources directory: %w", err)
+	}
+
+	fmt.Println("Extracting init assets...")
+	if err := extractTarXZ(assetsData, resourcesDir, func(path string) string {
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) < 2 {
+			// Skip the top-level directory entry itself (e.g. "init/").
+			return ""
+		}
+		return parts[1]
+	}); err != nil {
+		return fmt.Errorf("failed to extract init assets: %w", err)
+	}
+
+	// Windows has no guest VM to SSH into, so the ssh_private_key field is
+	// intentionally left empty. The file still exists so 'stop' and 'status'
+	// can share the same on-disk contract as the mac launcher.
+	if err := writeRuntimeConfig(RuntimeConfig{}); err != nil {
+		return err
+	}
+	fmt.Printf("Runtime config written to: %s\n", runtimeConfigPath)
+
+	fmt.Printf("Resources extracted to: %s/\n", resourcesDir)
+	fmt.Println("Initialized. Run 'windows-runner start <cpu> <ram_mb> <data_size_gb>' to start.")
+	return nil
 }
 
 func startCmd(
@@ -198,6 +341,10 @@ func main() {
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		var ee *exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
 		os.Exit(1)
 	}
 }

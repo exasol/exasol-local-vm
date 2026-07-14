@@ -203,6 +203,25 @@ tasks:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ./host/package/build-windows-launcher.sh "{{.IMG_ARCH}}"
 
+  test-windows-launcher-unit:
+    desc: Run Go unit tests for the windows launcher (stages init-assets.tar.xz so the //go:embed is satisfied)
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64]
+    deps:
+      - task: stage-windows-init-assets
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+    cmds:
+      # Stage the embedded blob the //go:embed in launcher/windows/main.go
+      # references. The tarball is left in place afterwards so subsequent
+      # 'go test' / 'go build' invocations in launcher/windows/ succeed
+      # without re-staging; the file is .gitignored so it never lands in
+      # source control.
+      - tar -C launcher/assets/windows -cf - init | xz -9 --extreme > launcher/windows/init-assets.tar.xz
+      - cd launcher/windows && go test ./...
+
   package:
     desc: Build all distributable packages
     deps:
