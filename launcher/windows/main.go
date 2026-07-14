@@ -6,8 +6,10 @@
 // same on-disk contract and integration tests used by the mac launcher can
 // be reused on windows.
 //
-// Phase 4 status: init is implemented. start / stop / status / resize-data
-// remain stubs and are filled in by later phases.
+// Phase 6 status: init and start (core path) are implemented. stop /
+// status / resize-data remain stubs. --ports overrides and
+// --version-check-* flags are not yet propagated to podman — later
+// phases wire them in.
 package main
 
 import (
@@ -25,6 +27,8 @@ import (
 	"strings"
 
 	"github.com/ulikunitz/xz"
+
+	"windows-runner/internal/podman"
 )
 
 // initAssets is the embedded launcher/assets/windows/init/ directory,
@@ -75,6 +79,12 @@ const (
 
 	resourcesDir      = "resources"
 	runtimeConfigPath = "vm-config.json"
+	vmStatePath       = "vm-state.json"
+
+	// dataVolumeName is the podman named volume that persists /exa
+	// across container restarts. Matches the mac guest-side
+	// -v "$EXA_DATA_DIR:/exa" bind mount in launcher/assets/init/init-db.sh.
+	dataVolumeName = "exasol-nano-data"
 )
 
 var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
@@ -230,12 +240,172 @@ func startCmd(
 	portsOverride string,
 	versionCheckOptions VersionCheckOptions,
 ) error {
+	// Positional args (cpu, ram, data_size) are accepted for CLI parity
+	// with the mac launcher but ignored in Phase 6: podman-for-windows
+	// sizes its backing VM globally, and Phase 9 wires data_size_gb into
+	// the resources/data-size.txt sidecar. Silently accept for now.
 	_ = cpuCountStr
 	_ = ramSizeStr
 	_ = dataSizeGB
-	_ = portsOverride
+
+	// --ports overrides and --version-check-* flags are Phase 7 / Phase 9
+	// respectively. Reject an explicit --ports value so users are not
+	// misled into thinking overrides took effect; --version-check-* is
+	// benign to ignore because our defaults match mac defaults.
+	if portsOverride != "" {
+		return fmt.Errorf("--ports override is not yet implemented on windows (Phase 7)")
+	}
 	_ = versionCheckOptions
-	return errNotImplemented("start")
+
+	if err := podman.Available(); err != nil {
+		return err
+	}
+	if err := podman.MachineRunning(); err != nil {
+		return err
+	}
+
+	configPath := filepath.Join(resourcesDir, "config.json")
+	cfg, err := loadContainerConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load %s: %w", configPath, err)
+	}
+	dbPort, ok := cfg.Ports["db"]
+	if !ok || dbPort <= 0 {
+		return fmt.Errorf("invalid config %s: db.ports.db missing or not positive", configPath)
+	}
+
+	// Idempotency: if the container is already running, refresh vm-state.json
+	// and return without touching the podman state.
+	running, err := podman.ContainerRunning(cfg.ContainerName)
+	if err != nil {
+		return fmt.Errorf("failed to check container state: %w", err)
+	}
+	if running {
+		fmt.Printf("Container %q is already running; nothing to do.\n", cfg.ContainerName)
+		return writeVMState(map[string]int{"db": dbPort})
+	}
+
+	// A stopped container with the same name would make `podman run` fail
+	// with a name-collision error; remove it. The data volume is
+	// preserved by name so DB state survives.
+	exists, err := podman.ContainerExists(cfg.ContainerName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		fmt.Printf("Removing stale stopped container %q...\n", cfg.ContainerName)
+		if err := podman.Rm(cfg.ContainerName); err != nil {
+			return fmt.Errorf("failed to remove stale container: %w", err)
+		}
+	}
+
+	fmt.Println("Loading DB container image...")
+	tarballPath := filepath.Join(resourcesDir, cfg.TarballName)
+	imageRef, err := podman.LoadImage(tarballPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Loaded image: %s\n", imageRef)
+
+	args := buildPodmanRunArgs(cfg, imageRef, dbPort)
+	fmt.Printf("Starting container %q with db port %d...\n", cfg.ContainerName, dbPort)
+	if err := podman.Run(args); err != nil {
+		return err
+	}
+
+	if err := writeVMState(map[string]int{"db": dbPort}); err != nil {
+		return err
+	}
+	fmt.Printf("Started. VM state written to %s\n", vmStatePath)
+	return nil
+}
+
+// dbContainerConfig is the subset of resources/config.json (the `.db`
+// object) that windows-runner needs to build a `podman run` argv.
+// Mirrors the schema the mac guest-side init-db.sh consumes.
+type dbContainerConfig struct {
+	ContainerName string         `json:"container_name"`
+	TarballName   string         `json:"tarball_name"`
+	Ports         map[string]int `json:"ports"`
+	ShmSize       string         `json:"shm_size"`
+	PidsLimit     string         `json:"pids_limit"`
+	SecurityOpt   string         `json:"security_opt"`
+	Restart       string         `json:"restart"`
+	Params        []string       `json:"params"`
+}
+
+// launcherConfig is the top-level shape of resources/config.json.
+type launcherConfig struct {
+	DB dbContainerConfig `json:"db"`
+}
+
+// loadContainerConfig reads resources/config.json and returns its .db
+// object. Fails fast on missing/invalid JSON with a wrapped error.
+func loadContainerConfig(path string) (dbContainerConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return dbContainerConfig{}, fmt.Errorf("read config: %w", err)
+	}
+	var lc launcherConfig
+	if err := json.Unmarshal(data, &lc); err != nil {
+		return dbContainerConfig{}, fmt.Errorf("parse config: %w", err)
+	}
+	return lc.DB, nil
+}
+
+// buildPodmanRunArgs constructs the `podman run` argv for the DB
+// container. The shape mirrors the guest-side
+// launcher/assets/init/init-db.sh run_db_container function (see
+// init-db.sh#L396) so future divergence between the two paths is
+// intentional and reviewable.
+//
+// Phase 6 scope: no --ports overrides, no --version-check-* args, no
+// per-run params gating on "fresh deployment". Later phases extend this
+// function; keep the signature and return-slice ordering stable so
+// tests stay tight.
+func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostDBPort int) []string {
+	containerDBPort := cfg.Ports["db"]
+	args := []string{
+		"run", "-d",
+		"--name", cfg.ContainerName,
+		"--shm-size=" + cfg.ShmSize,
+		"--pids-limit=" + cfg.PidsLimit,
+		"--security-opt", cfg.SecurityOpt,
+		"--restart", cfg.Restart,
+		"-p", fmt.Sprintf("%d:%d", hostDBPort, containerDBPort),
+		"-v", dataVolumeName + ":/exa",
+		imageRef,
+		"init",
+	}
+	if len(cfg.Params) > 0 {
+		// Nano's `init params='k=v ...'` interface: single argv token,
+		// space-joined values. See init-db.sh's DB_PARAMS assignment.
+		args = append(args, "params="+strings.Join(cfg.Params, " "))
+	}
+	return args
+}
+
+// VMState is the on-disk shape of vm-state.json, the file the shared
+// integration tests parse to discover which host port the DB is bound
+// to. Only `ports` is populated on windows; the mac launcher also
+// includes vm_ip, cpu_count, ram_size, pid, shared_dir, and
+// ssh_private_key.
+type VMState struct {
+	Ports map[string]int `json:"ports"`
+}
+
+// writeVMState serialises VMState to vmStatePath as pretty-printed
+// JSON. Overwrites any previous file.
+func writeVMState(chosenPorts map[string]int) error {
+	state := VMState{Ports: chosenPorts}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal vm-state: %w", err)
+	}
+	if err := os.WriteFile(vmStatePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write vm-state: %w", err)
+	}
+	return nil
 }
 
 func stopCmd() error {

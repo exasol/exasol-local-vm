@@ -158,3 +158,205 @@ func TestInitCmdIsIdempotent(t *testing.T) {
 		t.Errorf("config.json content diverged after second init: %s", got)
 	}
 }
+
+// TestLoadContainerConfigParsesFixture verifies loadContainerConfig round-
+// trips the exact schema shipped in launcher/assets/windows/init/config.json.
+// Fixture is duplicated inline (rather than reading the on-disk file) so
+// the test is hermetic and does not depend on prior asset staging.
+func TestLoadContainerConfigParsesFixture(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	fixture := []byte(`{
+  "db": {
+    "container_name": "exasol-local-db",
+    "tarball_name": "exasol-nano-db.tar.gz",
+    "ports": { "db": 8563 },
+    "shm_size": "512mb",
+    "pids_limit": "-1",
+    "security_opt": "unmask=ALL",
+    "restart": "always",
+    "params": ["maxConnectionsLicenseLimit=20"]
+  }
+}`)
+	if err := os.WriteFile(configPath, fixture, 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cfg, err := loadContainerConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadContainerConfig: %v", err)
+	}
+	if cfg.ContainerName != "exasol-local-db" {
+		t.Errorf("ContainerName: got %q", cfg.ContainerName)
+	}
+	if cfg.TarballName != "exasol-nano-db.tar.gz" {
+		t.Errorf("TarballName: got %q", cfg.TarballName)
+	}
+	if cfg.Ports["db"] != 8563 {
+		t.Errorf("Ports[\"db\"]: got %d", cfg.Ports["db"])
+	}
+	if cfg.ShmSize != "512mb" {
+		t.Errorf("ShmSize: got %q", cfg.ShmSize)
+	}
+	if cfg.PidsLimit != "-1" {
+		t.Errorf("PidsLimit: got %q", cfg.PidsLimit)
+	}
+	if cfg.SecurityOpt != "unmask=ALL" {
+		t.Errorf("SecurityOpt: got %q", cfg.SecurityOpt)
+	}
+	if cfg.Restart != "always" {
+		t.Errorf("Restart: got %q", cfg.Restart)
+	}
+	if len(cfg.Params) != 1 || cfg.Params[0] != "maxConnectionsLicenseLimit=20" {
+		t.Errorf("Params: got %#v", cfg.Params)
+	}
+}
+
+func TestLoadContainerConfigInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("not json"), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if _, err := loadContainerConfig(path); err == nil {
+		t.Fatal("expected parse error on invalid JSON")
+	}
+}
+
+// TestBuildPodmanRunArgsExactArgv locks in the argv shape for the
+// canonical Phase 1 fixture config: any drift here is a
+// user-observable behavior change (podman flag order, added/removed
+// options) and should be intentional.
+func TestBuildPodmanRunArgsExactArgv(t *testing.T) {
+	cfg := dbContainerConfig{
+		ContainerName: "exasol-local-db",
+		TarballName:   "exasol-nano-db.tar.gz",
+		Ports:         map[string]int{"db": 8563},
+		ShmSize:       "512mb",
+		PidsLimit:     "-1",
+		SecurityOpt:   "unmask=ALL",
+		Restart:       "always",
+		Params:        []string{"maxConnectionsLicenseLimit=20"},
+	}
+	got := buildPodmanRunArgs(cfg, "docker.io/exasol/nano:2026.2.0-nano.2", 8563)
+	want := []string{
+		"run", "-d",
+		"--name", "exasol-local-db",
+		"--shm-size=512mb",
+		"--pids-limit=-1",
+		"--security-opt", "unmask=ALL",
+		"--restart", "always",
+		"-p", "8563:8563",
+		"-v", "exasol-nano-data:/exa",
+		"docker.io/exasol/nano:2026.2.0-nano.2",
+		"init",
+		"params=maxConnectionsLicenseLimit=20",
+	}
+	if !stringsEqual(got, want) {
+		t.Errorf("argv mismatch:\n want: %v\n got:  %v", want, got)
+	}
+}
+
+// TestBuildPodmanRunArgsHostPortMayDifferFromContainerPort verifies the
+// hostDBPort argument controls only the left-hand side of -p; the
+// container-side port remains what config.json declared. Phase 7 will
+// exercise this path with real overrides; Phase 6 already relies on it
+// for the (host == container) default case.
+func TestBuildPodmanRunArgsHostPortMayDifferFromContainerPort(t *testing.T) {
+	cfg := dbContainerConfig{
+		ContainerName: "c",
+		Ports:         map[string]int{"db": 8563},
+		ShmSize:       "1g",
+		PidsLimit:     "-1",
+		SecurityOpt:   "unmask=ALL",
+		Restart:       "always",
+	}
+	got := buildPodmanRunArgs(cfg, "img:v1", 9090)
+	// Find -p and verify the mapping.
+	var mapping string
+	for i, tok := range got {
+		if tok == "-p" && i+1 < len(got) {
+			mapping = got[i+1]
+			break
+		}
+	}
+	if mapping != "9090:8563" {
+		t.Errorf("expected -p 9090:8563 (host:container), got %q", mapping)
+	}
+}
+
+// TestBuildPodmanRunArgsOmitsParamsWhenEmpty verifies the params= argv
+// element is dropped entirely when the config lists no params — the
+// Nano container's `init` handler would otherwise see an empty
+// `params=` token and complain.
+func TestBuildPodmanRunArgsOmitsParamsWhenEmpty(t *testing.T) {
+	cfg := dbContainerConfig{
+		ContainerName: "c",
+		Ports:         map[string]int{"db": 8563},
+		ShmSize:       "1g",
+		PidsLimit:     "-1",
+		SecurityOpt:   "unmask=ALL",
+		Restart:       "always",
+		// no Params
+	}
+	got := buildPodmanRunArgs(cfg, "img:v1", 8563)
+	for _, tok := range got {
+		if strings.HasPrefix(tok, "params=") {
+			t.Errorf("did not expect a params= token when config has no params, got argv %v", got)
+		}
+	}
+	// Last token must still be `init`.
+	if last := got[len(got)-1]; last != "init" {
+		t.Errorf("expected last argv to be 'init', got %q", last)
+	}
+}
+
+// TestBuildPodmanRunArgsJoinsMultipleParamsWithSpace matches the guest
+// shell's `jq '.db.params // [] | join(" ")'` behavior — Nano expects
+// a single space-joined value on the right of `params=`.
+func TestBuildPodmanRunArgsJoinsMultipleParamsWithSpace(t *testing.T) {
+	cfg := dbContainerConfig{
+		ContainerName: "c",
+		Ports:         map[string]int{"db": 8563},
+		ShmSize:       "1g",
+		PidsLimit:     "-1",
+		SecurityOpt:   "unmask=ALL",
+		Restart:       "always",
+		Params:        []string{"a=1", "b=2", "c=3"},
+	}
+	got := buildPodmanRunArgs(cfg, "img:v1", 8563)
+	last := got[len(got)-1]
+	if last != "params=a=1 b=2 c=3" {
+		t.Errorf("expected joined params token, got %q", last)
+	}
+}
+
+func TestWriteVMStateProducesReadableJSON(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := writeVMState(map[string]int{"db": 9090}); err != nil {
+		t.Fatalf("writeVMState: %v", err)
+	}
+	data, err := os.ReadFile(vmStatePath)
+	if err != nil {
+		t.Fatalf("read vm-state: %v", err)
+	}
+	var state VMState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("parse vm-state: %v", err)
+	}
+	if state.Ports["db"] != 9090 {
+		t.Errorf("expected db port 9090, got %d", state.Ports["db"])
+	}
+}
+
+func stringsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -206,6 +207,22 @@ func Rm(name string) error {
 			"podman rm %s failed (%w): %s",
 			name, err, strings.TrimSpace(stderr.String()),
 		)
+	}
+	return nil
+}
+
+// Run invokes `podman <args...>` with its stdout and stderr streamed
+// straight to the launcher process. Intended for long-form commands
+// such as `run -d ...` where the user should see any diagnostics
+// podman emits (image layer progress, container-startup errors, etc).
+// For commands whose output the launcher needs to parse, use a purpose-
+// built helper (LoadImage, ContainerRunning, ...) instead.
+func Run(args []string) error {
+	cmd := exec.Command(binary, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("podman %s failed: %w", strings.Join(args, " "), err)
 	}
 	return nil
 }

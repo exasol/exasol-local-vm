@@ -391,6 +391,33 @@ func TestRm_PodmanError(t *testing.T) {
 	}
 }
 
+func TestRun_PassesArgvVerbatim(t *testing.T) {
+	logPath := installFakePodman(t, `exit 0`)
+	argv := []string{"run", "-d", "--name", "foo", "-p", "8563:8563", "image:tag", "init"}
+	if err := Run(argv); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if got := calls[0]; !slicesEqual(got, argv) {
+		t.Errorf("argv mismatch: want %v, got %v", argv, got)
+	}
+}
+
+func TestRun_Failure(t *testing.T) {
+	installFakePodman(t, `echo "bad request" >&2; exit 125`)
+	err := Run([]string{"foo", "bar"})
+	if err == nil {
+		t.Fatal("expected error from failing podman invocation")
+	}
+	// Error message should include the reconstructed command for debugging.
+	if !strings.Contains(err.Error(), "podman foo bar failed") {
+		t.Errorf("error should mention command: %v", err)
+	}
+}
+
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
