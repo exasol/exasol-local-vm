@@ -241,7 +241,7 @@ func TestBuildPodmanRunArgsExactArgv(t *testing.T) {
 		Restart:       "always",
 		Params:        []string{"maxConnectionsLicenseLimit=20"},
 	}
-	got := buildPodmanRunArgs(cfg, "docker.io/exasol/nano:2026.2.0-nano.2", map[string]int{"db": 8563})
+	got := buildPodmanRunArgs(cfg, "docker.io/exasol/nano:2026.2.0-nano.2", map[string]int{"db": 8563}, VersionCheckOptions{})
 	want := []string{
 		"run", "-d",
 		"--name", "exasol-local-db",
@@ -254,6 +254,10 @@ func TestBuildPodmanRunArgsExactArgv(t *testing.T) {
 		"docker.io/exasol/nano:2026.2.0-nano.2",
 		"init",
 		"params=maxConnectionsLicenseLimit=20",
+		// Version-check disabled by the zero VersionCheckOptions: single
+		// trailing arg matches the guest-side init-db.sh's
+		// VERSION_CHECK_ENABLED=0 emit path.
+		"VERSION_CHECK_ENABLED=0",
 	}
 	if !stringsEqual(got, want) {
 		t.Errorf("argv mismatch:\n want: %v\n got:  %v", want, got)
@@ -272,7 +276,7 @@ func TestBuildPodmanRunArgsHostPortMayDifferFromContainerPort(t *testing.T) {
 		SecurityOpt:   "unmask=ALL",
 		Restart:       "always",
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 9090})
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 9090}, VersionCheckOptions{})
 	var mapping string
 	for i, tok := range got {
 		if tok == "-p" && i+1 < len(got) {
@@ -298,7 +302,7 @@ func TestBuildPodmanRunArgsMultiPortsAreDeterministic(t *testing.T) {
 		SecurityOpt:   "unmask=ALL",
 		Restart:       "always",
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563, "metrics": 9100})
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563, "metrics": 9100}, VersionCheckOptions{})
 	// Collect all -p mappings in the order they appear.
 	var mappings []string
 	for i := 0; i < len(got); i++ {
@@ -314,7 +318,8 @@ func TestBuildPodmanRunArgsMultiPortsAreDeterministic(t *testing.T) {
 // TestBuildPodmanRunArgsOmitsParamsWhenEmpty verifies the params= argv
 // element is dropped entirely when the config lists no params — the
 // Nano container's `init` handler would otherwise see an empty
-// `params=` token and complain.
+// `params=` token and complain. With version-check disabled, `init`
+// is immediately followed by `VERSION_CHECK_ENABLED=0`.
 func TestBuildPodmanRunArgsOmitsParamsWhenEmpty(t *testing.T) {
 	cfg := dbContainerConfig{
 		ContainerName: "c",
@@ -325,21 +330,34 @@ func TestBuildPodmanRunArgsOmitsParamsWhenEmpty(t *testing.T) {
 		Restart:       "always",
 		// no Params
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563})
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563}, VersionCheckOptions{})
 	for _, tok := range got {
 		if strings.HasPrefix(tok, "params=") {
 			t.Errorf("did not expect a params= token when config has no params, got argv %v", got)
 		}
 	}
-	// Last token must still be `init`.
-	if last := got[len(got)-1]; last != "init" {
-		t.Errorf("expected last argv to be 'init', got %q", last)
+	// init must be immediately followed by VERSION_CHECK_ENABLED=0 (no
+	// params= filler in between).
+	var initIdx = -1
+	for i, tok := range got {
+		if tok == "init" {
+			initIdx = i
+			break
+		}
+	}
+	if initIdx < 0 {
+		t.Fatalf("init token missing from argv: %v", got)
+	}
+	if initIdx+1 >= len(got) || got[initIdx+1] != "VERSION_CHECK_ENABLED=0" {
+		t.Errorf("expected 'init' to be immediately followed by 'VERSION_CHECK_ENABLED=0', got argv %v", got)
 	}
 }
 
 // TestBuildPodmanRunArgsJoinsMultipleParamsWithSpace matches the guest
 // shell's `jq '.db.params // [] | join(" ")'` behavior — Nano expects
-// a single space-joined value on the right of `params=`.
+// a single space-joined value on the right of `params=`. The joined
+// params token appears between `init` and the trailing
+// VERSION_CHECK_ENABLED= token.
 func TestBuildPodmanRunArgsJoinsMultipleParamsWithSpace(t *testing.T) {
 	cfg := dbContainerConfig{
 		ContainerName: "c",
@@ -350,10 +368,16 @@ func TestBuildPodmanRunArgsJoinsMultipleParamsWithSpace(t *testing.T) {
 		Restart:       "always",
 		Params:        []string{"a=1", "b=2", "c=3"},
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563})
-	last := got[len(got)-1]
-	if last != "params=a=1 b=2 c=3" {
-		t.Errorf("expected joined params token, got %q", last)
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563}, VersionCheckOptions{})
+	var paramsTok string
+	for _, tok := range got {
+		if strings.HasPrefix(tok, "params=") {
+			paramsTok = tok
+			break
+		}
+	}
+	if paramsTok != "params=a=1 b=2 c=3" {
+		t.Errorf("expected joined params token, got %q", paramsTok)
 	}
 }
 
@@ -826,5 +850,334 @@ func TestStatusCmdReportsFalseWithoutConfig(t *testing.T) {
 	got := strings.TrimSpace(buf.String())
 	if got != `{"running":false}` {
 		t.Errorf("stdout: want {\"running\":false}, got %q", got)
+	}
+}
+
+// --- Phase 9: --version-check-*, data-size sidecar, resize-data --------
+
+func TestVersionCheckPodmanArgsDisabled(t *testing.T) {
+	preImage, initArgs := versionCheckPodmanArgs(VersionCheckOptions{}, "Windows")
+	if len(preImage) != 0 {
+		t.Errorf("expected no pre-image args when disabled, got %v", preImage)
+	}
+	if !stringsEqual(initArgs, []string{"VERSION_CHECK_ENABLED=0"}) {
+		t.Errorf("disabled init args: got %v", initArgs)
+	}
+}
+
+func TestVersionCheckPodmanArgsEnabledDefaults(t *testing.T) {
+	// Enabled=true with everything else zero — helpers should fill in
+	// defaults matching the mac guest-side load_version_check_config.
+	preImage, initArgs := versionCheckPodmanArgs(VersionCheckOptions{Enabled: true}, "Windows")
+	wantPre := []string{"-e", "VERSION_CHECK_IDENTITY=NONE"}
+	if !stringsEqual(preImage, wantPre) {
+		t.Errorf("pre-image: want %v, got %v", wantPre, preImage)
+	}
+	wantInit := []string{
+		"VERSION_CHECK_ENABLED=1",
+		"VERSION_CHECK_ENDPOINT=https://metrics-test.exasol.com/v1/version-check",
+		"VERSION_CHECK_INTERVAL_SEC=86400",
+		"VERSION_CHECK_RETRY_INTERVAL_SEC=86400",
+		"VERSION_CHECK_OPERATING_SYSTEM=Windows",
+	}
+	if !stringsEqual(initArgs, wantInit) {
+		t.Errorf("init args:\n want %v\n got  %v", wantInit, initArgs)
+	}
+}
+
+func TestVersionCheckPodmanArgsEnabledExplicitValues(t *testing.T) {
+	preImage, initArgs := versionCheckPodmanArgs(VersionCheckOptions{
+		Enabled:         true,
+		Identity:        "exasol-personal;deployment;small;default",
+		URL:             "https://metrics.example.test/v1/vc",
+		IntervalSeconds: 3600,
+	}, "Windows")
+	// Identity survives the semicolon-heavy string verbatim; that's the
+	// whole point of routing it via -e instead of the init argv (which
+	// treats ';' as a separator).
+	wantPre := []string{"-e", "VERSION_CHECK_IDENTITY=exasol-personal;deployment;small;default"}
+	if !stringsEqual(preImage, wantPre) {
+		t.Errorf("pre-image: want %v, got %v", wantPre, preImage)
+	}
+	wantInit := []string{
+		"VERSION_CHECK_ENABLED=1",
+		"VERSION_CHECK_ENDPOINT=https://metrics.example.test/v1/vc",
+		"VERSION_CHECK_INTERVAL_SEC=3600",
+		"VERSION_CHECK_RETRY_INTERVAL_SEC=3600",
+		"VERSION_CHECK_OPERATING_SYSTEM=Windows",
+	}
+	if !stringsEqual(initArgs, wantInit) {
+		t.Errorf("init args:\n want %v\n got  %v", wantInit, initArgs)
+	}
+}
+
+func TestVersionCheckPodmanArgsClampsInterval(t *testing.T) {
+	// Below the minimum (60s) — clamps up.
+	_, initArgs := versionCheckPodmanArgs(VersionCheckOptions{Enabled: true, IntervalSeconds: 5}, "Windows")
+	if !containsToken(initArgs, "VERSION_CHECK_INTERVAL_SEC=60") {
+		t.Errorf("expected interval clamped to 60, got %v", initArgs)
+	}
+
+	// Above the maximum (604800s = one week) — clamps down.
+	_, initArgs = versionCheckPodmanArgs(VersionCheckOptions{Enabled: true, IntervalSeconds: 999999999}, "Windows")
+	if !containsToken(initArgs, "VERSION_CHECK_INTERVAL_SEC=604800") {
+		t.Errorf("expected interval clamped to 604800, got %v", initArgs)
+	}
+	// Retry interval has a tighter cap (86400).
+	if !containsToken(initArgs, "VERSION_CHECK_RETRY_INTERVAL_SEC=86400") {
+		t.Errorf("expected retry interval clamped to 86400, got %v", initArgs)
+	}
+}
+
+func TestVersionCheckPodmanArgsOmitsOperatingSystemWhenEmpty(t *testing.T) {
+	// A hypothetical caller passing an empty osName should not produce a
+	// VERSION_CHECK_OPERATING_SYSTEM=<empty> token — init-db.sh only
+	// emits the OS arg when it has a non-empty value.
+	_, initArgs := versionCheckPodmanArgs(VersionCheckOptions{Enabled: true}, "")
+	for _, tok := range initArgs {
+		if strings.HasPrefix(tok, "VERSION_CHECK_OPERATING_SYSTEM=") {
+			t.Errorf("did not expect an OS token for empty osName, got %v", initArgs)
+		}
+	}
+}
+
+func TestBuildPodmanRunArgsInsertsVersionCheckIdentityBeforeImage(t *testing.T) {
+	cfg := dbContainerConfig{
+		ContainerName: "exasol-local-db",
+		Ports:         map[string]int{"db": 8563},
+		ShmSize:       "512mb",
+		PidsLimit:     "-1",
+		SecurityOpt:   "unmask=ALL",
+		Restart:       "always",
+	}
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563},
+		VersionCheckOptions{Enabled: true, Identity: "me"})
+	// -e must appear before the image ref, and VERSION_CHECK_IDENTITY=me
+	// must be the immediately-following argv token.
+	var eIdx, imgIdx = -1, -1
+	for i, tok := range got {
+		if tok == "-e" && eIdx == -1 {
+			eIdx = i
+		}
+		if tok == "img:v1" {
+			imgIdx = i
+		}
+	}
+	if eIdx == -1 {
+		t.Fatalf("-e missing from argv: %v", got)
+	}
+	if imgIdx == -1 {
+		t.Fatalf("image ref missing from argv: %v", got)
+	}
+	if eIdx >= imgIdx {
+		t.Errorf("expected -e to precede image ref, got -e at %d, image at %d in %v", eIdx, imgIdx, got)
+	}
+	if eIdx+1 >= len(got) || got[eIdx+1] != "VERSION_CHECK_IDENTITY=me" {
+		t.Errorf("expected -e to be followed by VERSION_CHECK_IDENTITY=me, got %v", got)
+	}
+}
+
+// containsToken returns true if s contains exactly the token t.
+func containsToken(s []string, t string) bool {
+	for _, x := range s {
+		if x == t {
+			return true
+		}
+	}
+	return false
+}
+
+// --- Phase 9: data-size sidecar helpers --------------------------------
+
+func TestReadDataSizeReturnsZeroWhenAbsent(t *testing.T) {
+	t.Chdir(t.TempDir())
+	got, err := readDataSize()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0 for missing sidecar, got %d", got)
+	}
+}
+
+func TestReadDataSizeRoundTrip(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := writeDataSize(42); err != nil {
+		t.Fatalf("writeDataSize: %v", err)
+	}
+	got, err := readDataSize()
+	if err != nil {
+		t.Fatalf("readDataSize: %v", err)
+	}
+	if got != 42 {
+		t.Errorf("round-trip mismatch: wrote 42, read %d", got)
+	}
+}
+
+func TestReadDataSizeRejectsGarbage(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(dataSizePath, []byte("notanumber"), 0o644); err != nil {
+		t.Fatalf("seed sidecar: %v", err)
+	}
+	if _, err := readDataSize(); err == nil {
+		t.Error("expected error on non-integer sidecar contents")
+	}
+}
+
+func TestEnforceDataSizeGrowOnly(t *testing.T) {
+	cases := []struct {
+		name             string
+		currentGB        int
+		requestedGB      int
+		expectShrinkErr  bool
+	}{
+		{"equal is fine", 10, 10, false},
+		{"grow is fine", 10, 20, false},
+		{"shrink rejected", 20, 10, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := enforceDataSizeGrowOnly(tc.currentGB, tc.requestedGB)
+			if tc.expectShrinkErr {
+				if err == nil {
+					t.Fatal("expected shrink error, got nil")
+				}
+				// tests/data_persistence_test.go TestDataDiskShrinkRejected
+				// asserts on a case-insensitive "shrink" substring.
+				if !strings.Contains(strings.ToLower(err.Error()), "shrink") {
+					t.Errorf("error should mention 'shrink', got: %v", err)
+				}
+			} else if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// --- Phase 9: resize-data ---------------------------------------------
+
+func TestResizeDataDiskCmdRejectsInvalidSize(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	for _, arg := range []string{"abc", "0", "-1"} {
+		if err := resizeDataDiskCmd(arg); err == nil {
+			t.Errorf("expected error for size arg %q, got nil", arg)
+		}
+	}
+}
+
+func TestResizeDataDiskCmdRequiresInit(t *testing.T) {
+	t.Chdir(t.TempDir())
+	// No resources/config.json.
+	err := resizeDataDiskCmd("20")
+	if err == nil {
+		t.Fatal("expected error when launcher not initialized")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("error should mention 'not initialized', got: %v", err)
+	}
+}
+
+func TestResizeDataDiskCmdRequiresPriorStart(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	// No podman on PATH — we skip the running check gracefully.
+	t.Setenv("PATH", t.TempDir())
+	// No data-size sidecar yet.
+	err := resizeDataDiskCmd("20")
+	if err == nil {
+		t.Fatal("expected error when data size not yet recorded")
+	}
+	if !strings.Contains(err.Error(), "not been recorded") {
+		t.Errorf("error should hint at running start first, got: %v", err)
+	}
+}
+
+func TestResizeDataDiskCmdRejectsShrink(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	t.Setenv("PATH", t.TempDir())
+	if err := writeDataSize(20); err != nil {
+		t.Fatalf("seed sidecar: %v", err)
+	}
+	err := resizeDataDiskCmd("10")
+	if err == nil {
+		t.Fatal("expected error for shrink")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "shrink") {
+		t.Errorf("error should mention 'shrink', got: %v", err)
+	}
+}
+
+func TestResizeDataDiskCmdRejectsEqualSize(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	t.Setenv("PATH", t.TempDir())
+	if err := writeDataSize(20); err != nil {
+		t.Fatalf("seed sidecar: %v", err)
+	}
+	err := resizeDataDiskCmd("20")
+	if err == nil {
+		t.Fatal("resize-data to equal size should error (only growth is allowed)")
+	}
+	// Message matches the mac semantics: "must be larger than".
+	if !strings.Contains(err.Error(), "larger than current size") {
+		t.Errorf("error should say 'larger than current size', got: %v", err)
+	}
+}
+
+func TestResizeDataDiskCmdAcceptsGrow(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	t.Setenv("PATH", t.TempDir()) // no podman → skip running check
+	if err := writeDataSize(10); err != nil {
+		t.Fatalf("seed sidecar: %v", err)
+	}
+	if err := resizeDataDiskCmd("30"); err != nil {
+		t.Fatalf("resize-data grow: %v", err)
+	}
+	got, err := readDataSize()
+	if err != nil {
+		t.Fatalf("readDataSize: %v", err)
+	}
+	if got != 30 {
+		t.Errorf("sidecar not updated: want 30, got %d", got)
+	}
+}
+
+func TestResizeDataDiskCmdBlocksWhenContainerRunning(t *testing.T) {
+	t.Chdir(t.TempDir())
+	writeFixtureResources(t)
+	if err := writeDataSize(10); err != nil {
+		t.Fatalf("seed sidecar: %v", err)
+	}
+	// Fake podman: --version 0, container exists 0, container inspect → true.
+	installFakePodman(t, `
+case "$2" in
+    exists) exit 0 ;;
+    inspect) echo "true"; exit 0 ;;
+esac
+exit 0
+`)
+	err := resizeDataDiskCmd("20")
+	if err == nil {
+		t.Fatal("expected error when container is running")
+	}
+	if !strings.Contains(err.Error(), "currently running") {
+		t.Errorf("error should mention 'currently running', got: %v", err)
+	}
+	// Sidecar must not have been updated.
+	got, err := readDataSize()
+	if err != nil {
+		t.Fatalf("readDataSize: %v", err)
+	}
+	if got != 10 {
+		t.Errorf("sidecar was updated despite refusal: got %d, want 10", got)
 	}
 }

@@ -6,10 +6,11 @@
 // same on-disk contract and integration tests used by the mac launcher can
 // be reused on windows.
 //
-// Phase 8 status: init, start (with --ports overrides + probe/fallback
-// port selection), stop, and status are implemented. resize-data remains
-// a stub. --version-check-* flags are still not propagated to podman
-// (Phase 9 wires them in).
+// Phase 9 status: all five subcommands are implemented. --version-check-*
+// flags are translated directly into the `podman run … init` argv
+// (skipping the mac's intermediate vm-shared/version-check.json step),
+// and data_size_gb is tracked via a resources/data-size.txt sidecar
+// enforced by both start and resize-data.
 package main
 
 import (
@@ -88,6 +89,24 @@ const (
 	// across container restarts. Matches the mac guest-side
 	// -v "$EXA_DATA_DIR:/exa" bind mount in launcher/assets/init/init-db.sh.
 	dataVolumeName = "exasol-nano-data"
+
+	// versionCheckMinIntervalSeconds and companions mirror the clamping
+	// applied by launcher/assets/init/init-db.sh so the effective values
+	// the container sees are identical whether the mac guest script or
+	// the windows launcher constructed the argv.
+	versionCheckMinIntervalSeconds      = 60
+	versionCheckMaxIntervalSeconds      = 604800
+	versionCheckMaxRetryIntervalSeconds = 86400
+
+	// versionCheckOperatingSystemWindows is the value the Nano container
+	// records in exasol.conf when this launcher is the host. Matches the
+	// versionCheckOperatingSystem("windows") branch in launcher/mac/main.go.
+	versionCheckOperatingSystemWindows = "Windows"
+
+	// dataSizePath is the sidecar file the windows launcher uses to fake
+	// the mac raw-disk-image size contract. See the "Differences with the
+	// mac version" section in windows-runner-plan.md.
+	dataSizePath = "resources/data-size.txt"
 )
 
 var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
@@ -279,6 +298,20 @@ func startCmd(
 		return err
 	}
 
+	// Enforce the grow-only data-size contract before touching podman.
+	// current == 0 means the sidecar does not exist yet (first start in
+	// this working directory), in which case any positive dataSizeGB is
+	// acceptable and gets recorded below.
+	current, err := readDataSize()
+	if err != nil {
+		return err
+	}
+	if current > 0 {
+		if err := enforceDataSizeGrowOnly(current, dataSizeGB); err != nil {
+			return err
+		}
+	}
+
 	if err := podman.Available(); err != nil {
 		return err
 	}
@@ -330,12 +363,20 @@ func startCmd(
 	}
 	fmt.Printf("Loaded image: %s\n", imageRef)
 
-	args := buildPodmanRunArgs(cfg, imageRef, hostPorts)
+	args := buildPodmanRunArgs(cfg, imageRef, hostPorts, versionCheckOptions)
 	for _, svc := range sortedKeys(hostPorts) {
 		fmt.Printf("Publishing %s: 127.0.0.1:%d -> container:%d\n", svc, hostPorts[svc], cfg.Ports[svc])
 	}
 	if err := podman.Run(args); err != nil {
 		return err
+	}
+
+	// Persist the newly-agreed data size so subsequent starts and
+	// resize-data invocations can enforce the grow-only rule.
+	if current != dataSizeGB {
+		if err := writeDataSize(dataSizeGB); err != nil {
+			return err
+		}
 	}
 
 	if err := writeVMState(hostPorts); err != nil {
@@ -389,9 +430,10 @@ func loadContainerConfig(path string) (dbContainerConfig, error) {
 // come from cfg.Ports. Services are emitted in alphabetical order so
 // the argv is deterministic and test-assertable.
 //
-// Phase 7 scope: no --version-check-* args, no per-run params gating on
-// "fresh deployment". Phase 9 extends this function.
-func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostPorts map[string]int) []string {
+// versionCheck controls whether the container is launched with Nano's
+// periodic version-check plumbing enabled and what parameters are
+// baked into exasol.conf on first boot. See versionCheckPodmanArgs.
+func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostPorts map[string]int, versionCheck VersionCheckOptions) []string {
 	args := []string{
 		"run", "-d",
 		"--name", cfg.ContainerName,
@@ -410,17 +452,91 @@ func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostPorts map[st
 		}
 		args = append(args, "-p", fmt.Sprintf("%d:%d", hostPort, containerPort))
 	}
-	args = append(args,
-		"-v", dataVolumeName+":/exa",
-		imageRef,
-		"init",
-	)
+	args = append(args, "-v", dataVolumeName+":/exa")
+
+	// Version-check emits BOTH pre-image -e VERSION_CHECK_IDENTITY=...
+	// (only when enabled) and post-init VERSION_CHECK_*= key=value args.
+	// Matches the split in init-db.sh's run_db_container() where the
+	// identity has to travel via env because Nano's init parser treats
+	// ';' as a separator and personal-tier identities contain semicolons.
+	preImage, initExtras := versionCheckPodmanArgs(versionCheck, versionCheckOperatingSystemWindows)
+	args = append(args, preImage...)
+	args = append(args, imageRef, "init")
 	if len(cfg.Params) > 0 {
 		// Nano's `init params='k=v ...'` interface: single argv token,
 		// space-joined values. See init-db.sh's DB_PARAMS assignment.
 		args = append(args, "params="+strings.Join(cfg.Params, " "))
 	}
+	args = append(args, initExtras...)
 	return args
+}
+
+// versionCheckPodmanArgs translates VersionCheckOptions into the two
+// argv fragments the guest-side init-db.sh would produce:
+//
+//   - preImage: `-e VERSION_CHECK_IDENTITY=<identity>` inserted right
+//     before the container image ref. Empty when checks are disabled.
+//   - initArgs: the trailing `VERSION_CHECK_*=<value>` tokens appended
+//     after `init` (and after any `params=...`). Always contains at
+//     least `VERSION_CHECK_ENABLED=<0|1>`; when enabled, adds
+//     ENDPOINT, INTERVAL_SEC, RETRY_INTERVAL_SEC, and
+//     OPERATING_SYSTEM.
+//
+// Defaulting and clamping match load_version_check_config() in
+// init-db.sh: empty URL falls back to defaultVersionCheckURL, empty
+// identity to defaultVersionCheckIdentity, non-positive interval to
+// defaultVersionCheckIntervalSeconds; interval is clamped into
+// [versionCheckMinIntervalSeconds, versionCheckMaxIntervalSeconds] and
+// the retry interval into
+// [versionCheckMinIntervalSeconds, versionCheckMaxRetryIntervalSeconds].
+//
+// osName is threaded in as a parameter (rather than reading runtime.GOOS
+// directly) so tests can pin the value; production callers pass
+// versionCheckOperatingSystemWindows.
+func versionCheckPodmanArgs(opts VersionCheckOptions, osName string) (preImage []string, initArgs []string) {
+	url := strings.TrimSpace(opts.URL)
+	if url == "" {
+		url = defaultVersionCheckURL
+	}
+	identity := strings.TrimSpace(opts.Identity)
+	if identity == "" {
+		identity = defaultVersionCheckIdentity
+	}
+	intervalSec := opts.IntervalSeconds
+	if intervalSec <= 0 {
+		intervalSec = defaultVersionCheckIntervalSeconds
+	}
+
+	// URL is always non-empty after defaulting, so "enabled iff flag AND
+	// URL" collapses to the flag. Kept as an AND for symmetry with
+	// init-db.sh's `if VERSION_CHECK_ENDPOINT is empty then disabled`.
+	enabled := opts.Enabled && url != ""
+	if !enabled {
+		return nil, []string{"VERSION_CHECK_ENABLED=0"}
+	}
+
+	if intervalSec < versionCheckMinIntervalSeconds {
+		intervalSec = versionCheckMinIntervalSeconds
+	}
+	if intervalSec > versionCheckMaxIntervalSeconds {
+		intervalSec = versionCheckMaxIntervalSeconds
+	}
+	retryInterval := intervalSec
+	if retryInterval > versionCheckMaxRetryIntervalSeconds {
+		retryInterval = versionCheckMaxRetryIntervalSeconds
+	}
+
+	preImage = []string{"-e", "VERSION_CHECK_IDENTITY=" + identity}
+	initArgs = []string{
+		"VERSION_CHECK_ENABLED=1",
+		"VERSION_CHECK_ENDPOINT=" + url,
+		fmt.Sprintf("VERSION_CHECK_INTERVAL_SEC=%d", intervalSec),
+		fmt.Sprintf("VERSION_CHECK_RETRY_INTERVAL_SEC=%d", retryInterval),
+	}
+	if osName != "" {
+		initArgs = append(initArgs, "VERSION_CHECK_OPERATING_SYSTEM="+osName)
+	}
+	return preImage, initArgs
 }
 
 // parsePortOverrides parses a comma-separated list of "service:port"
@@ -660,8 +776,98 @@ func checkContainerRunning() bool {
 }
 
 func resizeDataDiskCmd(sizeArg string) error {
-	_ = sizeArg
-	return errNotImplemented("resize-data")
+	newSizeGB, err := strconv.Atoi(sizeArg)
+	if err != nil {
+		return fmt.Errorf("invalid size: %w", err)
+	}
+	if newSizeGB <= 0 {
+		return fmt.Errorf("new size (%dGB) must be a positive integer", newSizeGB)
+	}
+
+	configPath := filepath.Join(resourcesDir, "config.json")
+	cfg, err := loadContainerConfig(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("launcher not initialized: run 'windows-runner init' first")
+		}
+		return fmt.Errorf("failed to load %s: %w", configPath, err)
+	}
+
+	// Container must be stopped. If podman is unavailable, treat the
+	// state as "not running" (nothing we could ask, so we cannot claim
+	// it is running). Only a positive "container is running" answer
+	// blocks the resize — matches the plan text ("call
+	// podman.ContainerRunning and error if true").
+	if err := podman.Available(); err == nil {
+		running, err := podman.ContainerRunning(cfg.ContainerName)
+		if err == nil && running {
+			return fmt.Errorf("container %q is currently running. Stop it first with 'windows-runner stop'", cfg.ContainerName)
+		}
+	}
+
+	current, err := readDataSize()
+	if err != nil {
+		return err
+	}
+	if current == 0 {
+		return fmt.Errorf("data size has not been recorded yet: run 'windows-runner start <cpu> <ram> <size>' first")
+	}
+	if newSizeGB <= current {
+		return fmt.Errorf("new size (%dGB) must be larger than current size (%dGB). Shrinking is not supported", newSizeGB, current)
+	}
+
+	if err := writeDataSize(newSizeGB); err != nil {
+		return err
+	}
+	fmt.Printf("Data size updated: %dGB -> %dGB\n", current, newSizeGB)
+	return nil
+}
+
+// readDataSize returns the size in GB recorded in resources/data-size.txt,
+// or (0, nil) if the file does not exist yet (first-start case). Any
+// parse or read error other than "not found" is surfaced.
+func readDataSize() (int, error) {
+	data, err := os.ReadFile(dataSizePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to read %s: %w", dataSizePath, err)
+	}
+	sizeStr := strings.TrimSpace(string(data))
+	size, err := strconv.Atoi(sizeStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size in %s: %q", dataSizePath, sizeStr)
+	}
+	if size <= 0 {
+		return 0, fmt.Errorf("invalid size in %s: %d (must be positive)", dataSizePath, size)
+	}
+	return size, nil
+}
+
+// writeDataSize replaces resources/data-size.txt with the given size
+// in GB. resources/ is created by init and expected to exist; if it
+// does not, that surfaces here as an error.
+func writeDataSize(sizeGB int) error {
+	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", resourcesDir, err)
+	}
+	if err := os.WriteFile(dataSizePath, fmt.Appendf(nil, "%d\n", sizeGB), 0o644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", dataSizePath, err)
+	}
+	return nil
+}
+
+// enforceDataSizeGrowOnly rejects a requested size that is strictly
+// smaller than what was previously recorded. Message intentionally
+// contains the string "shrink" so tests/data_persistence_test.go
+// TestDataDiskShrinkRejected (which does a case-insensitive substring
+// match on "shrink") passes unchanged.
+func enforceDataSizeGrowOnly(currentGB, requestedGB int) error {
+	if requestedGB < currentGB {
+		return fmt.Errorf("existing data size is %dGB, larger than requested %dGB; shrinking data volumes is not supported", currentGB, requestedGB)
+	}
+	return nil
 }
 
 func main() {
