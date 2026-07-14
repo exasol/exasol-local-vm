@@ -144,20 +144,6 @@ tasks:
     cmds:
       - cd tests && go test -timeout 30m ./...
 
-  package-linux:
-    desc: Package the VM artifacts and Podman/QEMU runner for Linux users for {{.IMG_ARCH}}
-    run: when_changed
-    requires:
-      vars:
-        - name: IMG_ARCH
-          enum: [x86_64, aarch64]
-    deps:
-      - task: ensure-vm-image
-        vars:
-          IMG_ARCH: "{{.IMG_ARCH}}"
-    cmds:
-      - ./host/package/package-linux.sh "{{.IMG_ARCH}}"
-
   package-mac:
     desc: Package the raw UEFI disk for macOS/vfkit users
     run: when_changed
@@ -185,35 +171,12 @@ tasks:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
 
-  package-windows:
-    desc: Package the VHDX disk for Windows/Hyper-V users
-    run: when_changed
-    requires:
-      vars:
-        - name: IMG_ARCH
-          enum: [x86_64]
-    deps:
-      - task: ensure-vm-image
-        vars:
-          IMG_ARCH: "{{.IMG_ARCH}}"
-    cmds:
-      - ./host/package/package-windows.sh "{{.IMG_ARCH}}"
-
   package:
     desc: Build all distributable packages
     deps:
-      - task: package-linux
-        vars:
-          IMG_ARCH: aarch64
-      - task: package-linux
-        vars:
-          IMG_ARCH: x86_64
       - task: package-mac
         vars:
           IMG_ARCH: aarch64
-      - task: package-windows
-        vars:
-          IMG_ARCH: x86_64
 
   clean:
     desc: Remove generated files
