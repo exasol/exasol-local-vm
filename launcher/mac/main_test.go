@@ -4,11 +4,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -181,5 +186,195 @@ func TestWaitForSSHServiceRejectsNonSSHBanner(t *testing.T) {
 
 	if err := waitForSSHService(ln.Addr().String(), 50*time.Millisecond); err == nil {
 		t.Fatal("expected waitForSSHService() to reject a non-SSH banner")
+	}
+}
+
+func TestClassifyDialErr(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "nil error is reachable", err: nil, want: "reachable"},
+		{name: "context deadline exceeded is timeout", err: context.DeadlineExceeded, want: "timeout"},
+		{
+			name: "wrapped context deadline exceeded is timeout",
+			err:  fmt.Errorf("dial tcp: %w", context.DeadlineExceeded),
+			want: "timeout",
+		},
+		{
+			name: "net.Error reporting Timeout() is timeout",
+			err:  &net.DNSError{IsTimeout: true},
+			want: "timeout",
+		},
+		{name: "connection refused is refused", err: syscall.ECONNREFUSED, want: "refused"},
+		{
+			name: "wrapped connection refused is refused",
+			err:  &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED},
+			want: "refused",
+		},
+		{name: "permission denied is blocked", err: syscall.EPERM, want: "blocked"},
+		{name: "access denied is blocked", err: syscall.EACCES, want: "blocked"},
+		{name: "host unreachable is blocked", err: syscall.EHOSTUNREACH, want: "blocked"},
+		{name: "network unreachable is blocked", err: syscall.ENETUNREACH, want: "blocked"},
+		{name: "unrecognized error defaults to blocked", err: errors.New("something else"), want: "blocked"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := classifyDialErr(tc.err); got != tc.want {
+				t.Fatalf("classifyDialErr(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// newReachableTCPAddr starts a listener that accepts and immediately closes
+// every connection, and returns its address. The caller must close it (e.g.
+// via defer) once done.
+func newReachableTCPAddr(t *testing.T) (*net.TCPAddr, io.Closer) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	return ln.Addr().(*net.TCPAddr), ln
+}
+
+// newRefusedTCPAddr returns an address nothing is listening on, by binding
+// an ephemeral port and releasing it immediately, to reliably get a
+// connection-refused outcome.
+func newRefusedTCPAddr(t *testing.T) *net.TCPAddr {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	addr := ln.Addr().(*net.TCPAddr)
+	if err := ln.Close(); err != nil {
+		t.Fatalf("failed to close listener: %v", err)
+	}
+
+	return addr
+}
+
+func TestLoopbackForwarderProbeReachable(t *testing.T) {
+	t.Parallel()
+
+	addr, closer := newReachableTCPAddr(t)
+	defer closer.Close()
+
+	forwarder := &LoopbackForwarder{name: "test", guestHost: addr.IP.String(), guestPort: addr.Port}
+
+	state := forwarder.Probe(context.Background(), time.Second)
+	if state != "reachable" {
+		t.Fatalf("Probe() state = %q, want %q", state, "reachable")
+	}
+}
+
+func TestLoopbackForwarderProbeRefused(t *testing.T) {
+	t.Parallel()
+
+	addr := newRefusedTCPAddr(t)
+	forwarder := &LoopbackForwarder{name: "test", guestHost: addr.IP.String(), guestPort: addr.Port}
+
+	state := forwarder.Probe(context.Background(), time.Second)
+	if state != "refused" {
+		t.Fatalf("Probe() state = %q, want %q", state, "refused")
+	}
+}
+
+func TestProbeForwardersReportsEveryRegisteredPort(t *testing.T) {
+	// Not run in parallel: exercises the package-level forwarder registry,
+	// which must not race with other tests touching it.
+	previous := forwarderRegistry
+	forwarderRegistry = map[string]*LoopbackForwarder{}
+	t.Cleanup(func() { forwarderRegistry = previous })
+
+	reachableAddr, closer := newReachableTCPAddr(t)
+	defer closer.Close()
+	refusedAddr := newRefusedTCPAddr(t)
+
+	registerForwarder("ssh", &LoopbackForwarder{name: "ssh", guestHost: reachableAddr.IP.String(), guestPort: reachableAddr.Port})
+	registerForwarder("db", &LoopbackForwarder{name: "db", guestHost: refusedAddr.IP.String(), guestPort: refusedAddr.Port})
+
+	got := probeForwarders(context.Background())
+
+	if len(got) != 2 {
+		t.Fatalf("probeForwarders() returned %d entries, want 2: %#v", len(got), got)
+	}
+	if got["ssh"].State != "reachable" {
+		t.Fatalf("ssh state = %q, want %q", got["ssh"].State, "reachable")
+	}
+	if got["db"].State != "refused" {
+		t.Fatalf("db state = %q, want %q", got["db"].State, "refused")
+	}
+}
+
+func TestQueryHealthCheckParsesPortStates(t *testing.T) {
+	// Not run in parallel: changes the process working directory, since
+	// vmSocketPath is a relative path.
+	tempDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to change to temp directory: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(originalDir) })
+
+	ln, err := net.Listen("unix", vmSocketPath)
+	if err != nil {
+		t.Fatalf("failed to listen on fake socket: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		var req struct {
+			Request string `json:"request"`
+		}
+		if err := json.NewDecoder(conn).Decode(&req); err != nil || req.Request != "health-check" {
+			return
+		}
+		json.NewEncoder(conn).Encode(map[string]any{ //nolint:errcheck
+			"ports": map[string]portHealthResponse{
+				"ssh": {State: "reachable"},
+				"db":  {State: "blocked"},
+			},
+		})
+	}()
+
+	ports, err := queryHealthCheck()
+	if err != nil {
+		t.Fatalf("queryHealthCheck() error = %v", err)
+	}
+	if ports["ssh"].State != "reachable" {
+		t.Fatalf("ssh state = %q, want %q", ports["ssh"].State, "reachable")
+	}
+	if ports["db"].State != "blocked" {
+		t.Fatalf("db state = %q, want %q", ports["db"].State, "blocked")
 	}
 }
