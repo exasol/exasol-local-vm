@@ -911,13 +911,35 @@ func parsePortOverrides(s string) (map[string]int, error) {
 	return overrides, nil
 }
 
-// shutdownVM requests a graceful stop and waits up to 30 seconds.
+// shutdownVM asks the VM to stop and waits (briefly) for it to actually do
+// so. The request itself is issued on a separate goroutine and bounded by
+// requestStopTimeout: vz.RequestStop/Stop are known to sometimes never
+// trigger ACPI shutdown at all (see the signal handler in runVMDaemon, which
+// relies on SSH poweroff instead for exactly this reason) and have been
+// observed to block the calling goroutine indefinitely when the guest can't
+// acknowledge the request -- e.g. before a partially-booted guest has an
+// ACPI handler running yet. Without this bound, a caller stuck here never
+// reaches its own os.Exit, leaving an orphaned daemon holding the VM/disk.
 func shutdownVM(vm *vz.VirtualMachine) {
-	if vm.CanRequestStop() {
-		vm.RequestStop() //nolint:errcheck
-	} else if vm.CanStop() {
-		vm.Stop() //nolint:errcheck
+	const requestStopTimeout = 5 * time.Second
+
+	requested := make(chan struct{}, 1)
+	go func() {
+		if vm.CanRequestStop() {
+			vm.RequestStop() //nolint:errcheck
+		} else if vm.CanStop() {
+			vm.Stop() //nolint:errcheck
+		}
+		requested <- struct{}{}
+	}()
+
+	select {
+	case <-requested:
+	case <-time.After(requestStopTimeout):
+		fmt.Fprintln(os.Stderr,
+			"Warning: VM stop request did not return in time; continuing to poll state anyway")
 	}
+
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if vm.State() == vz.VirtualMachineStateStopped {
@@ -925,6 +947,19 @@ func shutdownVM(vm *vz.VirtualMachine) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// pollUntil is shared by startCmd's state-file and degraded-marker watchers,
+// which otherwise duplicated the same poll loop.
+func pollUntil(deadline time.Time, interval time.Duration, check func() bool) bool {
+	for time.Now().Before(deadline) {
+		if check() {
+			return true
+		}
+		time.Sleep(interval)
+	}
+
+	return false
 }
 
 func startCmd(
@@ -985,6 +1020,9 @@ func startCmd(
 	if err := os.Remove("vm-state.json"); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove stale vm-state.json: %w", err)
 	}
+	if err := os.Remove(daemonDegradedMarkerFile); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove stale degraded-state marker: %w", err)
+	}
 
 	attr := &os.ProcAttr{
 		Dir:   ".",
@@ -1011,6 +1049,10 @@ func startCmd(
 
 	// Channel to signal when state file appears
 	stateCh := make(chan bool, 1)
+	// Channel to signal when the daemon reports a degraded start (SSH gate
+	// failed, but it is deliberately staying alive -- see
+	// daemonDegradedMarkerFile)
+	degradedCh := make(chan string, 1)
 	// Channel to signal when daemon exits
 	exitCh := make(chan error, 1)
 	// Channel to signal when log tailer should stop
@@ -1051,14 +1093,28 @@ func startCmd(
 
 	// Monitor state file
 	go func() {
-		for time.Now().Before(deadline) {
-			if _, err := os.Stat(stateFile); err == nil {
-				stateCh <- true
-				return
+		stateCh <- pollUntil(deadline, checkInterval, func() bool {
+			_, err := os.Stat(stateFile)
+			return err == nil
+		})
+	}()
+
+	// Monitor degraded-state marker (SSH gate failed, daemon staying alive)
+	go func() {
+		pollUntil(deadline, checkInterval, func() bool {
+			data, err := os.ReadFile(daemonDegradedMarkerFile)
+			if err != nil {
+				return false
 			}
-			time.Sleep(checkInterval)
-		}
-		stateCh <- false
+			var marker struct {
+				Error string `json:"error"`
+			}
+			if jsonErr := json.Unmarshal(data, &marker); jsonErr != nil || marker.Error == "" {
+				return false
+			}
+			degradedCh <- marker.Error
+			return true
+		})
 	}()
 
 	// Monitor daemon process
@@ -1100,6 +1156,14 @@ func startCmd(
 		fmt.Println("Check vm.log for VM output")
 		fmt.Println("Use 'mac-runner stop' to stop the VM")
 		return nil
+
+	case degradedErr := <-degradedCh:
+		stopTailCh <- true // Stop log tailer
+		// The daemon is deliberately staying alive (VM and forwarders intact)
+		// so health-check/diag can still report real per-port reachability --
+		// release it rather than leaving it parented to this exiting process.
+		process.Release()
+		return fmt.Errorf("VM failed to start: %s", degradedErr)
 
 	case err := <-exitCh:
 		stopTailCh <- true // Stop log tailer
@@ -1469,13 +1533,6 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	target := fmt.Sprintf("%s:%d", vmIP, guestSSHPort)
 	sshTarget.Store(&target)
 
-	fmt.Printf("Waiting for SSH service at %s...\n", target)
-	if err := waitForSSHService(target, 2*time.Minute); err != nil {
-		shutdownVM(vm)
-		return err
-	}
-	fmt.Println("SSH service is ready")
-
 	// Validate that all port overrides reference services reported by the VM.
 	for serviceName := range portOverrides {
 		if _, ok := initOutput.Ports[serviceName]; !ok {
@@ -1490,7 +1547,11 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 		}
 	}
 
-	// Start port forwarders dynamically for all ports in init output
+	// Start port forwarders dynamically for all ports in init output, before
+	// waiting on SSH readiness below. This way a blocked host-to-VM network
+	// path (e.g. macOS Local Network permission denied to the invoking app)
+	// is still visible via `health-check` even when the SSH-readiness gate
+	// never passes, instead of leaving no evidence behind at all.
 	ctx := context.Background()
 	forwarders := make(map[string]*LoopbackForwarder)
 	hostPorts := make(map[string]int)
@@ -1538,7 +1599,51 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 		}
 	}()
 
-	// Write vm-state.json with runtime configuration
+	fmt.Printf("Waiting for SSH service at %s...\n", target)
+	if sshErr := waitForSSHService(target, 2*time.Minute); sshErr != nil {
+		// Do not shut down the VM or forwarders here: they may be perfectly
+		// healthy and only the host-to-VM network path is blocked. Keep the
+		// daemon alive and queryable via health-check/diag so the launcher
+		// can tell that apart from a genuine boot failure, instead of
+		// destroying the only evidence of what actually happened. The parent
+		// `start` invocation is still told about this failure below, via
+		// daemonDegradedMarkerFile, so `exasol start` itself still reports
+		// an error exactly as before.
+		if markErr := writeDaemonDegradedMarker(sshErr); markErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to record degraded start state: %v\n", markErr)
+		}
+		fmt.Fprintf(os.Stderr,
+			"Warning: SSH did not become ready (%v); VM and port forwarders are staying "+
+				"up so health-check/diag can still report real per-port reachability.\n", sshErr)
+	} else {
+		fmt.Println("SSH service is ready")
+		if err := writeHealthyStartArtifacts(
+			vmIP, cpuCountStr, ramSizeStr, sharedDir, sshPrivateKeyPath, hostPorts,
+		); err != nil {
+			return err
+		}
+	}
+
+	// Wait for VM to finish (or be interrupted). This runs whether or not
+	// SSH became ready, so a degraded daemon stays alive (and stoppable via
+	// the normal `stop` signal handler above) for diagnostics rather than
+	// exiting and losing all forwarder/health state.
+	for {
+		if vm.State() == vz.VirtualMachineStateStopped {
+			fmt.Println("VM stopped")
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return nil
+}
+
+// writeHealthyStartArtifacts writes vm-state.json and prints access
+// information once SSH readiness has been confirmed.
+func writeHealthyStartArtifacts(
+	vmIP, cpuCountStr, ramSizeStr, sharedDir, sshPrivateKeyPath string,
+	hostPorts map[string]int,
+) error {
 	vmState := map[string]interface{}{
 		"vm_name":   "exasol-local-vm",
 		"vm_ip":     vmIP,
@@ -1576,14 +1681,26 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 		fmt.Printf("Database: 127.0.0.1:%d\n", dbPort)
 	}
 
-	// Wait for VM to finish (or be interrupted)
-	for {
-		if vm.State() == vz.VirtualMachineStateStopped {
-			fmt.Println("VM stopped")
-			break
-		}
-		time.Sleep(1 * time.Second)
+	return nil
+}
+
+// daemonDegradedMarkerFile signals the parent `start` invocation that the
+// daemon reached a "SSH readiness gate failed, but VM/forwarders are staying
+// up for diagnostics" state, distinct from both success (vm-state.json) and
+// a genuine daemon crash (process exit). Removed at the start of each fresh
+// start attempt alongside vm-state.json.
+const daemonDegradedMarkerFile = "vm-state-degraded.json"
+
+func writeDaemonDegradedMarker(cause error) error {
+	data, err := json.MarshalIndent(map[string]string{"error": cause.Error()}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal degraded-state marker: %w", err)
 	}
+
+	if err := os.WriteFile(daemonDegradedMarkerFile, data, 0644); err != nil {
+		return fmt.Errorf("failed to write degraded-state marker: %w", err)
+	}
+
 	return nil
 }
 
