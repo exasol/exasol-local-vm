@@ -190,6 +190,19 @@ tasks:
           IMG_ARCH: "{{.IMG_ARCH}}"
       - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
 
+  build-windows-launcher:
+    desc: Build the windows launcher binary (cross-compiled; podman-for-windows only supports x86_64)
+    run: when_changed
+    requires:
+      vars:
+        - name: IMG_ARCH
+          enum: [x86_64]
+    cmds:
+      - task: stage-windows-init-assets
+        vars:
+          IMG_ARCH: "{{.IMG_ARCH}}"
+      - ./host/package/build-windows-launcher.sh "{{.IMG_ARCH}}"
+
   package:
     desc: Build all distributable packages
     deps:
