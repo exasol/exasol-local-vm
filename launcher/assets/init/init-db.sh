@@ -53,6 +53,18 @@ DB_RESTART=$(jq -r '.db.restart' "$CONFIG_FILE")
 # these via its documented "init params='k=v ...'" interface; the values are
 # persisted to /exa/exasol.conf on the initial bootstrap.
 DB_PARAMS=$(jq -r '.db.params // [] | join(" ")' "$CONFIG_FILE")
+
+# Script language containers to image-mount into the DB container. The runner rewrites this
+# file on every start (empty when none), so a prior install never lingers after an uninstall.
+# Validate up front so a malformed file fails fast rather than producing a broken mount.
+SLC_CONFIG_FILE="$EXASOL_VM_HOST_SHARED_DIR/slc.json"
+if [ -f "$SLC_CONFIG_FILE" ]; then
+  if ! jq -e '(.slc // []) | type == "array" and all(.[]; (.image | type == "string" and length > 0) and (.target | type == "string" and length > 0))' "$SLC_CONFIG_FILE" >/dev/null 2>&1; then
+    echo "Error: invalid $SLC_CONFIG_FILE; expected {\"slc\":[{\"image\":...,\"target\":...}]} with non-empty fields" >&2
+    exit 1
+  fi
+fi
+
 VERSION_CHECK_RUNTIME_CONFIG_FILE="$EXASOL_VM_HOST_SHARED_DIR/version-check.json"
 NANO_VERSION_CHECK_DEFAULT_INTERVAL_SEC=86400
 NANO_VERSION_CHECK_MIN_INTERVAL_SEC=60
@@ -362,9 +374,22 @@ fi
 # an old instance, and doing so risks the Nano entrypoint's interactive
 # "existing certs" confirmation prompt, which has no documented non-interactive
 # override and would hang with no TTY attached.
-if podman ps -a --format "{{.Names}}" | grep -q "^${DB_CONTAINER_NAME}$"; then
-  log_msg "Removing stopped container to recreate it fresh"
-  podman rm "$DB_CONTAINER_NAME" 2>/dev/null || true
+#
+# Force-remove so a container in any state (including one left by an unclean shutdown)
+# cannot block the new "podman run --name". A failure here is fatal: a lingering container
+# would cause a name conflict and the database would never start.
+if podman container exists "$DB_CONTAINER_NAME"; then
+  log_msg "Removing existing container $DB_CONTAINER_NAME to recreate it fresh"
+  if ! podman rm -f "$DB_CONTAINER_NAME"; then
+    log_msg "Error: failed to remove existing container $DB_CONTAINER_NAME"
+    log_diagnostics
+    exit 1
+  fi
+fi
+if podman container exists "$DB_CONTAINER_NAME"; then
+  log_msg "Error: container $DB_CONTAINER_NAME still present after removal; aborting"
+  log_diagnostics
+  exit 1
 fi
 
 recover_incomplete_initial_create
@@ -382,7 +407,64 @@ fi
 IMAGE_NAME="localhost/${DB_CONTAINER_NAME}:latest"
 log_msg "Using image: $IMAGE_NAME"
 
+# SLC images live under this repository; only images whose reference contains it are
+# ever eligible for pruning, so the DB image and any unrelated images are never touched.
+SLC_IMAGE_REPO="exasol/script-language-container"
+
+# prune_unreferenced_slc_images removes SLC images no longer referenced by the current
+# slc.json; without it the Podman store grows unbounded as SLCs are replaced or uninstalled.
+# It runs after the desired images are pulled and after the DB container was force-removed,
+# so outgoing images are unreferenced and remove cleanly. Best-effort: a failed removal is
+# logged and skipped, never fatal, so cleanup can never block database startup.
+prune_unreferenced_slc_images() {
+  # Only prune with an authoritative desired set. An absent slc.json means "SLC-unaware"
+  # (an older launcher, or today's default behavior), so leave the store untouched.
+  [ -f "$SLC_CONFIG_FILE" ] || return 0
+
+  # Desired image references, normalized by stripping any leading "docker.io/" so they
+  # compare equal to however Podman reports the repository in `podman images`.
+  slc_desired_images=$(jq -r '.slc // [] | .[] | .image' "$SLC_CONFIG_FILE" | sed 's|^docker\.io/||')
+
+  # Iterate every SLC image currently in local storage; remove any not in the desired
+  # set. No pipefail is configured, so a `grep` with no matches ends the loop cleanly.
+  podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+    | grep -F "$SLC_IMAGE_REPO" \
+    | while IFS= read -r slc_existing_image; do
+        [ -n "$slc_existing_image" ] || continue
+        slc_normalized=$(printf '%s' "$slc_existing_image" | sed 's|^docker\.io/||')
+        if printf '%s\n' "$slc_desired_images" | grep -Fxq "$slc_normalized"; then
+          continue
+        fi
+        log_msg "Removing unreferenced SLC image: $slc_existing_image"
+        if ! podman rmi "$slc_existing_image" >/dev/null 2>&1; then
+          log_msg "Warning: could not remove SLC image $slc_existing_image (still in use?); skipping"
+        fi
+      done
+}
+
 run_db_container() {
+  # `podman run --mount type=image` does NOT pull on demand - a missing image fails with
+  # "image not known" - so pull any missing SLC image first. Idempotent across restarts.
+  if [ -f "$SLC_CONFIG_FILE" ]; then
+    while IFS= read -r slc_image; do
+      [ -n "$slc_image" ] || continue
+      if podman image exists "$slc_image"; then
+        log_msg "SLC image already present: $slc_image"
+      else
+        log_msg "Pulling SLC image: $slc_image"
+        if ! podman pull "$slc_image"; then
+          log_msg "Error: failed to pull SLC image $slc_image"
+          log_diagnostics
+          exit 1
+        fi
+      fi
+    done <<SLC_PULL
+$(jq -r '.slc // [] | .[] | .image' "$SLC_CONFIG_FILE")
+SLC_PULL
+  fi
+
+  prune_unreferenced_slc_images || true
+
   if [ "$NANO_VERSION_CHECK_ENABLED" = "1" ]; then
     log_msg "Starting DB container with Nano version checks enabled in exasol.conf"
     # Exasol Personal identities contain semicolons. AdminI's init parser treats
@@ -393,7 +475,21 @@ run_db_container() {
     log_msg "Starting DB container with Nano version checks disabled in exasol.conf"
     set -- "$IMAGE_NAME" "$@"
   fi
-  podman run -d \
+  # Prepend one "--mount type=image,..." per SLC so each image is mounted under /exa/slc
+  # before the container starts. jq emits one full spec per line; reading whole lines keeps
+  # each image reference/path intact and the --mount flag paired with its value.
+  if [ -f "$SLC_CONFIG_FILE" ]; then
+    while IFS= read -r slc_mount_spec; do
+      [ -n "$slc_mount_spec" ] || continue
+      log_msg "Mounting SLC: $slc_mount_spec"
+      set -- "--mount" "$slc_mount_spec" "$@"
+    done <<SLC_MOUNTS
+$(jq -r '.slc // [] | .[] | "type=image,source=\(.image),destination=\(.target)"' "$SLC_CONFIG_FILE")
+SLC_MOUNTS
+  fi
+  # --replace atomically removes any same-name container, defending against a race with
+  # the force-removal above so recreation never fails on a name conflict.
+  podman run -d --replace \
     --name "$DB_CONTAINER_NAME" \
     --shm-size="$DB_SHM_SIZE" \
     --pids-limit="$DB_PIDS_LIMIT" \

@@ -66,12 +66,26 @@ type VersionCheckOptions struct {
 	URL             string
 }
 
+// SlcMount describes one script language container image mount: the source image
+// reference and the destination directory inside the database container (under /exa/slc).
+type SlcMount struct {
+	Image  string `json:"image"`
+	Target string `json:"target"`
+}
+
+// SlcRuntimeConfig is written to the shared directory as slc.json and consumed by
+// init-db.sh to add `--mount type=image` arguments to the database container.
+type SlcRuntimeConfig struct {
+	Slc []SlcMount `json:"slc"`
+}
+
 const (
 	defaultSSHPrivateKeyPath           = "vm-ssh-key"
 	runtimeConfigPath                  = "vm-config.json"
 	sharedDirName                      = "vm-shared"
 	authorizedKeysName                 = "authorized_keys"
 	versionCheckRuntimeConfigName      = "version-check.json"
+	slcRuntimeConfigName               = "slc.json"
 	defaultVersionCheckIntervalSeconds = 86400
 	defaultVersionCheckIdentity        = "NONE"
 	vmSocketPath                       = "vm.sock"
@@ -288,6 +302,52 @@ func writeVersionCheckRuntimeConfigFromOptions(sharedDir string, options Version
 	if err := writeVersionCheckRuntimeConfig(sharedDir, config); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to write version-check runtime config: %v\n", err)
 	}
+}
+
+// slcMountList collects repeated `--slc <image>=<target>` start flags.
+type slcMountList []SlcMount
+
+func (l *slcMountList) String() string {
+	parts := make([]string, 0, len(*l))
+	for _, m := range *l {
+		parts = append(parts, m.Image+"="+m.Target)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (l *slcMountList) Set(value string) error {
+	parts := strings.SplitN(value, "=", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid --slc value %q: expected <image>=<target>", value)
+	}
+	image := strings.TrimSpace(parts[0])
+	target := strings.TrimSpace(parts[1])
+	if image == "" || target == "" {
+		return fmt.Errorf("invalid --slc value %q: image and target must both be non-empty", value)
+	}
+	*l = append(*l, SlcMount{Image: image, Target: target})
+	return nil
+}
+
+// writeSlcRuntimeConfig writes slc.json into the shared directory. It is written on every
+// start (with an empty list when no SLCs are requested) so a previous run's mounts never
+// linger after an uninstall.
+func writeSlcRuntimeConfig(sharedDir string, mounts []SlcMount) error {
+	if err := os.MkdirAll(sharedDir, 0755); err != nil {
+		return fmt.Errorf("failed to create shared directory for slc config: %w", err)
+	}
+	if mounts == nil {
+		mounts = []SlcMount{}
+	}
+	configPath := filepath.Join(sharedDir, slcRuntimeConfigName)
+	configData, err := json.MarshalIndent(SlcRuntimeConfig{Slc: mounts}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal slc runtime config: %w", err)
+	}
+	if err := os.WriteFile(configPath, configData, 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", configPath, err)
+	}
+	return nil
 }
 
 func displayPath(path string) string {
@@ -650,6 +710,8 @@ func main() {
 		startFlags.IntVar(&versionCheckOptions.IntervalSeconds, "version-check-interval-seconds", versionCheckOptions.IntervalSeconds, "Interval in seconds for scheduled local database version checks")
 		startFlags.StringVar(&versionCheckOptions.Identity, "version-check-identity", versionCheckOptions.Identity, "Identity string for scheduled local database version checks")
 		startFlags.StringVar(&versionCheckOptions.URL, "version-check-url", versionCheckOptions.URL, "Version-check URL override for scheduled local database version checks")
+		var slcMounts slcMountList
+		startFlags.Var(&slcMounts, "slc", "Script language container mount as <image>=<target> (repeatable)")
 		startFlags.Usage = func() {
 			fmt.Fprintln(os.Stderr, "Usage: mac-runner start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
 			startFlags.PrintDefaults()
@@ -671,7 +733,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: data_size_gb must be a positive integer")
 			os.Exit(1)
 		}
-		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag, versionCheckOptions)
+		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag, versionCheckOptions, slcMounts)
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
@@ -968,6 +1030,7 @@ func startCmd(
 	dataSizeGB int,
 	portsOverride string,
 	versionCheckOptions VersionCheckOptions,
+	slcMounts []SlcMount,
 ) error {
 	sharedDir := sharedDirName
 	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, data_size=%dGB, shared_dir=%s\n", cpuCountStr, ramSizeStr, dataSizeGB, sharedDir)
@@ -985,6 +1048,10 @@ func startCmd(
 	}
 
 	writeVersionCheckRuntimeConfigFromOptions(sharedDir, versionCheckOptions)
+
+	if err := writeSlcRuntimeConfig(sharedDir, slcMounts); err != nil {
+		return err
+	}
 
 	// Check if VM is already running by probing the status socket.
 	if conn, err := net.DialTimeout("unix", vmSocketPath, 2*time.Second); err == nil {
