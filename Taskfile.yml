@@ -159,7 +159,13 @@ tasks:
       - ./host/run/stop-qemu-container.sh
 
   test-launcher-integration:
-    desc: Run launcher integration tests in ./tests
+    desc: |
+      Run launcher integration tests in ./tests. The fixture auto-detects the
+      host platform and looks for the corresponding launcher zip under
+      ../dist/ (mac-runner-aarch64.zip on macOS, windows-runner-x86_64.zip on
+      Windows). Override with the LAUNCHER_ZIP env var. Cross-platform tests
+      run on both hosts; the mac-only ones (SSH, raw disk image, forceful
+      kill of the launcher daemon) are gated by //go:build darwin.
     cmds:
       - cd tests && go test -timeout 30m ./...
 
