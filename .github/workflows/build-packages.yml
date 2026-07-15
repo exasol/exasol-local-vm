@@ -35,6 +35,9 @@ on:
       mac-launcher-artifact:
         description: "Name of the macOS launcher artifact"
         value: ${{ jobs.build-mac-launcher.outputs.artifact-name }}
+      windows-launcher-artifact:
+        description: "Name of the Windows launcher artifact"
+        value: ${{ jobs.build-windows-launcher.outputs.artifact-name }}
 
 permissions:
   contents: read
@@ -95,7 +98,17 @@ jobs:
           task download-db-container IMG_ARCH=aarch64
           echo "✓ Container tarball downloaded to release/"
           ls -lh release/exasol-nano-db-aarch64.tar.gz
-      
+
+      - name: Download x86_64 container tarball for windows launcher
+        run: |
+          # Windows launcher embeds the x86_64 Nano image. Downloading it
+          # here (rather than on the windows runner) keeps podman-for-linux
+          # centralised on the ubuntu runner and lets skip-linux-build reuse
+          # the artifact between runs.
+          task download-db-container IMG_ARCH=x86_64
+          echo "✓ x86_64 container tarball downloaded to release/"
+          ls -lh release/exasol-nano-db-x86_64.tar.gz
+
       - name: Verify release artifacts
         run: |
           if [ ! -d release ]; then
@@ -108,6 +121,14 @@ jobs:
           fi
           if [ ! -f release/exasol-nano-db-aarch64.tar.gz ]; then
             echo "ERROR: release/exasol-nano-db-aarch64.tar.gz not created!" >&2
+            exit 1
+          fi
+          if [ ! -f release/exasol-nano-db-x86_64.tar.gz ]; then
+            echo "ERROR: release/exasol-nano-db-x86_64.tar.gz not created!" >&2
+            exit 1
+          fi
+          if [ ! -f release/exasol-nano-db-x86_64.tar.gz.metadata ]; then
+            echo "ERROR: release/exasol-nano-db-x86_64.tar.gz.metadata not created!" >&2
             exit 1
           fi
           echo "✓ Release artifacts verified"
@@ -471,6 +492,233 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-failure-logs
+          path: tests/failures
+          if-no-files-found: ignore
+          retention-days: 7
+
+  build-windows-launcher:
+    runs-on: windows-latest
+    needs: build-disk-images
+    if: ${{ always() && (needs.build-disk-images.result == 'success' || needs.build-disk-images.result == 'skipped') }}
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-id }}
+
+    # Prefer bash for parity with the mac job's shell scripting. windows-latest
+    # ships Git for Windows which provides bash + tar + xz + sha256sum.
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Check build-disk-images job status
+        run: |
+          echo "build-disk-images result: ${{ needs.build-disk-images.result }}"
+          if [ "${{ needs.build-disk-images.result }}" = "success" ]; then
+            echo "Will download from current run"
+          elif [ "${{ needs.build-disk-images.result }}" = "skipped" ]; then
+            echo "Will download from previous run"
+          else
+            echo "ERROR: Unexpected job result: ${{ needs.build-disk-images.result }}"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: launcher/windows/go.sum
+
+      - name: Install Task
+        shell: pwsh
+        run: |
+          choco install go-task -y
+          task --version
+
+      - name: Download release packages from current run
+        if: ${{ needs.build-disk-images.result == 'success' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-packages
+          path: .
+
+      - name: Download release packages from previous run
+        if: ${{ needs.build-disk-images.result == 'skipped' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          RUN_ID="${{ inputs.previous-run-id }}"
+
+          if [ -z "$RUN_ID" ]; then
+            echo "Finding latest workflow run with successful build-disk-images job on branch: ${{ github.ref_name }}..."
+            RUN_IDS=$(gh run list \
+              --workflow build-packages.yml \
+              --branch "${{ github.ref_name }}" \
+              --status success \
+              --limit 20 \
+              --json databaseId \
+              --jq '.[].databaseId')
+            for candidate_run_id in $RUN_IDS; do
+              echo "Checking run $candidate_run_id for build-disk-images job..."
+              BUILD_JOB_STATUS=$(gh run view "$candidate_run_id" \
+                --json jobs \
+                --jq '.jobs[] | select(.name == "build-disk-images") | .conclusion')
+              if [ "$BUILD_JOB_STATUS" = "success" ]; then
+                RUN_ID="$candidate_run_id"
+                echo "✓ Found run $RUN_ID with successful build-disk-images job"
+                break
+              fi
+            done
+            if [ -z "$RUN_ID" ]; then
+              echo "Error: No successful run with build-disk-images job found on branch ${{ github.ref_name }}" >&2
+              echo "You need to run the workflow without skip-linux-build at least once first" >&2
+              exit 1
+            fi
+          fi
+
+          echo "Downloading release-packages artifact from run $RUN_ID..."
+          gh run download "$RUN_ID" \
+            --name release-packages \
+            --dir .
+
+      - name: Verify x86_64 container tarball present
+        run: |
+          set -euo pipefail
+          # The download-artifact / gh run download steps deposit the whole
+          # release-packages contents at the workspace root. Move the two
+          # files build-windows-launcher.sh expects into release/.
+          mkdir -p release
+          for f in exasol-nano-db-x86_64.tar.gz exasol-nano-db-x86_64.tar.gz.metadata; do
+            if [ -f "$f" ]; then
+              mv "$f" release/
+            fi
+          done
+          if [ ! -f release/exasol-nano-db-x86_64.tar.gz ]; then
+            echo "✗ Missing: release/exasol-nano-db-x86_64.tar.gz" >&2
+            ls -lh release/ || true
+            ls -lh || true
+            exit 1
+          fi
+          if [ ! -f release/exasol-nano-db-x86_64.tar.gz.metadata ]; then
+            echo "✗ Missing: release/exasol-nano-db-x86_64.tar.gz.metadata" >&2
+            exit 1
+          fi
+          echo "✓ Found: release/exasol-nano-db-x86_64.tar.gz ($(du -h release/exasol-nano-db-x86_64.tar.gz | cut -f1))"
+          echo "✓ Found: release/exasol-nano-db-x86_64.tar.gz.metadata"
+
+      - name: Build windows launcher
+        # No signing yet — WINDOWS_SIGN_PFX_PATH is intentionally unset so the
+        # build script's signing block skips with a warning. Phase 12 will
+        # wire in the setup-windows-signing composite action and secrets.
+        run: task build-windows-launcher IMG_ARCH=x86_64
+
+      - name: Package windows launcher zip
+        shell: pwsh
+        run: |
+          # PowerShell Compress-Archive is the native equivalent of the mac
+          # 'ditto -c -k .' step: pack the contents of the release directory
+          # (launcher.exe and any siblings) at the root of the zip, not the
+          # directory itself.
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive `
+            -Path release/launcher/windows/x86_64/* `
+            -DestinationPath dist/windows-runner-x86_64.zip `
+            -Force
+
+      - name: Compute checksum
+        run: |
+          set -euo pipefail
+          # sha256sum ships with Git for Windows and produces the same
+          # '<hex>  <path>\n' shape as the mac 'shasum -a 256' step, so
+          # downstream verifiers work identically on both platforms.
+          sha256sum dist/windows-runner-x86_64.zip > dist/windows-runner-x86_64.zip.sha256
+          cat dist/windows-runner-x86_64.zip.sha256
+
+      - name: Verify launcher artifacts
+        run: |
+          ls -lh dist/windows-runner-x86_64.zip
+          ls -lh dist/windows-runner-x86_64.zip.sha256
+
+      - name: Upload windows launcher
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-launcher
+          path: |
+            dist/windows-runner-x86_64.zip
+            dist/windows-runner-x86_64.zip.sha256
+          retention-days: 7
+
+  test-windows-launcher:
+    # Self-hosted because GitHub-hosted windows-latest runners do not ship
+    # podman-for-windows and nested virtualization is unreliable on them.
+    # Provisioning the runner is tracked separately from this workflow.
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - podman
+    needs: build-windows-launcher
+    if: ${{ always() && needs.build-windows-launcher.result == 'success' }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Download windows launcher artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-launcher
+          path: dist
+
+      - name: Install Task
+        shell: pwsh
+        run: |
+          choco install go-task -y
+          task --version
+
+      - name: Ensure podman machine is running
+        run: |
+          set -euo pipefail
+          # `podman machine start` errors if the machine is already running,
+          # so peek at the state first and only start when necessary. The
+          # windows launcher's own podman.MachineRunning() check will fail
+          # every test if the machine is stopped, so we surface the issue
+          # here where a clean diagnostic is easier to read than a wall of
+          # per-test failures.
+          if podman machine inspect --format '{{.State}}' | grep -qi '^running$'; then
+            echo "podman machine already running"
+          else
+            echo "Starting podman machine..."
+            podman machine start
+          fi
+          podman machine inspect --format '{{.State}}'
+
+      - name: Run integration tests
+        run: task test-launcher-integration
+
+      - name: Upload test failure logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Distinct name from the mac job's 'test-failure-logs' so v7
+          # upload-artifact does not error on duplicate artifact names
+          # within the same run.
+          name: test-failure-logs-windows
           path: tests/failures
           if-no-files-found: ignore
           retention-days: 7

@@ -261,3 +261,26 @@ tasks:
         {{else}}
           ./host/github/ci-build-mac-launcher.sh
         {{end}}
+
+  ci-build-windows-launcher:
+    desc: Run Build Packages workflow on current branch and download Windows launcher
+    vars:
+      # If you are only changing windows launcher code, you can skip the linux tarball
+      # build to speed up the workflow. You must have a recent successful linux build
+      # on the same branch for the workflow to reuse instead.
+      SKIP_LINUX_BUILD: '{{.SKIP_LINUX_BUILD | default "false"}}'
+      # If SKIP_LINUX_BUILD is true, you can optionally specify a previous workflow
+      # run ID to download the shared release-packages artifact from instead of the
+      # latest successful run.
+      PREVIOUS_RUN_ID: '{{.PREVIOUS_RUN_ID | default ""}}'
+    cmds:
+      - |
+        {{if eq .SKIP_LINUX_BUILD "true"}}
+          {{if ne .PREVIOUS_RUN_ID ""}}
+            ./host/github/ci-build-windows-launcher.sh --skip-linux-build --use-run-id {{.PREVIOUS_RUN_ID}}
+          {{else}}
+            ./host/github/ci-build-windows-launcher.sh --skip-linux-build
+          {{end}}
+        {{else}}
+          ./host/github/ci-build-windows-launcher.sh
+        {{end}}
