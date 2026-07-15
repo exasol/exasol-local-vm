@@ -80,30 +80,9 @@ popd > /dev/null
 
 echo "==> Launcher binary: $LAUNCHER_OUTPUT ($(du -h "$LAUNCHER_OUTPUT" | cut -f1))"
 
-# --- Code signing (optional, gated on WINDOWS_SIGN_PFX_PATH) ---------------
-# TODO(sign): full signtool.exe integration lands in a follow-up phase along
-# with the setup-windows-signing composite action. For now, if
-# WINDOWS_SIGN_PFX_PATH is set the script will invoke signtool.exe; if it is
-# not set we skip signing with a warning so local dev builds succeed. See
-# windows-runner-plan.md § "Windows code signing" for the target design.
-if [ -z "${WINDOWS_SIGN_PFX_PATH:-}" ]; then
-    echo "==> WARNING: WINDOWS_SIGN_PFX_PATH is not set; skipping Authenticode signing."
-    echo "    The produced binary is unsigned and only suitable for local testing."
-else
-    if ! command -v signtool.exe >/dev/null 2>&1; then
-        echo "Error: WINDOWS_SIGN_PFX_PATH is set but signtool.exe was not found on PATH" >&2
-        exit 1
-    fi
-    TIMESTAMP_URL="${WINDOWS_SIGN_TIMESTAMP_URL:-http://timestamp.digicert.com}"
-    echo "==> Signing windows launcher with signtool.exe (timestamp: $TIMESTAMP_URL)..."
-    signtool.exe sign \
-        /fd SHA256 \
-        /f "$WINDOWS_SIGN_PFX_PATH" \
-        /p "${WINDOWS_SIGN_PFX_PASSWORD:-}" \
-        /tr "$TIMESTAMP_URL" \
-        /td SHA256 \
-        "$LAUNCHER_OUTPUT"
-    echo "==> Verifying Authenticode signature..."
-    signtool.exe verify /pa /v "$LAUNCHER_OUTPUT"
-    echo "==> Signed launcher binary: $LAUNCHER_OUTPUT"
-fi
+# Code signing is intentionally out of scope for this script: the
+# windows launcher is signed in CI via the SSLcom/esigner-codesign
+# GitHub Action, which authenticates against SSL.com's eSigner cloud
+# HSM using the ESIGN_* repository secrets. Local builds produce an
+# unsigned binary; see windows-runner-plan.md § "Windows code signing"
+# for the design rationale.

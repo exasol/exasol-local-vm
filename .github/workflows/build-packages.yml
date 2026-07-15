@@ -28,6 +28,19 @@ on:
         required: true
       IOS_APPSTORECONNECTAPI_AUTHKEY:
         required: true
+      # SSL.com eSigner cloud code-signing credentials for the windows
+      # launcher. Marked `required: false` so the workflow still runs on
+      # PRs from forks (where secrets are not passed), producing an
+      # unsigned binary; the sign/verify steps in build-windows-launcher
+      # are gated on `secrets.ESIGN_USERNAME != ''`.
+      ESIGN_USERNAME:
+        required: false
+      ESIGN_PASSWORD:
+        required: false
+      ESIGN_CREDENTIAL_ID:
+        required: false
+      ESIGN_TOTP_SECRET:
+        required: false
     outputs:
       linux-packages-artifact:
         description: "Name of the Linux packages artifact"
@@ -611,10 +624,51 @@ jobs:
           echo "✓ Found: release/exasol-nano-db-x86_64.tar.gz.metadata"
 
       - name: Build windows launcher
-        # No signing yet — WINDOWS_SIGN_PFX_PATH is intentionally unset so the
-        # build script's signing block skips with a warning. Phase 12 will
-        # wire in the setup-windows-signing composite action and secrets.
+        # Build script is signing-agnostic in the CI path; signing runs as
+        # a separate step below via the SSLcom/esigner-codesign action so
+        # secrets never touch the shell script. Any developer local build
+        # produces an unsigned binary.
         run: task build-windows-launcher IMG_ARCH=x86_64
+
+      - name: Sign windows launcher
+        # Skipped on PR builds from forks (secrets are not passed to
+        # forked workflow runs). External contributors' PRs still produce
+        # a valid unsigned binary in the artifact; the same build against
+        # a trusted branch re-signs it here in place.
+        if: ${{ secrets.ESIGN_USERNAME != '' }}
+        # Pinned to v1.3.2 (release from 2025-12-22). CodeSignTool talks
+        # to SSL.com's HSM: the private key never leaves SSL.com's
+        # infrastructure, and no PFX is materialised on the runner.
+        uses: sslcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        with:
+          command:       sign
+          username:      ${{ secrets.ESIGN_USERNAME }}
+          password:      ${{ secrets.ESIGN_PASSWORD }}
+          credential_id: ${{ secrets.ESIGN_CREDENTIAL_ID }}
+          totp_secret:   ${{ secrets.ESIGN_TOTP_SECRET }}
+          file_path:     ${{ github.workspace }}/release/launcher/windows/x86_64/launcher.exe
+          # override=true overwrites the input file with the signed copy
+          # so the same path can be picked up by the packaging step below.
+          override:      'true'
+
+      - name: Verify Authenticode signature
+        if: ${{ secrets.ESIGN_USERNAME != '' }}
+        shell: pwsh
+        run: |
+          # signtool.exe is preinstalled with the Windows SDK on the
+          # windows-latest image; discover the newest x64 copy under the
+          # SDK's per-version tree rather than hard-coding a path.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*\x64\signtool.exe' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) {
+            Write-Error "signtool.exe not found under Windows Kits\10\bin"
+            exit 1
+          }
+          Write-Host "Using signtool: $signtool"
+          & $signtool verify /pa /v release/launcher/windows/x86_64/launcher.exe
 
       - name: Package windows launcher zip
         shell: pwsh

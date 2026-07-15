@@ -1316,44 +1316,39 @@ ticket once the code-signing certificate is provisioned.
 
 ## Environment variables introduced by the build script
 
-> **Superseded by Phase 12.** The three env vars documented below were
-> introduced in Phase 3 as a placeholder against a PFX-based signing
-> model. Phase 12 adopts SSL.com eSigner (cloud signing via the
-> `ESIGN_*` secrets IT has already provisioned) and moves the signing
-> invocation entirely into the CI workflow. The recommended follow-up
-> is to delete the `WINDOWS_SIGN_PFX_*` block from the build script
-> (option 1 in Phase 12's plan) so there is only one signing path.
-> The table below is retained for historical context and to describe
-> the current script's behavior for anyone building locally between
-> now and the Phase 12 landing.
+> **Removed in Phase 12.** The `WINDOWS_SIGN_PFX_*` gate block
+> described below was introduced in Phase 3 as a placeholder for a
+> PFX-based signing model. Phase 12 replaced it with a CI-only signing
+> step that invokes SSL.com's eSigner via
+> [`SSLcom/esigner-codesign`](https://github.com/SSLcom/esigner-codesign)
+> using the pre-existing `ESIGN_*` repository secrets. The script
+> block has been deleted; the current
+> [host/package/build-windows-launcher.sh](host/package/build-windows-launcher.sh)
+> produces only unsigned binaries when run locally, and only the CI
+> `build-windows-launcher` job signs. The table is kept here for
+> historical reference; **none of these env vars are read by the
+> script anymore**.
 
+Placeholder gate variables that used to live in
 [host/package/build-windows-launcher.sh](host/package/build-windows-launcher.sh)
-reads the following environment variables. All three are **optional**: when
-none are set the script builds an unsigned binary suitable for local
-testing and prints a warning. When they are set, the script invokes
-`signtool.exe sign` and `signtool.exe verify /pa /v` on the produced
-`launcher.exe`.
+before Phase 12 removed them:
 
-| Variable | Required when signing | Default | Purpose |
-|---|---|---|---|
-| `WINDOWS_SIGN_PFX_PATH` | yes (gates the signing block) | *(unset → skip signing with a warning)* | Absolute path to the PKCS#12 (`.pfx`) code-signing certificate. Setting this to a non-empty value enables the signing step. |
-| `WINDOWS_SIGN_PFX_PASSWORD` | yes when the `.pfx` is encrypted | *(empty string)* | Password for the `.pfx`. Passed to `signtool.exe /p`. |
-| `WINDOWS_SIGN_TIMESTAMP_URL` | no | `http://timestamp.digicert.com` | RFC 3161 timestamp server URL. Passed to `signtool.exe /tr`. |
+| Variable (historical) | Purpose |
+|---|---|
+| `WINDOWS_SIGN_PFX_PATH` | Path to a PKCS#12 code-signing cert; would have gated a `signtool.exe sign /f <pfx>` invocation. |
+| `WINDOWS_SIGN_PFX_PASSWORD` | Password for the `.pfx`. |
+| `WINDOWS_SIGN_TIMESTAMP_URL` | RFC 3161 timestamp server URL. |
 
-Notes on the eSigner migration (Phase 12):
+Signing in the eSigner model (Phase 12+) uses these four repo secrets
+instead, wired through
+[.github/workflows/build-packages.yml](.github/workflows/build-packages.yml)'s
+`workflow_call.secrets:` block:
 
-- The four `ESIGN_*` secrets IT has already set on the repo
-  (`ESIGN_USERNAME`, `ESIGN_PASSWORD`, `ESIGN_CREDENTIAL_ID`,
-  `ESIGN_TOTP_SECRET`) map onto SSL.com's eSigner cloud code-signing
-  service. Phase 12 uses those secrets via the first-party
-  [`SSLcom/esigner-codesign`](https://github.com/SSLcom/esigner-codesign)
-  GitHub Action, so no new secrets need provisioning and no composite
-  action needs authoring.
-- The `WINDOWS_SIGN_TIMESTAMP_URL` variable becomes obsolete because
-  CodeSignTool talks to SSL.com's own timestamp server internally.
-- The `WINDOWS_SIGN_PFX_*` variables become obsolete because eSigner
-  keeps the private key in SSL.com's HSM; there is no PFX to load.
+- `ESIGN_USERNAME`
+- `ESIGN_PASSWORD`
+- `ESIGN_CREDENTIAL_ID`
+- `ESIGN_TOTP_SECRET`
 
-The build script fails loudly if `WINDOWS_SIGN_PFX_PATH` is set but
-`signtool.exe` is not on `PATH`, so a misconfigured runner surfaces
-immediately rather than silently producing an unsigned binary.
+CodeSignTool (installed by the SSLcom action) talks to SSL.com's HSM
+directly and handles RFC 3161 timestamping internally, so no
+timestamp-URL setting is needed on the CI side either.
