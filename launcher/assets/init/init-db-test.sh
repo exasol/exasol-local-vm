@@ -465,6 +465,24 @@ test_no_slc_config_leaves_images_untouched() {
     assert_not_contains "$(cat "$case_dir/podman-calls.log")" "rmi "
 }
 
+test_empty_slc_config_mounts_nothing_and_prunes_all() {
+    local case_dir="$1/slc-empty"
+    prepare_case "$case_dir"
+    # The common path once the launcher is SLC-aware: it writes slc.json on every start,
+    # with an empty array when no SLC is installed (or after the last one is removed).
+    printf '{"slc":[]}' > "$case_dir/shared/slc.json"
+    # A leftover SLC image is now unreferenced by the (empty) desired set.
+    printf '%s\n' "docker.io/exasol/script-language-container:java-stale" \
+        > "$case_dir/podman-state/img-docker_io_exasol_script-language-container_java-stale.exists"
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    # No SLC is mounted, but pruning still runs and reclaims the unreferenced image.
+    assert_not_contains "$run_line" "--mount type=image"
+    assert_contains "$(cat "$case_dir/podman-calls.log")" "rmi docker.io/exasol/script-language-container:java-stale"
+}
+
 main() {
     local tmp_dir
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/exasol-local-vm-init-db-test.XXXXXX")"
@@ -484,6 +502,7 @@ main() {
     test_removes_stale_container_before_recreate "$tmp_dir"
     test_prunes_unreferenced_slc_images "$tmp_dir"
     test_no_slc_config_leaves_images_untouched "$tmp_dir"
+    test_empty_slc_config_mounts_nothing_and_prunes_all "$tmp_dir"
 
     echo "init-db tests passed"
 }
