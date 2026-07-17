@@ -646,10 +646,12 @@ updated to allow.
   `Taskfile.yml`, so the `podman save` output shape is identical. No
   code change beyond passing `IMG_ARCH=x86_64`.
 - **CI runner requirements.** Mac tests run on self-hosted mac ARM64
-  with the `virtualization` label. Windows tests need a self-hosted
-  Windows runner (x64) with podman-for-windows installed and its
-  machine started before job dispatch. Label suggestion: `[self-hosted,
-  Windows, X64, podman]`.
+  with the `virtualization` label because Apple silicon is not
+  available on GitHub-hosted runners. Windows tests run on
+  GitHub-hosted `windows-latest`; the `test-windows-launcher` job
+  installs podman-for-windows via `winget install RedHat.Podman`
+  and `podman machine init && start` before the suite runs (see
+  Phase 13 for how this replaced the initial self-hosted plan).
 - **Signing model.** Mac uses `codesign` + `notarytool` with an Apple
   Developer ID and the `com.apple.security.virtualization` entitlement.
   Windows uses `signtool.exe` + Authenticode with an EV/standard code
@@ -1031,6 +1033,18 @@ counter-signed RFC 3161 timestamp. Tagging `v0.0.0-testsign` on `main`
 publishes the signed zip in a GitHub Release draft.
 
 ## Refactor Phase 13 — try GitHub-hosted runners for integration tests
+
+> **Landed.** The `test-windows-launcher` job now runs on
+> GitHub-hosted `windows-latest` with an inline
+> `Install podman-for-windows` step (winget +
+> `podman machine init/start`). See
+> [.github/workflows/build-packages.yml](.github/workflows/build-packages.yml)
+> § `test-windows-launcher`. The investigation described below was
+> skipped in favor of a direct switch — the self-hosted runner had
+> not been provisioned yet, so there was no cutover risk and no
+> reason to run a matrix. The rest of this section is retained for
+> historical context and as a template for future runner
+> re-evaluations.
 
 Purpose: reduce operational overhead by dropping the self-hosted
 Windows runner requirement introduced in Phase 11, *if*
