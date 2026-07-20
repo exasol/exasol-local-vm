@@ -5,12 +5,6 @@
 // container lifecycle to a natively installed podman-for-windows so the
 // same on-disk contract and integration tests used by the mac launcher can
 // be reused on windows.
-//
-// Phase 9 status: all five subcommands are implemented. --version-check-*
-// flags are translated directly into the `podman run … init` argv
-// (skipping the mac's intermediate vm-shared/version-check.json step),
-// and data_size_gb is tracked via a resources/data-size.txt sidecar
-// enforced by both start and resize-data.
 package main
 
 import (
@@ -46,23 +40,19 @@ import (
 var initAssets []byte
 
 // InitOutput is the JSON shape written by the guest-side init scripts on
-// mac. It is mirrored here so windows can produce compatible state files
-// once start is implemented; kept small and pure-data so the skeleton has
-// no external dependencies.
+// mac.
 type InitOutput struct {
 	IP    string         `json:"ip"`
 	Ports map[string]int `json:"ports"`
 }
 
-// RuntimeConfig matches the mac vm-config.json schema; ssh_private_key is
-// left empty on windows because there is no guest VM to SSH into.
+// ssh_private_key is left empty on windows because there is no guest VM
+// to SSH into.
 type RuntimeConfig struct {
 	SSHPrivateKey string `json:"ssh_private_key"`
 }
 
-// VersionCheckRuntimeConfig mirrors the mac schema so any shared tooling
-// that reads the file finds the same shape. Windows may or may not emit
-// this file — that is decided in a later phase.
+// TODO is this used? what for?
 type VersionCheckRuntimeConfig struct {
 	Enabled         bool   `json:"enabled"`
 	IntervalSeconds int    `json:"interval_seconds"`
@@ -92,10 +82,7 @@ const (
 	// -v "$EXA_DATA_DIR:/exa" bind mount in launcher/assets/init/init-db.sh.
 	dataVolumeName = "exasol-nano-data"
 
-	// versionCheckMinIntervalSeconds and companions mirror the clamping
-	// applied by launcher/assets/init/init-db.sh so the effective values
-	// the container sees are identical whether the mac guest script or
-	// the windows launcher constructed the argv.
+	// TODO This should come from code shared between the mac and windows versions
 	versionCheckMinIntervalSeconds      = 60
 	versionCheckMaxIntervalSeconds      = 604800
 	versionCheckMaxRetryIntervalSeconds = 86400
@@ -143,9 +130,7 @@ func newExitError(code int, format string, args ...any) *exitError {
 }
 
 // promptIn and promptOut are the stdin/stdout used by interactive
-// prompts (Phase 14). Package-level vars rather than parameters so
-// existing subcommand signatures (initCmd, startCmd, stopCmd) are
-// unchanged. Tests swap them via a bytes.Buffer + bufio.NewReader to
+// prompts. Tests swap them via a bytes.Buffer + bufio.NewReader to
 // drive the prompt flow without a real terminal.
 var (
 	promptIn  io.Reader = os.Stdin
@@ -199,7 +184,7 @@ func promptYesNo(in io.Reader, out io.Writer, prompt string, defaultYes bool) (b
 	return defaultYes, nil
 }
 
-// ensurePodmanInstalled is the Phase 14 pre-flight for init, start, and
+// ensurePodmanInstalled is the pre-flight for init, start, and
 // stop. It checks whether podman-for-windows is on PATH; if not, offers
 // (in interactive contexts) to install it via winget and initialize a
 // WSL2 backing VM. Callers pick a policy through the two flags:
@@ -287,8 +272,7 @@ func writeRuntimeConfig(config RuntimeConfig) error {
 
 // extractTarXZ extracts a tar.xz archive to the specified output directory.
 // pathTransform is an optional function to transform archive paths before
-// extracting; returning "" from pathTransform skips the entry. Copied from
-// launcher/mac/main.go per Phase 4 plan ("recommend copying it verbatim").
+// extracting; returning "" from pathTransform skips the entry.
 func extractTarXZ(data []byte, outputDir string, pathTransform func(string) string) error {
 	xzReader, err := xz.NewReader(bytes.NewReader(data))
 	if err != nil {
@@ -385,7 +369,7 @@ func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
 	fmt.Printf("Resources extracted to: %s/\n", resourcesDir)
 	fmt.Println("Initialized. Run 'windows-runner start <cpu> <ram_mb> <data_size_gb>' to start.")
 
-	// Phase 14: offer to install podman-for-windows if it's missing. Init
+	// Offer to install podman-for-windows if it's missing. Init
 	// itself has no runtime dependency on podman, so this is best-effort:
 	// a decline (interactive) or a non-interactive session leaves the
 	// launcher initialised anyway. A hard error during install (winget
@@ -406,16 +390,12 @@ func startCmd(
 	versionCheckOptions VersionCheckOptions,
 ) error {
 	// Positional args (cpu, ram, data_size) are accepted for CLI parity
-	// with the mac launcher but ignored in Phase 7: podman-for-windows
-	// sizes its backing VM globally, and Phase 9 wires data_size_gb into
-	// the resources/data-size.txt sidecar. Silently accept for now.
+	// with the mac launcher but ignored.
+	// podman-for-windows sizes its backing VM globally
 	_ = cpuCountStr
 	_ = ramSizeStr
 	_ = dataSizeGB
 
-	// --version-check-* flags are Phase 9. Silently accepted because our
-	// defaults (Enabled=true, mac endpoint) match the mac launcher's
-	// default behavior.
 	_ = versionCheckOptions
 
 	// Parse --ports first so syntax errors surface before the podman
@@ -455,7 +435,7 @@ func startCmd(
 		}
 	}
 
-	// Phase 14: offer to install podman-for-windows if missing. required=true
+	// Offer to install podman-for-windows if missing. required=true
 	// because start cannot proceed without it — a declined prompt or a
 	// non-interactive session both surface as an error.
 	if _, err := ensurePodmanInstalled(promptIn, promptOut, true); err != nil {
@@ -477,6 +457,7 @@ func startCmd(
 		return nil
 	}
 
+	// TODO Should we just restart the container if it is the same version was what we would start?
 	// A stopped container with the same name would make `podman run` fail
 	// with a name-collision error; remove it. The data volume is
 	// preserved by name so DB state survives.
@@ -511,7 +492,7 @@ func startCmd(
 
 	args := buildPodmanRunArgs(cfg, imageRef, hostPorts, versionCheckOptions)
 	for _, svc := range sortedKeys(hostPorts) {
-		fmt.Printf("Publishing %s: 127.0.0.1:%d -> container:%d\n", svc, hostPorts[svc], cfg.Ports[svc])
+		fmt.Printf("Publishing %s: localhost:%d -> container:%d\n", svc, hostPorts[svc], cfg.Ports[svc])
 	}
 	if err := podman.Run(args); err != nil {
 		return err

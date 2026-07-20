@@ -43,7 +43,7 @@ func TestDBConnection(t *testing.T) {
 	}
 }
 
-// waitForDB polls until the Exasol DB at 127.0.0.1:port can actually serve a
+// waitForDB polls until the Exasol DB at localhost:port can actually serve a
 // query, then returns an open *sql.DB handle.
 //
 // It runs a real "SELECT 1" rather than db.Ping(). The forwarded port can
@@ -52,11 +52,18 @@ func TestDBConnection(t *testing.T) {
 // before the InitProcess fails on a bad restart. Requiring a query round-trip
 // to succeed proves the engine has finished starting and is genuinely serving,
 // which is the readiness signal the DB reconnection tests depend on.
+//
+// Host is "localhost" (not "127.0.0.1") because podman-for-windows's gvproxy
+// binds forwarded ports on the IPv6 loopback (::1) only; 127.0.0.1 refuses
+// TCP even when the port is being served. Go's dialer resolves "localhost"
+// to both ::1 and 127.0.0.1 and tries each, so this address works on
+// windows-latest (::1 succeeds), macOS (both succeed), and any future
+// Linux host (both succeed).
 func waitForDB(t *testing.T, port int, timeout time.Duration) *sql.DB {
 	t.Helper()
 
 	connStr := exasol.NewConfig("SYS", "exasol").
-		Host("127.0.0.1").
+		Host("localhost").
 		Port(port).
 		ValidateServerCertificate(false).
 		String()
