@@ -1365,6 +1365,7 @@ func TestEnsurePodmanInstalled_InteractiveAcceptFullFlow(t *testing.T) {
 	wantWingetArgv := []string{
 		"install",
 		"--exact", "--id", "RedHat.Podman",
+		"--source", "winget",
 		"--scope", "user",
 		"--accept-source-agreements",
 		"--accept-package-agreements",

@@ -101,8 +101,38 @@ jobs:
         # --scope user for the non-admin end-user case.
         shell: pwsh
         run: |
-          winget install --exact --id RedHat.Podman `
-            --silent --accept-source-agreements --accept-package-agreements
+          # Install podman via winget with two hardening measures against
+          # windows-latest's flaky winget behaviour:
+          #  1. --source winget pins the search to the official winget
+          #     community source. Without this, winget falls back to
+          #     'msstore' when the winget source refresh transiently
+          #     fails, and msstore then blocks on an interactive
+          #     'accept geographic region' prompt that even
+          #     --accept-source-agreements does not silence.
+          #  2. Retry loop for the source-refresh flake itself. Symptom
+          #     we hit: 'Failed in attempting to update the source: winget'
+          #     followed by 'No packages were found among the working
+          #     sources.'. Empirically transient — sleeping and retrying
+          #     succeeds within a couple of attempts.
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          $attempt = 0
+          while ($true) {
+            $attempt++
+            Write-Host "winget install attempt $attempt / $maxAttempts"
+            winget install --exact --id RedHat.Podman `
+              --source winget `
+              --silent `
+              --accept-source-agreements `
+              --accept-package-agreements
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -ge $maxAttempts) {
+              Write-Error "winget install failed after $maxAttempts attempts (last exit code $LASTEXITCODE)"
+              exit 1
+            }
+            Write-Host "winget exit code $LASTEXITCODE; sleeping 10 s before retry"
+            Start-Sleep -Seconds 10
+          }
 
           $podmanDir = "$env:ProgramFiles\RedHat\Podman"
           if (-not (Test-Path $podmanDir)) {
@@ -237,8 +267,27 @@ jobs:
           # Install the podman CLI via winget. windows-latest ships
           # winget in PATH; the flags avoid the interactive source /
           # package agreement prompts.
-          winget install --exact --id RedHat.Podman `
-            --silent --accept-source-agreements --accept-package-agreements
+          # --source winget + retry loop: see the identical block in
+          # build-windows-launcher above for the rationale.
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 4
+          $attempt = 0
+          while ($true) {
+            $attempt++
+            Write-Host "winget install attempt $attempt / $maxAttempts"
+            winget install --exact --id RedHat.Podman `
+              --source winget `
+              --silent `
+              --accept-source-agreements `
+              --accept-package-agreements
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -ge $maxAttempts) {
+              Write-Error "winget install failed after $maxAttempts attempts (last exit code $LASTEXITCODE)"
+              exit 1
+            }
+            Write-Host "winget exit code $LASTEXITCODE; sleeping 10 s before retry"
+            Start-Sleep -Seconds 10
+          }
 
           # winget doesn't refresh PATH for the current shell, so
           # persist podman's install location to $GITHUB_PATH for

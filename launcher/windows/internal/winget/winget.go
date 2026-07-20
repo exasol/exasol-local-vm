@@ -36,6 +36,16 @@ const podmanInstallDirOverrideEnv = "WINDOWS_RUNNER_TEST_PODMAN_INSTALL_DIR"
 // See https://github.com/containers/podman/blob/main/docs/tutorials/podman-for-windows.md#installing-podman
 // for Podman's own documentation of the scope semantics.
 //
+// --source winget pins the package search to the official winget
+// community source. Without this pin, winget silently falls back to
+// the 'msstore' source when its winget-source refresh fails or is
+// stale, and msstore then blocks on an interactive 'accept geographic
+// region' prompt that even --accept-source-agreements does not
+// silence. This was observed in CI on windows-latest but the same
+// failure mode can bite end users whose winget source list is out of
+// date. Pinning the source keeps the launcher's prompt-then-install
+// flow deterministic.
+//
 // This intentionally does NOT pass --silent or --disable-interactivity:
 // the launcher's prompt already asked the user, and hiding winget's
 // output would strip useful download-progress feedback during the
@@ -44,6 +54,7 @@ func InstallPodman(w io.Writer) error {
 	cmd := exec.Command(
 		binary, "install",
 		"--exact", "--id", "RedHat.Podman",
+		"--source", "winget",
 		"--scope", "user",
 		"--accept-source-agreements",
 		"--accept-package-agreements",
