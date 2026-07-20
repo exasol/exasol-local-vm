@@ -43,7 +43,11 @@ tasks:
       - test "$(sed -n 's/^nano_base_tag=//p' release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata)" = "{{.NANO_BASE_TAG}}"
       - test release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz -nt launcher/assets/download-db-container.sh
     cmds:
-      - NANO_BASE_TAG="{{.NANO_BASE_TAG}}" ./launcher/assets/download-db-container.sh "{{.IMG_ARCH}}"
+      # Prefix with `bash` (not just `./script.sh`) so this works on
+      # Windows too: Task's exec path cannot resolve Unix shebangs, but
+      # bash.exe (Git for Windows, on PATH on windows-latest) can read
+      # the script directly. Same works verbatim on Linux/macOS.
+      - NANO_BASE_TAG="{{.NANO_BASE_TAG}}" bash ./launcher/assets/download-db-container.sh "{{.IMG_ARCH}}"
 
   stage-init-assets:
     desc: Copy database container tarball from release/ to launcher/assets/init for {{.IMG_ARCH}}
@@ -81,7 +85,8 @@ tasks:
       - test launcher/assets/windows/init/exasol-nano-db.tar.gz -nt release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz
       - cmp -s release/exasol-nano-db-{{.IMG_ARCH}}.tar.gz.metadata launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata
     cmds:
-      - ./launcher/assets/stage-windows-init-assets.sh "{{.IMG_ARCH}}"
+      # bash prefix so this works on Windows too; see download-db-container above.
+      - bash ./launcher/assets/stage-windows-init-assets.sh "{{.IMG_ARCH}}"
 
   build:
     desc: Build kernel, initramfs, raw disk image, and VHDX through the podman builder stages for {{.IMG_ARCH}}
@@ -207,7 +212,8 @@ tasks:
       - task: stage-windows-init-assets
         vars:
           IMG_ARCH: "{{.IMG_ARCH}}"
-      - ./host/package/build-windows-launcher.sh "{{.IMG_ARCH}}"
+      # bash prefix so this works on Windows too; see download-db-container above.
+      - bash ./host/package/build-windows-launcher.sh "{{.IMG_ARCH}}"
 
   test-windows-launcher-unit:
     desc: Run Go unit tests for the windows launcher (stages init-assets.tar.xz so the //go:embed is satisfied)
