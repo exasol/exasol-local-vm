@@ -1,0 +1,293 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
+name: Build Windows Launcher
+
+# Self-contained windows launcher build + test pipeline. Fully
+# independent of build-mac.yml (which builds the mac launcher and its
+# embedded Linux disk image): the container tarball the windows launcher
+# embeds is pulled directly on the windows runner via podman-for-windows,
+# so this workflow has no cross-OS artifact dependencies.
+#
+# The dev helper `task ci-build-windows-launcher` dispatches this
+# workflow. Release.yml calls it via workflow_call in parallel with
+# build-mac.yml.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      # SSL.com eSigner cloud code-signing credentials. All optional so
+      # the workflow still runs on PRs from forks (where secrets are not
+      # forwarded) and produces a valid unsigned binary; the sign/verify
+      # steps below are gated on env.ESIGN_USERNAME != ''.
+      ESIGN_USERNAME:
+        required: false
+      ESIGN_PASSWORD:
+        required: false
+      ESIGN_CREDENTIAL_ID:
+        required: false
+      ESIGN_TOTP_SECRET:
+        required: false
+    outputs:
+      windows-launcher-artifact:
+        description: "Name of the Windows launcher artifact"
+        value: ${{ jobs.build-windows-launcher.outputs.artifact-name }}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-windows-launcher:
+    runs-on: windows-latest
+    outputs:
+      artifact-name: ${{ steps.upload.outputs.artifact-id }}
+
+    # Prefer bash for parity with the mac launcher build's shell
+    # scripting. windows-latest ships Git for Windows which provides
+    # bash + tar + xz + sha256sum.
+    defaults:
+      run:
+        shell: bash
+
+    # Promote the eSigner username secret into a job-level env var so the
+    # sign/verify step-level `if:` conditions can gate on it. GitHub
+    # Actions does NOT allow the `secrets` context in step-level or
+    # job-level `if:` expressions (it rejects the workflow at parse time
+    # with 'Unrecognized named-value: secrets') — but the `env` context
+    # IS allowed in `if:`, and `secrets` IS allowed in `env:` values.
+    # Only the username is promoted here; the actual sign secrets stay
+    # in `secrets.*` and are read directly by the SSLcom action's inputs
+    # so they never appear in the job env (which would leak them into
+    # every subsequent step's process environment).
+    env:
+      ESIGN_USERNAME: ${{ secrets.ESIGN_USERNAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: launcher/windows/go.sum
+
+      - name: Install Task
+        shell: pwsh
+        run: |
+          choco install go-task -y
+          task --version
+
+      - name: Install podman-for-windows
+        # Installs podman + starts a WSL2-backed machine so the
+        # `task download-db-container` step in the build below can
+        # `podman pull --platform linux/amd64` and `podman save` the
+        # x86_64 Nano container tarball directly on this runner. This
+        # replaces the old cross-workflow dependency where the tarball
+        # was pre-staged by build-disk-images on ubuntu.
+        #
+        # CI installs at machine scope (winget's default when running
+        # as admin, which the runner does). The launcher's own runtime
+        # install (Phase 14, ensurePodmanInstalled in main.go) uses
+        # --scope user for the non-admin end-user case.
+        shell: pwsh
+        run: |
+          winget install --exact --id RedHat.Podman `
+            --silent --accept-source-agreements --accept-package-agreements
+
+          $podmanDir = "$env:ProgramFiles\RedHat\Podman"
+          if (-not (Test-Path $podmanDir)) {
+            Write-Error "podman install directory not found at $podmanDir"
+            exit 1
+          }
+          $env:PATH = "$podmanDir;$env:PATH"
+          "$podmanDir" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          podman --version
+
+          # windows-latest gives each job a clean VM, so init is always
+          # the first-time path here.
+          podman machine init --disk-size 40
+          podman machine start
+
+      - name: Build windows launcher
+        # `task build-windows-launcher IMG_ARCH=x86_64` chains
+        #   download-db-container → stage-windows-init-assets → build.sh
+        # download-db-container is what needs the podman machine started
+        # by the previous step. Build script is signing-agnostic; signing
+        # runs as a separate step below via the SSLcom composite action
+        # so secrets never touch the shell script. Local developer builds
+        # always produce an unsigned binary.
+        run: task build-windows-launcher IMG_ARCH=x86_64
+
+      - name: Sign windows launcher
+        # Skipped on PR builds from forks (secrets are not passed to
+        # forked workflow runs). External contributors' PRs still
+        # produce a valid unsigned binary in the artifact; the same
+        # build against a trusted branch re-signs it here in place.
+        # env.ESIGN_USERNAME (not secrets.ESIGN_USERNAME) because
+        # Actions rejects the `secrets` context in `if:` expressions.
+        # See the job-level env: block for the promotion.
+        if: env.ESIGN_USERNAME != ''
+        # Pinned to v1.3.2 (release from 2025-12-22). CodeSignTool talks
+        # to SSL.com's HSM: the private key never leaves SSL.com's
+        # infrastructure, and no PFX is materialised on the runner.
+        uses: sslcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
+        with:
+          command:       sign
+          username:      ${{ secrets.ESIGN_USERNAME }}
+          password:      ${{ secrets.ESIGN_PASSWORD }}
+          credential_id: ${{ secrets.ESIGN_CREDENTIAL_ID }}
+          totp_secret:   ${{ secrets.ESIGN_TOTP_SECRET }}
+          file_path:     ${{ github.workspace }}/release/launcher/windows/x86_64/launcher.exe
+          # override=true overwrites the input file with the signed copy
+          # so the same path can be picked up by the packaging step below.
+          override:      'true'
+
+      - name: Verify Authenticode signature
+        if: env.ESIGN_USERNAME != ''
+        shell: pwsh
+        run: |
+          # signtool.exe is preinstalled with the Windows SDK on the
+          # windows-latest image; discover the newest x64 copy under the
+          # SDK's per-version tree rather than hard-coding a path.
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like '*\x64\signtool.exe' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) {
+            Write-Error "signtool.exe not found under Windows Kits\10\bin"
+            exit 1
+          }
+          Write-Host "Using signtool: $signtool"
+          & $signtool verify /pa /v release/launcher/windows/x86_64/launcher.exe
+
+      - name: Package windows launcher zip
+        shell: pwsh
+        run: |
+          # PowerShell Compress-Archive is the native equivalent of the
+          # mac 'ditto -c -k .' step: pack the contents of the release
+          # directory (launcher.exe and any siblings) at the root of the
+          # zip, not the directory itself.
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive `
+            -Path release/launcher/windows/x86_64/* `
+            -DestinationPath dist/windows-runner-x86_64.zip `
+            -Force
+
+      - name: Compute checksum
+        run: |
+          set -euo pipefail
+          # sha256sum ships with Git for Windows and produces the same
+          # '<hex>  <path>\n' shape as the mac 'shasum -a 256' step, so
+          # downstream verifiers work identically on both platforms.
+          sha256sum dist/windows-runner-x86_64.zip > dist/windows-runner-x86_64.zip.sha256
+          cat dist/windows-runner-x86_64.zip.sha256
+
+      - name: Verify launcher artifacts
+        run: |
+          ls -lh dist/windows-runner-x86_64.zip
+          ls -lh dist/windows-runner-x86_64.zip.sha256
+
+      - name: Upload windows launcher
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-launcher
+          path: |
+            dist/windows-runner-x86_64.zip
+            dist/windows-runner-x86_64.zip.sha256
+          retention-days: 7
+
+  test-windows-launcher:
+    # GitHub-hosted windows-latest, with podman-for-windows installed on
+    # the fly via winget below. See windows-runner-plan.md § "Refactor
+    # Phase 13" for why we prefer this over the earlier self-hosted-
+    # runner plan.
+    runs-on: windows-latest
+    needs: build-windows-launcher
+    if: ${{ always() && needs.build-windows-launcher.result == 'success' }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Install podman-for-windows
+        shell: pwsh
+        run: |
+          # Install the podman CLI via winget. windows-latest ships
+          # winget in PATH; the flags avoid the interactive source /
+          # package agreement prompts.
+          winget install --exact --id RedHat.Podman `
+            --silent --accept-source-agreements --accept-package-agreements
+
+          # winget doesn't refresh PATH for the current shell, so
+          # persist podman's install location to $GITHUB_PATH for
+          # subsequent steps and add it to our own $env:PATH so
+          # `podman --version` below resolves.
+          $podmanDir = "$env:ProgramFiles\RedHat\Podman"
+          if (-not (Test-Path $podmanDir)) {
+            Write-Error "podman install directory not found at $podmanDir"
+            exit 1
+          }
+          $env:PATH = "$podmanDir;$env:PATH"
+          "$podmanDir" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          podman --version
+
+          # Initialize a fresh WSL2-backed machine with 40 GB of disk.
+          # windows-latest runners give each job a clean VM, so init is
+          # always the first-time path here.
+          podman machine init --disk-size 40
+          podman machine start
+
+      - name: Download windows launcher artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-launcher
+          path: dist
+
+      - name: Install Task
+        shell: pwsh
+        run: |
+          choco install go-task -y
+          task --version
+
+      - name: Ensure podman machine is running
+        run: |
+          set -euo pipefail
+          # Defensive sanity check after the winget install +
+          # `podman machine start` above: fail early if the machine is
+          # not running, rather than waiting for every test to fail via
+          # podman.MachineRunning() inside the launcher.
+          if ! podman machine inspect --format '{{.State}}' | grep -qi '^running$'; then
+            echo "Starting podman machine..."
+            podman machine start
+          fi
+          podman machine inspect --format '{{.State}}'
+
+      - name: Run integration tests
+        run: task test-launcher-integration
+
+      - name: Upload test failure logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Distinct name from the mac workflow's 'test-failure-logs'
+          # so upload-artifact does not error if both workflows happen
+          # to be running for the same commit.
+          name: test-failure-logs-windows
+          path: tests/failures
+          if-no-files-found: ignore
+          retention-days: 7

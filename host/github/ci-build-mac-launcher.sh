@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-# Script to trigger Build Packages workflow and download macOS launcher
+# Script to trigger Build Mac Launcher workflow and download macOS launcher
 # Usage: ./ci-build-mac-launcher.sh [--skip-linux-build] [--use-run-id RUN_ID]
 #
 # Options:
@@ -92,7 +92,7 @@ if [ "$SKIP_LINUX_BUILD" = "true" ] && [ -z "$PREVIOUS_RUN_ID" ]; then
   
   # Get list of successful runs and check for build-disk-images job
   RUN_IDS=$(gh run list \
-    --workflow=build-packages.yml \
+    --workflow=build-mac.yml \
     --branch="$BRANCH" \
     --status=success \
     --limit=20 \
@@ -120,23 +120,23 @@ if [ "$SKIP_LINUX_BUILD" = "true" ] && [ -z "$PREVIOUS_RUN_ID" ]; then
 fi
 
 # Trigger workflow
-echo "Triggering 'Build Packages' workflow on branch: $BRANCH"
+echo "Triggering 'Build Mac Launcher' workflow on branch: $BRANCH"
 if [ "$SKIP_LINUX_BUILD" = "true" ]; then
   echo "  - Skipping Linux build (using previous artifacts)"
   if [ -n "$PREVIOUS_RUN_ID" ]; then
     echo "  - Using run ID: $PREVIOUS_RUN_ID"
-    gh workflow run build-packages.yml \
+    gh workflow run build-mac.yml \
       --ref "$BRANCH" \
       --field skip-linux-build=true \
       --field previous-run-id="$PREVIOUS_RUN_ID"
   else
     echo "  - Will use latest run with Linux packages (workflow will auto-detect)"
-    gh workflow run build-packages.yml \
+    gh workflow run build-mac.yml \
       --ref "$BRANCH" \
       --field skip-linux-build=true
   fi
 else
-  gh workflow run build-packages.yml --ref "$BRANCH"
+  gh workflow run build-mac.yml --ref "$BRANCH"
 fi
 
 echo "Waiting for workflow to start..."
@@ -145,7 +145,7 @@ sleep 5
 # Get the latest workflow run for this branch
 RUN_ID=""
 for i in {1..30}; do
-  RUN_ID=$(gh run list --workflow=build-packages.yml --branch="$BRANCH" --limit=1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
+  RUN_ID=$(gh run list --workflow=build-mac.yml --branch="$BRANCH" --limit=1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
   if [ -n "$RUN_ID" ]; then
     break
   fi
@@ -154,7 +154,7 @@ done
 
 if [ -z "$RUN_ID" ]; then
   echo "Error: Could not find workflow run"
-  echo "Check manually: gh run list --workflow=build-packages.yml"
+  echo "Check manually: gh run list --workflow=build-mac.yml"
   exit 1
 fi
 

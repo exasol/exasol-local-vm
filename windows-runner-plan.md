@@ -1219,6 +1219,84 @@ end-to-end without a real Windows host, so the `winget install`
 subprocess itself is exercised only through the fake-winget shim.
 
 
+## Phase 15 — Split the windows launcher into its own workflow file
+
+Landed.
+
+Split the single `build-packages.yml` workflow into two independent
+files: `build-mac.yml` (mac + shared linux disk image build) and
+`build-windows.yml` (windows launcher + tests). The dev helper
+`task ci-build-windows-launcher` no longer triggers any mac jobs;
+`release.yml` calls both workflows in parallel via `workflow_call`.
+
+Motivation:
+- Before Phase 15, `build-windows-launcher` depended on
+  `build-disk-images` to stage the x86_64 Nano container tarball via
+  the shared `release-packages` artifact. As a result,
+  `task ci-build-windows-launcher` triggered the whole mac pipeline —
+  including `test-mac-launcher`, which queues on the self-hosted mac
+  ARM64 runner. If that runner was offline or slow, the windows CI
+  feedback loop was blocked on unrelated infrastructure.
+- The docs at the time (see the earlier "Differences from the mac CI
+  build" section) had to spend a whole paragraph explaining why
+  `--skip-linux-build` was still useful for the windows helper even
+  though the windows launcher does not embed the mac disk image.
+  That paragraph existed because the coupling was artificial.
+
+What changed:
+- `.github/workflows/build-packages.yml` renamed to `build-mac.yml`.
+  ESIGN secrets and windows outputs removed from its `workflow_call`
+  block. The "Download x86_64 container tarball" step removed from
+  `build-disk-images`. `build-windows-launcher` and
+  `test-windows-launcher` jobs removed entirely.
+- `.github/workflows/build-windows.yml` created. Two jobs
+  (`build-windows-launcher` + `test-windows-launcher`), both on
+  `windows-latest`. `build-windows-launcher` installs
+  podman-for-windows via `winget install RedHat.Podman`, initializes
+  a WSL2 machine, then runs `task build-windows-launcher
+  IMG_ARCH=x86_64` which pulls and saves the container tarball
+  in-place. No dependency on any other workflow or job. ESIGN
+  secrets are declared here (all `required: false` for fork PRs).
+- `.github/workflows/release.yml` rewritten: two `needs:
+  validate-tag` jobs, `build-mac` and `build-windows`, each calling
+  its respective workflow via `workflow_call` with `secrets:
+  inherit`. `create-release` waits on both.
+- `host/github/ci-build-windows-launcher.sh` simplified: dropped
+  `--skip-linux-build` and `--use-run-id` flags entirely (nothing to
+  reuse anymore); dropped the "validate that a previous run with
+  Linux packages exists" pre-flight; changed workflow target to
+  `build-windows.yml`. Shrunk from ~220 lines to ~150.
+- `host/github/ci-build-mac-launcher.sh` updated to point at
+  `build-mac.yml`.
+- `docs/release-workflow.md` rewritten to describe the three-workflow
+  layout.
+
+Runtime cost tradeoff (accepted with eyes open):
+- Before: `build-windows-launcher` ran in ~5 min after downloading
+  the pre-staged tarball. Full first-time pipeline: ~15 min mac disk
+  build + ~5 min windows = ~20 min wall clock.
+- After: every `build-windows-launcher` run installs podman
+  (~1-2 min), initializes WSL2 (~2-3 min), pulls the container
+  (~2-3 min), then builds (~5 min) = ~10-13 min. Wall clock for the
+  dev helper drops from ~20 min to ~10-13 min (independent of mac).
+  Iterative windows-only runs with the old `--skip-linux-build`
+  optimization were ~5-6 min; the new independent runs are always
+  ~10-13 min, so per-iteration cost went up but the mac dependency
+  went away.
+- Not caching podman or the WSL2 image between runs was a
+  deliberate choice: MSI installs write registry state that the
+  actions/cache action cannot capture cleanly, and the WSL2 VM
+  format is opaque. Adding a cache for just the raw container
+  tarball (keyed on NANO_BASE_TAG) is a plausible future
+  optimization; deferred to keep this phase focused on the
+  structural change.
+
+Verification: `python3 yaml.safe_load` parses both workflow files;
+`bash -n` succeeds on both helper scripts. `task lint` passes. The
+end-to-end CI run for the split will validate itself the next time
+someone runs `task ci-build-windows-launcher` on this branch.
+
+
 # Architechtural draft
 
 Stakeholder-facing summary of the proposed windows launcher architecture.

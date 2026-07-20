@@ -26,18 +26,26 @@ jobs:
           fi
           echo "Tag '$TAG' is valid"
 
-  build:
+  build-mac:
     needs: validate-tag
-    uses: ./.github/workflows/build-packages.yml
+    uses: ./.github/workflows/build-mac.yml
     secrets: inherit
     permissions:
       actions: read
       contents: read
       packages: write
 
+  build-windows:
+    needs: validate-tag
+    uses: ./.github/workflows/build-windows.yml
+    secrets: inherit
+    permissions:
+      actions: read
+      contents: read
+
   create-release:
     runs-on: ubuntu-latest
-    needs: [validate-tag, build]
+    needs: [validate-tag, build-mac, build-windows]
     environment:
       name: release
     permissions:
