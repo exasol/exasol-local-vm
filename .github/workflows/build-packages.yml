@@ -522,6 +522,19 @@ jobs:
       run:
         shell: bash
 
+    # Promote the eSigner username secret into a job-level env var so the
+    # sign/verify step-level `if:` conditions can gate on it. GitHub
+    # Actions does NOT allow the `secrets` context in step-level or
+    # job-level `if:` expressions (it rejects the workflow at parse time
+    # with 'Unrecognized named-value: secrets') — but the `env` context
+    # IS allowed in `if:`, and `secrets` IS allowed in `env:` values.
+    # Only the username is promoted here; the actual sign secrets stay
+    # in `secrets.*` and are read directly by the SSLcom action's inputs
+    # so they never appear in the job env (which would leak them into
+    # every subsequent step's process environment).
+    env:
+      ESIGN_USERNAME: ${{ secrets.ESIGN_USERNAME }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -635,7 +648,10 @@ jobs:
         # forked workflow runs). External contributors' PRs still produce
         # a valid unsigned binary in the artifact; the same build against
         # a trusted branch re-signs it here in place.
-        if: ${{ secrets.ESIGN_USERNAME != '' }}
+        # env.ESIGN_USERNAME (not secrets.ESIGN_USERNAME) because Actions
+        # rejects the `secrets` context in `if:` expressions. See the
+        # job-level env: block for the promotion.
+        if: env.ESIGN_USERNAME != ''
         # Pinned to v1.3.2 (release from 2025-12-22). CodeSignTool talks
         # to SSL.com's HSM: the private key never leaves SSL.com's
         # infrastructure, and no PFX is materialised on the runner.
@@ -652,7 +668,7 @@ jobs:
           override:      'true'
 
       - name: Verify Authenticode signature
-        if: ${{ secrets.ESIGN_USERNAME != '' }}
+        if: env.ESIGN_USERNAME != ''
         shell: pwsh
         run: |
           # signtool.exe is preinstalled with the Windows SDK on the
