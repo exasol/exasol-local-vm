@@ -393,6 +393,63 @@ jobs:
             *> "$out/test-netconnection-8563.txt"
           Get-Content "$out/test-netconnection-8563.txt" -ErrorAction SilentlyContinue
 
+          Write-Host "=== Test-NetConnection localhost:8563 ==="
+          Test-NetConnection -ComputerName localhost -Port 8563 -InformationLevel Detailed `
+            *> "$out/test-netconnection-localhost-8563.txt"
+          Get-Content "$out/test-netconnection-localhost-8563.txt" -ErrorAction SilentlyContinue
+
+          # Three-way network probe: figures out WHERE the connection is
+          # dying (Windows host / WSL2 backing VM / container). Each curl
+          # is capped at 15 s and expected to talk TLS (the DB serves
+          # wss://). All three should reach the DB and receive some kind
+          # of TLS response; failures at different layers pinpoint the
+          # break.
+
+          Write-Host "=== curl.exe from Windows host: https://localhost:8563 ==="
+          curl.exe -kv --max-time 15 https://localhost:8563/ `
+            *> "$out/curl-from-windows-host.txt"
+          Get-Content "$out/curl-from-windows-host.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== curl from inside WSL2 (podman-machine-default): https://localhost:8563 ==="
+          # The port podman published (8563) should be reachable from
+          # inside the WSL2 backing VM's default namespace via localhost,
+          # since podman's port binding on rootless is what gvproxy talks
+          # to.
+          wsl.exe --distribution podman-machine-default --exec `
+            curl -kv --max-time 15 https://localhost:8563/ `
+            *> "$out/curl-from-wsl.txt"
+          Get-Content "$out/curl-from-wsl.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== curl from inside the container: https://localhost:8563 ==="
+          # Inside the container, the DB is bound directly to the
+          # container's loopback, so this probe bypasses ALL port
+          # forwarding. If this fails, the DB itself is broken. If it
+          # succeeds while the outer probes fail, the port-forwarding
+          # chain is broken.
+          podman exec exasol-local-db sh -c "curl -kv --max-time 15 https://localhost:8563/" `
+            *> "$out/curl-from-container.txt"
+          Get-Content "$out/curl-from-container.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== netstat inside WSL2 ==="
+          wsl.exe --distribution podman-machine-default --exec `
+            sh -c "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null" `
+            *> "$out/wsl-netstat.txt"
+          Get-Content "$out/wsl-netstat.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== netstat inside container ==="
+          podman exec exasol-local-db sh -c "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null" `
+            *> "$out/container-netstat.txt"
+          Get-Content "$out/container-netstat.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman info ==="
+          podman info > "$out/podman-info.txt" 2>&1
+          Get-Content "$out/podman-info.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== container HostConfig.PortBindings ==="
+          podman inspect exasol-local-db --format '{{json .HostConfig.PortBindings}}' `
+            > "$out/container-port-bindings.json" 2>&1
+          Get-Content "$out/container-port-bindings.json" -ErrorAction SilentlyContinue
+
       - name: Upload test failure logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
