@@ -15,6 +15,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	_ "embed"
 	"encoding/json"
@@ -33,6 +34,7 @@ import (
 	"github.com/ulikunitz/xz"
 
 	"windows-runner/internal/podman"
+	"windows-runner/internal/winget"
 )
 
 // initAssets is the embedded launcher/assets/windows/init/ directory,
@@ -138,6 +140,136 @@ func (e *exitError) Error() string { return e.msg }
 
 func newExitError(code int, format string, args ...any) *exitError {
 	return &exitError{code: code, msg: fmt.Sprintf(format, args...)}
+}
+
+// promptIn and promptOut are the stdin/stdout used by interactive
+// prompts (Phase 14). Package-level vars rather than parameters so
+// existing subcommand signatures (initCmd, startCmd, stopCmd) are
+// unchanged. Tests swap them via a bytes.Buffer + bufio.NewReader to
+// drive the prompt flow without a real terminal.
+var (
+	promptIn  io.Reader = os.Stdin
+	promptOut io.Writer = os.Stdout
+)
+
+// promptIn is treated as interactive iff it is an *os.File that
+// resolves to a character device (a real tty on unix, a console
+// handle on windows). Non-file readers (bytes.Buffer, strings.Reader)
+// always report false, so unit tests using a mocked stdin naturally
+// take the non-interactive branch unless they explicitly opt in by
+// passing interactive=true to ensurePodmanInstalledCtx.
+func isTerminal(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+// promptYesNo prints prompt to out, reads a single line from in, and
+// returns whether it starts with 'y' (case-insensitive). Empty input
+// takes defaultYes. Unrecognized input also takes defaultYes so a
+// misread keypress never causes an unattended install to run against
+// the user's implied preference.
+func promptYesNo(in io.Reader, out io.Writer, prompt string, defaultYes bool) (bool, error) {
+	suffix := " [y/N] "
+	if defaultYes {
+		suffix = " [Y/n] "
+	}
+	fmt.Fprint(out, prompt+suffix)
+	reader := bufio.NewReader(in)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return defaultYes, nil
+	}
+	switch strings.ToLower(trimmed[:1]) {
+	case "y":
+		return true, nil
+	case "n":
+		return false, nil
+	}
+	return defaultYes, nil
+}
+
+// ensurePodmanInstalled is the Phase 14 pre-flight for init, start, and
+// stop. It checks whether podman-for-windows is on PATH; if not, offers
+// (in interactive contexts) to install it via winget and initialize a
+// WSL2 backing VM. Callers pick a policy through the two flags:
+//
+//   - required=true: cannot proceed without podman (start). A declined
+//     prompt or a non-interactive session returns an error.
+//   - required=false: podman is nice-to-have (init, stop). Declined or
+//     non-interactive both return (false, nil) so the caller can
+//     choose its own soft-failure path.
+//
+// Returns (installed, err). installed is true iff podman is now usable
+// — either because it already was, or because winget install + machine
+// init + machine start all succeeded within this call.
+//
+// Two-stage split (public wrapper + Ctx impl) so tests can drive the
+// full flow with interactive=true against a bytes.Buffer stdin (which
+// isTerminal would otherwise treat as non-interactive).
+func ensurePodmanInstalled(in io.Reader, out io.Writer, required bool) (bool, error) {
+	return ensurePodmanInstalledCtx(in, out, required, isTerminal(in))
+}
+
+func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive bool) (bool, error) {
+	if err := podman.Available(); err == nil {
+		return true, nil
+	}
+	if !interactive {
+		if required {
+			return false, errors.New(
+				"podman-for-windows is not installed. Re-run this command interactively " +
+					"to install it via winget, or run 'winget install --exact --id RedHat.Podman' " +
+					"and 'podman machine init && podman machine start' first",
+			)
+		}
+		return false, nil
+	}
+	fmt.Fprintln(out, "podman-for-windows is not installed on this system.")
+	ok, err := promptYesNo(in, out,
+		"Install podman-for-windows via winget and initialize a WSL2 backing VM now (~2-5 minutes)?",
+		true,
+	)
+	if err != nil {
+		return false, fmt.Errorf("could not read prompt response: %w", err)
+	}
+	if !ok {
+		if required {
+			return false, errors.New("cannot proceed without podman-for-windows")
+		}
+		fmt.Fprintln(out, "Skipping podman install. You will be prompted again when you run 'windows-runner start'.")
+		return false, nil
+	}
+	fmt.Fprintln(out, "Installing podman-for-windows via winget...")
+	if err := winget.InstallPodman(out); err != nil {
+		return false, err
+	}
+	if err := winget.EnsurePodmanOnPath(); err != nil {
+		return false, err
+	}
+	if err := podman.Available(); err != nil {
+		return false, fmt.Errorf("winget install completed but podman is still not on PATH: %w", err)
+	}
+	fmt.Fprintln(out, "Initializing podman WSL2 machine with 40GB disk (this may take a few minutes)...")
+	if err := podman.InitMachine(40); err != nil {
+		return false, err
+	}
+	fmt.Fprintln(out, "Starting podman machine...")
+	if err := podman.StartMachine(); err != nil {
+		return false, err
+	}
+	fmt.Fprintln(out, "Podman is ready.")
+	return true, nil
 }
 
 // writeRuntimeConfig serialises RuntimeConfig to runtimeConfigPath in cwd
@@ -252,6 +384,17 @@ func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
 
 	fmt.Printf("Resources extracted to: %s/\n", resourcesDir)
 	fmt.Println("Initialized. Run 'windows-runner start <cpu> <ram_mb> <data_size_gb>' to start.")
+
+	// Phase 14: offer to install podman-for-windows if it's missing. Init
+	// itself has no runtime dependency on podman, so this is best-effort:
+	// a decline (interactive) or a non-interactive session leaves the
+	// launcher initialised anyway. A hard error during install (winget
+	// failure, etc.) is reported to stderr but does not fail the init
+	// contract — resources/ has already been produced, so a subsequent
+	// `start` still works once the user resolves podman themselves.
+	if _, err := ensurePodmanInstalled(promptIn, promptOut, false); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: podman prerequisite check failed: %v\n", err)
+	}
 	return nil
 }
 
@@ -312,7 +455,10 @@ func startCmd(
 		}
 	}
 
-	if err := podman.Available(); err != nil {
+	// Phase 14: offer to install podman-for-windows if missing. required=true
+	// because start cannot proceed without it — a declined prompt or a
+	// non-interactive session both surface as an error.
+	if _, err := ensurePodmanInstalled(promptIn, promptOut, true); err != nil {
 		return err
 	}
 	if err := podman.MachineRunning(); err != nil {
@@ -698,8 +844,18 @@ func stopCmd() error {
 		return fmt.Errorf("failed to load %s: %w", configPath, err)
 	}
 
-	if err := podman.Available(); err != nil {
+	// Phase 14: offer to install podman-for-windows if missing. Stop can
+	// safely no-op when podman is absent (there is provably no container
+	// this launcher could have started without it), so a declined prompt
+	// or non-interactive session both take the soft path: clean up local
+	// vm-state.json and exit 0.
+	installed, err := ensurePodmanInstalled(promptIn, promptOut, false)
+	if err != nil {
 		return err
+	}
+	if !installed {
+		fmt.Println("podman-for-windows is not installed; nothing to stop.")
+		return removeVMState()
 	}
 
 	// podman.Stop uses --ignore, so an absent or already-stopped container

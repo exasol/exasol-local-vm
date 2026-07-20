@@ -6,12 +6,7 @@
 // a thin shim around a single `podman` subprocess so that behavior can be
 // exercised by unit tests using a fake `podman` shell script on PATH — no
 // live podman-for-windows machine is required to test this package.
-//
-// Cross-platform note: this package is under launcher/windows/internal/
-// because only the windows launcher uses it, but no `//go:build windows`
-// tag is set so that the unit tests can run on a Linux CI host (using a
-// shell-script shim). At runtime on Windows, exec.LookPath transparently
-// resolves "podman" to podman.exe.
+
 package podman
 
 import (
@@ -26,10 +21,6 @@ import (
 	"time"
 )
 
-// binary is the executable name the package invokes. Kept as a package
-// variable rather than a hardcoded "podman" literal so that future test
-// scenarios (for example, exercising a badly-named PATH entry) can swap
-// it out. Production code never overrides this.
 var binary = "podman"
 
 // Available checks that a podman binary is on PATH and can report its
@@ -223,6 +214,53 @@ func Run(args []string) error {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("podman %s failed: %w", strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+// InitMachine initializes a new podman machine with the given disk
+// size in GB. Intended for use immediately after a fresh winget install
+// of podman-for-windows, where no machine exists yet. Streams podman's
+// own output so the user can watch progress — the first-time WSL2
+// image download is a multi-minute step.
+//
+// diskSizeGB is passed through directly. Zero or negative values
+// return an argument error before invoking podman.
+//
+// The provider (WSL vs Hyper-V) is intentionally left to podman's own
+// default rather than being forced via a flag. Podman ≥ 6.0 accepts
+// --provider {wsl,hyperv} but podman 5.x (still the current stable at
+// the time of writing) does not recognise the flag and exits with
+// "unknown flag: --provider". WSL is podman-for-windows's default on
+// every current release, so relying on the default keeps us compatible
+// across both 5.x and 6.x. Users who want Hyper-V can set
+// CONTAINERS_MACHINE_PROVIDER=hyperv in their environment.
+func InitMachine(diskSizeGB int) error {
+	if diskSizeGB <= 0 {
+		return fmt.Errorf("podman machine init: disk size must be positive, got %d", diskSizeGB)
+	}
+	cmd := exec.Command(binary,
+		"machine", "init",
+		"--disk-size", strconv.Itoa(diskSizeGB),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("podman machine init failed: %w", err)
+	}
+	return nil
+}
+
+// StartMachine starts the default podman machine. Blocks until podman
+// reports the machine is running (or exits with an error). Intended as
+// the second half of the winget-install → machine-init → machine-start
+// bootstrap flow.
+func StartMachine() error {
+	cmd := exec.Command(binary, "machine", "start")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("podman machine start failed: %w", err)
 	}
 	return nil
 }

@@ -19,6 +19,18 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
+// TestMain forces all tests into the non-interactive branch of the
+// Phase 14 prompt helpers by swapping promptIn from os.Stdin (which
+// may be a real tty when running `go test` from a shell) to an empty
+// bytes.Buffer (which isTerminal reports as false). Tests that need to
+// exercise the interactive branch call ensurePodmanInstalledCtx
+// directly with interactive=true instead of relying on the ambient
+// promptIn.
+func TestMain(m *testing.M) {
+	promptIn = &bytes.Buffer{}
+	os.Exit(m.Run())
+}
+
 // buildTestTarXZ produces an in-memory tar.xz archive matching the layout
 // build-windows-launcher.sh writes (all entries rooted at init/).
 func buildTestTarXZ(t *testing.T, files map[string][]byte) []byte {
@@ -762,26 +774,30 @@ func TestStopCmdWithoutConfigCleansStateFile(t *testing.T) {
 	}
 }
 
-func TestStopCmdErrorsWhenPodmanUnavailable(t *testing.T) {
+func TestStopCmdTreatsMissingPodmanAsNothingToStop(t *testing.T) {
+	// Phase 14: stop now no-ops when podman is missing rather than
+	// erroring, because there is provably no container this launcher
+	// could have started without podman. The prompt is skipped in
+	// non-interactive contexts (no *os.File stdin), so this exercises
+	// the soft-failure branch of ensurePodmanInstalled.
 	t.Chdir(t.TempDir())
 	writeFixtureResources(t)
 	if err := os.WriteFile(vmStatePath, []byte(`{"ports":{"db":8563}}`), 0o644); err != nil {
 		t.Fatalf("seed vm-state: %v", err)
 	}
-	// Empty PATH — Available() must fail.
+	// Empty PATH — Available() must fail. Prompt is non-interactive
+	// (default promptIn = os.Stdin during tests is not a tty), so
+	// stopCmd should take the soft path and clean up vm-state.json.
 	t.Setenv("PATH", t.TempDir())
 
-	err := stopCmd()
-	if err == nil {
-		t.Fatal("expected error when podman is missing")
+	if err := stopCmd(); err != nil {
+		t.Fatalf("stopCmd should succeed as a no-op when podman is missing, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "podman-for-windows is required") {
-		t.Errorf("error should mention prerequisite install: %v", err)
-	}
-	// vm-state.json is expected to remain — the user's environment is
-	// broken and we should not silently pretend we cleaned it up.
-	if _, err := os.Stat(vmStatePath); err != nil {
-		t.Errorf("expected %s preserved on error, stat error was %v", vmStatePath, err)
+	// vm-state.json is expected to be removed — we know nothing could
+	// have been running, so leaving a stale sidecar would confuse a
+	// later `status` call.
+	if _, err := os.Stat(vmStatePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected %s removed, stat error was %v", vmStatePath, err)
 	}
 }
 
@@ -1179,5 +1195,321 @@ exit 0
 	}
 	if got != 10 {
 		t.Errorf("sidecar was updated despite refusal: got %d, want 10", got)
+	}
+}
+
+// --- Phase 14: podman install prompt ------------------------------------
+
+// installFakeWingetInEmptyPath drops a fake winget shim into a temp dir
+// AND resets PATH to point only at that dir. This is what the Phase 14
+// interactive-install tests need: Available() must fail on the first
+// call (empty PATH → no podman anywhere) and succeed on the second
+// call (after EnsurePodmanOnPath prepends the fake install dir).
+func installFakeWingetInEmptyPath(t *testing.T, body string) (argvLogPath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake winget shim uses a POSIX shell script; skipping on windows")
+	}
+
+	dir := t.TempDir()
+	argvLogPath = filepath.Join(dir, "winget-argv.log")
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"" + argvLogPath + "\"; done\n" +
+		"printf -- '---\\n' >> \"" + argvLogPath + "\"\n" +
+		body + "\n"
+	binPath := filepath.Join(dir, "winget")
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake winget shim: %v", err)
+	}
+	t.Setenv("PATH", dir) // No podman anywhere on PATH.
+	return argvLogPath
+}
+
+// stageFakePodmanInstallDir seeds a fresh temp directory with a fake
+// podman shim and points WINDOWS_RUNNER_TEST_PODMAN_INSTALL_DIR at it.
+// After winget.EnsurePodmanOnPath() prepends that directory to PATH,
+// subsequent podman calls invoke this shim. The shim logs argv to a
+// file so tests can assert on the install-flow's podman invocations
+// (--version, machine init, machine start).
+func stageFakePodmanInstallDir(t *testing.T, body string) (argvLogPath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake podman shim uses a POSIX shell script; skipping on windows")
+	}
+
+	dir := t.TempDir()
+	argvLogPath = filepath.Join(dir, "podman-argv.log")
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"" + argvLogPath + "\"; done\n" +
+		"printf -- '---\\n' >> \"" + argvLogPath + "\"\n" +
+		body + "\n"
+	binPath := filepath.Join(dir, "podman")
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake podman shim in install dir: %v", err)
+	}
+	t.Setenv("WINDOWS_RUNNER_TEST_PODMAN_INSTALL_DIR", dir)
+	return argvLogPath
+}
+
+func TestEnsurePodmanInstalled_AlreadyAvailable(t *testing.T) {
+	// Fake podman already on PATH — ensurePodmanInstalled should
+	// short-circuit at the first Available() call, never touching
+	// winget or the prompt.
+	installFakePodman(t, `exit 0`)
+
+	var out bytes.Buffer
+	in := bytes.NewBufferString("this should never be read\n")
+
+	installed, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	if err != nil {
+		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
+	}
+	if !installed {
+		t.Error("expected installed=true when podman is already on PATH")
+	}
+	if out.Len() != 0 {
+		t.Errorf("expected no output when podman is available, got %q", out.String())
+	}
+}
+
+func TestEnsurePodmanInstalled_NonInteractiveRequired(t *testing.T) {
+	// No podman on PATH, non-interactive, required=true → error.
+	t.Setenv("PATH", t.TempDir())
+
+	var out bytes.Buffer
+	_, err := ensurePodmanInstalledCtx(&bytes.Buffer{}, &out, true, false)
+	if err == nil {
+		t.Fatal("expected error when podman missing + required + non-interactive")
+	}
+	if !strings.Contains(err.Error(), "Re-run this command interactively") {
+		t.Errorf("error should suggest interactive re-run, got: %v", err)
+	}
+}
+
+func TestEnsurePodmanInstalled_NonInteractiveOptional(t *testing.T) {
+	// No podman on PATH, non-interactive, required=false → (false, nil)
+	// with no prompt output.
+	t.Setenv("PATH", t.TempDir())
+
+	var out bytes.Buffer
+	installed, err := ensurePodmanInstalledCtx(&bytes.Buffer{}, &out, false, false)
+	if err != nil {
+		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
+	}
+	if installed {
+		t.Error("expected installed=false")
+	}
+	if out.Len() != 0 {
+		t.Errorf("expected silent behaviour in non-interactive optional path, got %q", out.String())
+	}
+}
+
+func TestEnsurePodmanInstalled_InteractiveDeclineOptional(t *testing.T) {
+	// User types "n\n" — required=false so we return (false, nil) with a
+	// helpful "you will be prompted again" message.
+	t.Setenv("PATH", t.TempDir())
+
+	var out bytes.Buffer
+	in := bytes.NewBufferString("n\n")
+	installed, err := ensurePodmanInstalledCtx(in, &out, false, true)
+	if err != nil {
+		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
+	}
+	if installed {
+		t.Error("expected installed=false after decline")
+	}
+	if !strings.Contains(out.String(), "prompted again when you run 'windows-runner start'") {
+		t.Errorf("expected re-prompt hint in output, got %q", out.String())
+	}
+}
+
+func TestEnsurePodmanInstalled_InteractiveDeclineRequired(t *testing.T) {
+	// User types "n\n" — required=true so we return an error.
+	t.Setenv("PATH", t.TempDir())
+
+	var out bytes.Buffer
+	in := bytes.NewBufferString("n\n")
+	_, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	if err == nil {
+		t.Fatal("expected error when required + user declines")
+	}
+	if !strings.Contains(err.Error(), "cannot proceed without podman-for-windows") {
+		t.Errorf("error should mention cannot-proceed, got: %v", err)
+	}
+}
+
+func TestEnsurePodmanInstalled_InteractiveAcceptFullFlow(t *testing.T) {
+	// End-to-end happy path: user says Y, winget install succeeds,
+	// EnsurePodmanOnPath finds the staged install dir, subsequent
+	// podman calls (--version, machine init, machine start) all
+	// succeed against the fake shim in that dir.
+	wingetLog := installFakeWingetInEmptyPath(t, `exit 0`)
+	podmanLog := stageFakePodmanInstallDir(t, `exit 0`)
+
+	var out bytes.Buffer
+	in := bytes.NewBufferString("Y\n")
+
+	installed, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	if err != nil {
+		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
+	}
+	if !installed {
+		t.Error("expected installed=true after successful install flow")
+	}
+
+	// Verify winget was called exactly once with the expected argv.
+	wingetCalls := readArgvCalls(t, wingetLog)
+	if len(wingetCalls) != 1 {
+		t.Fatalf("expected 1 winget call, got %d: %v", len(wingetCalls), wingetCalls)
+	}
+	wantWingetArgv := []string{
+		"install",
+		"--exact", "--id", "RedHat.Podman",
+		"--scope", "user",
+		"--accept-source-agreements",
+		"--accept-package-agreements",
+	}
+	if !stringsEqual(wingetCalls[0], wantWingetArgv) {
+		t.Errorf("winget argv:\n  want: %v\n  got:  %v", wantWingetArgv, wingetCalls[0])
+	}
+
+	// Verify podman was called three times in the expected order:
+	//   1. --version           (post-install Available() sanity check)
+	//   2. machine init --disk-size 40
+	//   3. machine start
+	podmanCalls := readArgvCalls(t, podmanLog)
+	if len(podmanCalls) != 3 {
+		t.Fatalf("expected 3 podman calls, got %d: %v", len(podmanCalls), podmanCalls)
+	}
+	if !stringsEqual(podmanCalls[0], []string{"--version"}) {
+		t.Errorf("call 1 argv: want [--version], got %v", podmanCalls[0])
+	}
+	wantInit := []string{"machine", "init", "--disk-size", "40"}
+	if !stringsEqual(podmanCalls[1], wantInit) {
+		t.Errorf("call 2 argv: want %v, got %v", wantInit, podmanCalls[1])
+	}
+	if !stringsEqual(podmanCalls[2], []string{"machine", "start"}) {
+		t.Errorf("call 3 argv: want [machine start], got %v", podmanCalls[2])
+	}
+
+	// User-visible progress messages should be present.
+	for _, want := range []string{
+		"podman-for-windows is not installed",
+		"Installing podman-for-windows via winget",
+		"Initializing podman WSL2 machine",
+		"Starting podman machine",
+		"Podman is ready",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("expected %q in output, got %q", want, out.String())
+		}
+	}
+}
+
+func TestEnsurePodmanInstalled_InteractiveAcceptDefaultOnEmptyInput(t *testing.T) {
+	// Empty input line (just Enter) — defaultYes=true, so the install
+	// flow runs. Same shims as the full-flow test, less-thorough argv
+	// assertion since that's covered above.
+	installFakeWingetInEmptyPath(t, `exit 0`)
+	stageFakePodmanInstallDir(t, `exit 0`)
+
+	var out bytes.Buffer
+	in := bytes.NewBufferString("\n") // Just Enter → default = Yes.
+
+	installed, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	if err != nil {
+		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
+	}
+	if !installed {
+		t.Error("empty input should default to Yes and install")
+	}
+	if !strings.Contains(out.String(), "Podman is ready") {
+		t.Errorf("expected 'Podman is ready' in output, got %q", out.String())
+	}
+}
+
+func TestEnsurePodmanInstalled_InteractiveWingetFails(t *testing.T) {
+	// User says Y but winget install exits non-zero — error surfaces
+	// with winget's stderr streamed through the shared output writer.
+	installFakeWingetInEmptyPath(t, `echo "package not found" >&2; exit 1`)
+	// Also stage a podman install dir even though we won't reach it —
+	// keeps the env consistent.
+	stageFakePodmanInstallDir(t, `exit 0`)
+
+	var out bytes.Buffer
+	in := bytes.NewBufferString("y\n")
+	_, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	if err == nil {
+		t.Fatal("expected error when winget install fails")
+	}
+	if !strings.Contains(err.Error(), "winget install RedHat.Podman failed") {
+		t.Errorf("error should mention winget failure, got: %v", err)
+	}
+	if !strings.Contains(out.String(), "package not found") {
+		t.Errorf("expected winget stderr streamed to output, got %q", out.String())
+	}
+}
+
+func TestPromptYesNo(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		defaultYes bool
+		want       bool
+	}{
+		{"y accepts", "y\n", true, true},
+		{"Y accepts", "Y\n", false, true},
+		{"yes accepts", "yes\n", false, true},
+		{"n rejects", "n\n", true, false},
+		{"N rejects", "N\n", true, false},
+		{"empty takes default yes", "\n", true, true},
+		{"empty takes default no", "\n", false, false},
+		{"unrecognized takes default yes", "maybe\n", true, true},
+		{"unrecognized takes default no", "maybe\n", false, false},
+		{"EOF takes default yes", "", true, true},
+		{"EOF takes default no", "", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			got, err := promptYesNo(strings.NewReader(tc.input), &out, "Continue?", tc.defaultYes)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("want %v, got %v", tc.want, got)
+			}
+			// Prompt suffix must match defaultYes.
+			suffix := " [y/N] "
+			if tc.defaultYes {
+				suffix = " [Y/n] "
+			}
+			if !strings.HasSuffix(out.String(), suffix) {
+				t.Errorf("expected prompt to end with %q, got %q", suffix, out.String())
+			}
+		})
+	}
+}
+
+func TestInitCmdSucceedsWhenPodmanCheckSoftFails(t *testing.T) {
+	// Phase 14: init calls ensurePodmanInstalled with required=false.
+	// Non-interactive + missing podman must not fail init — resources/
+	// still has to be produced.
+	assets := buildTestTarXZ(t, map[string][]byte{
+		"init/config.json":           []byte(`{"db":{}}`),
+		"init/exasol-nano-db.tar.gz": []byte("payload"),
+	})
+	t.Chdir(t.TempDir())
+	t.Setenv("PATH", t.TempDir()) // No podman anywhere.
+
+	if err := initCmdWithAssets("", assets); err != nil {
+		t.Fatalf("initCmdWithAssets should succeed even without podman: %v", err)
+	}
+	// Resources must still exist.
+	if _, err := os.Stat(filepath.Join(resourcesDir, "config.json")); err != nil {
+		t.Errorf("resources/config.json should exist: %v", err)
+	}
+	if _, err := os.Stat(runtimeConfigPath); err != nil {
+		t.Errorf("%s should exist: %v", runtimeConfigPath, err)
 	}
 }

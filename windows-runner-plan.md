@@ -1145,17 +1145,34 @@ Install flow (`ensurePodmanInstalled` → `ensurePodmanInstalledCtx`):
 3. Prompt `[Y/n]` (default Yes). Empty input, "y", "Y", "yes" all
    accept; "n", "N" decline; unrecognized takes the default.
 4. On accept: `winget install --exact --id RedHat.Podman
-   --accept-source-agreements --accept-package-agreements`
-   (streamed to stdout so users see winget's progress and UAC
-   dialog).
+   --scope user --accept-source-agreements
+   --accept-package-agreements` (streamed to stdout so users see
+   winget's progress). `--scope user` avoids requiring
+   administrator privileges — the install lands in
+   `%LOCALAPPDATA%\Programs\Podman` rather than
+   `%PROGRAMFILES%\Podman`, matches podman-for-windows's own MSI
+   default, and does not trigger a UAC prompt. This keeps the
+   feature usable on locked-down enterprise Windows machines.
+   Caveat: WSL2 itself must already be installed system-wide
+   (`wsl --install` still requires admin the first time). Podman's
+   user-scope MSI does not install WSL for you, so if WSL is
+   missing the subsequent `podman machine init` step will fail
+   with a WSL-not-found error and the user has to escalate to
+   admin once to run `wsl --install`. Detecting this pre-flight
+   and surfacing a targeted message is deferred to a future phase.
 5. `winget.EnsurePodmanOnPath()` prepends
-   `%ProgramFiles%\RedHat\Podman` to the process's PATH so the very
-   next `podman.Available()` call succeeds without a shell restart.
+   `%LOCALAPPDATA%\Programs\Podman` to the process's PATH so the
+   very next `podman.Available()` call succeeds without a shell
+   restart.
 6. `podman.InitMachine(40)` runs
-   `podman machine init --provider wsl --disk-size 40`. `--provider
-   wsl` is explicit rather than relying on the default so a future
-   podman version that flips the default cannot silently degrade to
-   Hyper-V and mystify downstream calls.
+   `podman machine init --disk-size 40`. The provider (WSL vs
+   Hyper-V) is left to podman's own default rather than passed as
+   `--provider wsl`, because podman 5.x (still current stable) does
+   not recognise `--provider` and exits with
+   `unknown flag: --provider`. WSL is podman-for-windows's default
+   on every current release, so relying on the default keeps us
+   compatible across 5.x and 6.x. Users who want Hyper-V can set
+   `CONTAINERS_MACHINE_PROVIDER=hyperv` in their environment.
 7. `podman.StartMachine()` runs `podman machine start`.
 8. Return `(installed=true, nil)`; caller proceeds as if podman had
    been there all along.

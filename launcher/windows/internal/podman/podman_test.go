@@ -418,6 +418,71 @@ func TestRun_Failure(t *testing.T) {
 	}
 }
 
+func TestInitMachine_Success(t *testing.T) {
+	logPath := installFakePodman(t, `exit 0`)
+	if err := InitMachine(40); err != nil {
+		t.Fatalf("InitMachine() unexpected error: %v", err)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 podman call, got %d: %v", len(calls), calls)
+	}
+	want := []string{"machine", "init", "--disk-size", "40"}
+	if got := calls[0]; !slicesEqual(got, want) {
+		t.Errorf("argv mismatch: want %v, got %v", want, got)
+	}
+}
+
+func TestInitMachine_RejectsNonPositiveSize(t *testing.T) {
+	// PATH deliberately empty so a bug that let this through to exec
+	// would be visible (podman not found → different error).
+	t.Setenv("PATH", t.TempDir())
+	for _, size := range []int{0, -1, -100} {
+		if err := InitMachine(size); err == nil {
+			t.Errorf("InitMachine(%d): expected error, got nil", size)
+		} else if !strings.Contains(err.Error(), "must be positive") {
+			t.Errorf("InitMachine(%d): expected 'must be positive' error, got %v", size, err)
+		}
+	}
+}
+
+func TestInitMachine_PodmanFails(t *testing.T) {
+	installFakePodman(t, `echo "machine already exists" >&2; exit 125`)
+	err := InitMachine(40)
+	if err == nil {
+		t.Fatal("expected error when podman machine init fails")
+	}
+	if !strings.Contains(err.Error(), "podman machine init failed") {
+		t.Errorf("error should mention the command: %v", err)
+	}
+}
+
+func TestStartMachine_Success(t *testing.T) {
+	logPath := installFakePodman(t, `exit 0`)
+	if err := StartMachine(); err != nil {
+		t.Fatalf("StartMachine() unexpected error: %v", err)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 podman call, got %d: %v", len(calls), calls)
+	}
+	want := []string{"machine", "start"}
+	if got := calls[0]; !slicesEqual(got, want) {
+		t.Errorf("argv mismatch: want %v, got %v", want, got)
+	}
+}
+
+func TestStartMachine_PodmanFails(t *testing.T) {
+	installFakePodman(t, `echo "wsl not installed" >&2; exit 125`)
+	err := StartMachine()
+	if err == nil {
+		t.Fatal("expected error when podman machine start fails")
+	}
+	if !strings.Contains(err.Error(), "podman machine start failed") {
+		t.Errorf("error should mention the command: %v", err)
+	}
+}
+
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
