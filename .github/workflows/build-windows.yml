@@ -14,6 +14,13 @@ name: Build Windows Launcher
 # build-mac.yml.
 
 on:
+  # TEMPORARY (Phase 15 iteration): trigger on push to this feature
+  # branch so we can test the workflow without needing build-windows.yml
+  # to exist on the default branch (a GitHub prerequisite for
+  # workflow_dispatch). REMOVE this `push:` block before merging to main.
+  push:
+    branches:
+      - gb.windows-launcher
   workflow_dispatch:
   workflow_call:
     secrets:
