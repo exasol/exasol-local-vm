@@ -287,6 +287,63 @@ jobs:
       - name: Run integration tests
         run: task test-launcher-integration
 
+      - name: Collect podman diagnostics on failure
+        # Runs only when a prior step failed (typically the integration
+        # tests). Captures podman-side state that the Go fixture cannot
+        # see: container logs, port bindings, machine state, and the
+        # Windows-side view of what's listening on the launcher's
+        # forwarded ports. Everything is written to tests/failures so
+        # it rides along in the test-failure-logs-windows artifact.
+        if: failure()
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $out = "tests/failures/podman-diagnostics"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          Write-Host "=== podman machine inspect ==="
+          podman machine inspect > "$out/machine-inspect.txt" 2>&1
+          Get-Content "$out/machine-inspect.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman ps -a ==="
+          podman ps -a > "$out/ps-a.txt" 2>&1
+          Get-Content "$out/ps-a.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman port exasol-local-db ==="
+          podman port exasol-local-db > "$out/port.txt" 2>&1
+          Get-Content "$out/port.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman logs exasol-local-db (last 500 lines) ==="
+          # --tail keeps the artifact small; full logs would be many MB
+          # for a hung/looping DB init.
+          podman logs --tail 500 exasol-local-db > "$out/container-logs.txt" 2>&1
+          Get-Content "$out/container-logs.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== podman inspect exasol-local-db ==="
+          podman inspect exasol-local-db > "$out/container-inspect.json" 2>&1
+
+          Write-Host "=== podman volume ls / inspect ==="
+          podman volume ls > "$out/volume-ls.txt" 2>&1
+          podman volume inspect exasol-nano-data > "$out/volume-inspect.json" 2>&1
+
+          Write-Host "=== netstat -ano (Windows host) ==="
+          # What is actually listening on the Windows side of gvproxy?
+          # Filter to the launcher's default DB port (8563) plus any
+          # ephemeral overrides we might have used.
+          netstat -ano | Select-String -Pattern ':8563|:59955' > "$out/netstat.txt"
+          Get-Content "$out/netstat.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== gvproxy processes ==="
+          Get-Process -Name gvproxy -ErrorAction SilentlyContinue |
+            Select-Object Id,ProcessName,Path |
+            Out-File -Encoding utf8 "$out/gvproxy-processes.txt"
+          Get-Content "$out/gvproxy-processes.txt" -ErrorAction SilentlyContinue
+
+          Write-Host "=== Test-NetConnection 127.0.0.1:8563 ==="
+          Test-NetConnection -ComputerName 127.0.0.1 -Port 8563 -InformationLevel Detailed `
+            *> "$out/test-netconnection-8563.txt"
+          Get-Content "$out/test-netconnection-8563.txt" -ErrorAction SilentlyContinue
+
       - name: Upload test failure logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
