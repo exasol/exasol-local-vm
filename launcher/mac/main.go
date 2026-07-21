@@ -93,6 +93,10 @@ const (
 
 var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
 
+// runnerVersion is set at build time with -ldflags. Local development builds
+// intentionally report "dev".
+var runnerVersion = "dev"
+
 // readLastLines reads the last n lines from a file
 func readLastLines(filePath string, n int) ([]string, error) {
 	data, err := os.ReadFile(filePath)
@@ -679,6 +683,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  health-check                      Print JSON {\"ports\": {\"<name>\": {\"state\": ...}}}")
 		fmt.Fprintln(os.Stderr, "                                    after freshly probing every forwarded port")
 		fmt.Fprintln(os.Stderr, "  resize-data <size>                Resize data disk to SIZE GB (VM must be stopped)")
+		fmt.Fprintln(os.Stderr, "  version                           Print runner version")
 		os.Exit(1)
 	}
 
@@ -757,9 +762,11 @@ func main() {
 			os.Exit(1)
 		}
 		err = resizeDataDiskCmd(os.Args[2])
+	case "version":
+		versionCmd(os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop, status, resize-data")
+		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop, status, resize-data, version")
 		os.Exit(1)
 	}
 
@@ -767,6 +774,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func versionCmd(output io.Writer) {
+	fmt.Fprintln(output, runnerVersion)
 }
 
 // extractTarXZ extracts a tar.xz archive to the specified output directory.
