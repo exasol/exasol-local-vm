@@ -295,8 +295,21 @@ migrate_overlay_exa_if_needed() {
     rm -rf "$MIGRATION_DIR"
     log_msg "Overlay-backed DB container had no /exa contents to migrate"
   else
-    cp -a "$MIGRATION_DIR/." "$EXA_DATA_DIR/"
-    rm -rf "$MIGRATION_DIR"
+    # Keep the live path empty until the complete copy is available.  Moving a
+    # sibling directory into place is atomic, so an interrupted migration
+    # leaves either the old empty directory (which can be retried) or a full
+    # migrated runtime, never a partial /exa that blocks a subsequent retry.
+    if ! rmdir "$EXA_DATA_DIR"; then
+      rm -rf "$MIGRATION_DIR"
+      log_msg "Error: persistent /exa directory at $EXA_DATA_DIR is no longer empty; aborting overlay migration without overwriting it"
+      exit 1
+    fi
+    if ! mv "$MIGRATION_DIR" "$EXA_DATA_DIR"; then
+      mkdir -p "$EXA_DATA_DIR"
+      rm -rf "$MIGRATION_DIR"
+      log_msg "Error: failed to atomically install migrated /exa at $EXA_DATA_DIR; old container was retained and migration can be retried"
+      exit 1
+    fi
     sync
     log_msg "Migrated overlay-backed /exa from existing DB container to $EXA_DATA_DIR"
   fi
