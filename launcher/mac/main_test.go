@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,18 @@ import (
 	"testing"
 	"time"
 )
+
+func TestVersionCommandOutput(t *testing.T) {
+	previousVersion := runnerVersion
+	runnerVersion = "v1.2.3"
+	t.Cleanup(func() { runnerVersion = previousVersion })
+
+	var output bytes.Buffer
+	versionCmd(&output)
+	if got, want := output.String(), "v1.2.3\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+}
 
 func TestAuthorizedKeyFromPrivateKeyMatchesGeneratedPublicKey(t *testing.T) {
 	t.Parallel()
