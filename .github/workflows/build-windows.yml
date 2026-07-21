@@ -146,6 +146,17 @@ jobs:
           # windows-latest gives each job a clean VM, so init is always
           # the first-time path here.
           podman machine init --disk-size 40
+          # Rootful mode. Bypasses `pasta` for port forwarding and uses
+          # the WSL2 kernel's iptables/nftables path instead. Rootless
+          # + pasta (podman 5.x default) resets TLS handshakes at the
+          # container port on our test image, so long-lived TCP
+          # connections like the Exasol driver's wss:// never complete
+          # ServerHello. See ci-downloads/podman-diagnostics/ from run
+          # 29811407643 for the pasta-side ClientHello -> RST evidence.
+          # `--rootful` does NOT require Windows admin; the podman
+          # machine still runs inside the current user's WSL2, only the
+          # user inside the machine becomes root.
+          podman machine set --rootful
           podman machine start
 
       - name: Build windows launcher
@@ -306,6 +317,10 @@ jobs:
           # windows-latest runners give each job a clean VM, so init is
           # always the first-time path here.
           podman machine init --disk-size 40
+          # Rootful mode - see the build-windows-launcher job for the
+          # detailed rationale (bypasses pasta's TLS-handshake-reset
+          # bug on rootless port forwarding).
+          podman machine set --rootful
           podman machine start
 
       - name: Download windows launcher artifact
