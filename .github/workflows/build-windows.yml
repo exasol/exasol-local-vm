@@ -389,66 +389,89 @@ jobs:
           Get-Content "$out/gvproxy-processes.txt" -ErrorAction SilentlyContinue
 
           Write-Host "=== Test-NetConnection 127.0.0.1:8563 ==="
-          Test-NetConnection -ComputerName 127.0.0.1 -Port 8563 -InformationLevel Detailed `
-            *> "$out/test-netconnection-8563.txt"
-          Get-Content "$out/test-netconnection-8563.txt" -ErrorAction SilentlyContinue
+          $tnc = Test-NetConnection -ComputerName 127.0.0.1 -Port 8563 -InformationLevel Detailed 2>&1 | Out-String
+          $tnc | Out-File -Encoding utf8 "$out/test-netconnection-8563.txt"
+          Write-Host $tnc
 
           Write-Host "=== Test-NetConnection localhost:8563 ==="
-          Test-NetConnection -ComputerName localhost -Port 8563 -InformationLevel Detailed `
-            *> "$out/test-netconnection-localhost-8563.txt"
-          Get-Content "$out/test-netconnection-localhost-8563.txt" -ErrorAction SilentlyContinue
+          $tnc = Test-NetConnection -ComputerName localhost -Port 8563 -InformationLevel Detailed 2>&1 | Out-String
+          $tnc | Out-File -Encoding utf8 "$out/test-netconnection-localhost-8563.txt"
+          Write-Host $tnc
 
-          # Three-way network probe: figures out WHERE the connection is
-          # dying (Windows host / WSL2 backing VM / container). Each curl
-          # is capped at 15 s and expected to talk TLS (the DB serves
-          # wss://). All three should reach the DB and receive some kind
-          # of TLS response; failures at different layers pinpoint the
-          # break.
+          # Two-vantage probe of the DB's TLS handshake:
+          #   1. From the Windows host via gvproxy ([::1]:8563).
+          #   2. From inside the WSL2 backing VM directly (bypasses gvproxy).
+          #
+          # If (1) fails and (2) succeeds → gvproxy is mangling the TLS
+          # bytes.
+          # If both fail with matching error → DB itself is aborting.
+          # If both succeed → something specific to the Go driver.
+          #
+          # openssl s_client is preferred over curl because it reports the
+          # exact TLS handshake step that fails (ServerHello, cert, key
+          # exchange, ...) rather than a generic 'handshake failed'.
+          #
+          # Native-exe output is captured into a variable then written to
+          # a file explicitly. Earlier attempts used the backtick line
+          # continuation with `*>` redirection which mislabeled outputs
+          # across steps — do NOT reintroduce that pattern.
 
-          Write-Host "=== curl.exe from Windows host: https://localhost:8563 ==="
-          curl.exe -kv --max-time 15 https://localhost:8563/ `
-            *> "$out/curl-from-windows-host.txt"
-          Get-Content "$out/curl-from-windows-host.txt" -ErrorAction SilentlyContinue
+          function Probe-Tls {
+              param([string]$label, [string]$outFile, [scriptblock]$cmd)
+              Write-Host "=== $label ==="
+              try {
+                  $captured = & $cmd 2>&1 | Out-String
+              } catch {
+                  $captured = "PROBE FAILED: $_"
+              }
+              $captured | Out-File -Encoding utf8 $outFile
+              Write-Host $captured
+          }
 
-          Write-Host "=== curl from inside WSL2 (podman-machine-default): https://localhost:8563 ==="
-          # The port podman published (8563) should be reachable from
-          # inside the WSL2 backing VM's default namespace via localhost,
-          # since podman's port binding on rootless is what gvproxy talks
-          # to.
-          wsl.exe --distribution podman-machine-default --exec `
-            curl -kv --max-time 15 https://localhost:8563/ `
-            *> "$out/curl-from-wsl.txt"
-          Get-Content "$out/curl-from-wsl.txt" -ErrorAction SilentlyContinue
+          Probe-Tls "curl.exe from Windows host: https://localhost:8563" `
+              "$out/curl-from-windows-host.txt" `
+              { curl.exe -kv --max-time 15 https://localhost:8563/ }
 
-          Write-Host "=== curl from inside the container: https://localhost:8563 ==="
-          # Inside the container, the DB is bound directly to the
-          # container's loopback, so this probe bypasses ALL port
-          # forwarding. If this fails, the DB itself is broken. If it
-          # succeeds while the outer probes fail, the port-forwarding
-          # chain is broken.
-          podman exec exasol-local-db sh -c "curl -kv --max-time 15 https://localhost:8563/" `
-            *> "$out/curl-from-container.txt"
-          Get-Content "$out/curl-from-container.txt" -ErrorAction SilentlyContinue
+          # openssl.exe is preinstalled on windows-latest via Git for
+          # Windows; falls back to a helpful error if missing.
+          Probe-Tls "openssl s_client from Windows host: localhost:8563" `
+              "$out/openssl-from-windows-host.txt" `
+              {
+                  # -showcerts prints the server's cert chain.
+                  # </dev/null is a Unix idiom — the PowerShell
+                  # equivalent is redirecting from `$null`, which pushes
+                  # EOF on stdin so openssl exits after the handshake.
+                  '' | openssl.exe s_client -connect localhost:8563 -showcerts -brief
+              }
 
-          Write-Host "=== netstat inside WSL2 ==="
-          wsl.exe --distribution podman-machine-default --exec `
-            sh -c "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null" `
-            *> "$out/wsl-netstat.txt"
-          Get-Content "$out/wsl-netstat.txt" -ErrorAction SilentlyContinue
+          # WSL-side probes bypass gvproxy entirely — they run inside the
+          # podman-machine-default distro (Fedora CoreOS) and talk
+          # directly to the port the podman machine is publishing on its
+          # own loopback.
+          Probe-Tls "curl from inside WSL2 (podman-machine-default): https://localhost:8563" `
+              "$out/curl-from-wsl.txt" `
+              { wsl.exe --distribution podman-machine-default --exec curl -kv --max-time 15 https://localhost:8563/ }
 
-          Write-Host "=== netstat inside container ==="
-          podman exec exasol-local-db sh -c "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null" `
-            *> "$out/container-netstat.txt"
-          Get-Content "$out/container-netstat.txt" -ErrorAction SilentlyContinue
+          Probe-Tls "openssl s_client from inside WSL2 (podman-machine-default): localhost:8563" `
+              "$out/openssl-from-wsl.txt" `
+              {
+                  # -brief keeps output compact; -showcerts is dropped
+                  # here to save space since the openssl-from-windows
+                  # variant above already captures the chain.
+                  wsl.exe --distribution podman-machine-default --exec sh -c "echo '' | openssl s_client -connect localhost:8563 -brief"
+              }
 
-          Write-Host "=== podman info ==="
-          podman info > "$out/podman-info.txt" 2>&1
-          Get-Content "$out/podman-info.txt" -ErrorAction SilentlyContinue
+          Probe-Tls "netstat inside WSL2" `
+              "$out/wsl-netstat.txt" `
+              { wsl.exe --distribution podman-machine-default --exec sh -c "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null" }
 
-          Write-Host "=== container HostConfig.PortBindings ==="
-          podman inspect exasol-local-db --format '{{json .HostConfig.PortBindings}}' `
-            > "$out/container-port-bindings.json" 2>&1
-          Get-Content "$out/container-port-bindings.json" -ErrorAction SilentlyContinue
+          Probe-Tls "podman info" `
+              "$out/podman-info.txt" `
+              { podman info }
+
+          Probe-Tls "container HostConfig.PortBindings" `
+              "$out/container-port-bindings.json" `
+              { podman inspect exasol-local-db --format '{{json .HostConfig.PortBindings}}' }
 
       - name: Upload test failure logs
         if: always()
