@@ -4,6 +4,7 @@
 package podman
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -687,6 +688,112 @@ func TestLogsTail_PodmanFails(t *testing.T) {
 	// a diagnostic even on failure.
 	if !strings.Contains(out, "no logs") {
 		t.Errorf("expected combined output to include stderr, got: %q", out)
+	}
+}
+
+func TestContainerFileExists_Present(t *testing.T) {
+	// Success path: podman cp streams the file to stdout as tar and
+	// exits 0. Body writes some bytes so the io.Discard sink is
+	// exercised.
+	logPath := installFakePodman(t, `printf 'fake tar bytes'; exit 0`)
+	got, err := ContainerFileExists("my-container", "/exa/marker")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Error("expected exists=true")
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	wantArgv := []string{"container", "cp", "my-container:/exa/marker", "-"}
+	if got := calls[0]; !slicesEqual(got, wantArgv) {
+		t.Errorf("argv mismatch: want %v, got %v", wantArgv, got)
+	}
+}
+
+func TestContainerFileExists_MissingViaStderrNeedle(t *testing.T) {
+	// Podman's canonical missing-file wording. Table-driven so a
+	// future wording drift is a one-line fix. All stderr fixtures
+	// are single-quote-safe (no apostrophes) so we can embed them
+	// via sh single-quote escaping.
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"classic no such file", `Error: statting "/exa/marker": stat /exa/marker: no such file or directory`},
+		{"newer container-relative", `Error: "/exa/marker" does not exist in container "my-container"`},
+		{"lowercase drift", `error: no such file or directory`},
+		{"mixed-case with prefix", `Error: could not find the file /exa/marker in container`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`printf '%%s\n' '%s' >&2; exit 1`, tc.stderr)
+			installFakePodman(t, body)
+			got, err := ContainerFileExists("my-container", "/exa/marker")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got {
+				t.Error("expected exists=false")
+			}
+		})
+	}
+}
+
+func TestContainerFileExists_GenuineFailureSurfacesError(t *testing.T) {
+	// Any non-zero exit whose stderr does NOT match a known
+	// "missing file" needle must surface as an error, so a real
+	// podman failure (container gone, permission denied, ...) is
+	// not silently misread as "marker cleared".
+	installFakePodman(t, `echo "Error: no container with name my-container" >&2; exit 125`)
+	_, err := ContainerFileExists("my-container", "/exa/marker")
+	if err == nil {
+		t.Fatal("expected error for unknown failure mode")
+	}
+	if !strings.Contains(err.Error(), "no container with name my-container") {
+		t.Errorf("error should propagate stderr: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit 125") {
+		t.Errorf("error should mention exit code: %v", err)
+	}
+}
+
+func TestContainerFileExists_SpawnFailure(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, err := ContainerFileExists("c", "/some/path")
+	if err == nil {
+		t.Fatal("expected error when podman is not on PATH")
+	}
+	if !strings.Contains(err.Error(), "podman container cp") {
+		t.Errorf("error should mention the command: %v", err)
+	}
+}
+
+func TestIsPodmanCpMissingPath(t *testing.T) {
+	// Pure unit test on the stderr matcher — makes future wording
+	// drift a one-line fix and prevents accidental broadening of
+	// the pattern from swallowing genuine failures.
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"empty", "", false},
+		{"classic", `stat /foo: no such file or directory`, true},
+		{"uppercase", `Error: No Such File Or Directory`, true},
+		{"container-relative", `"/x" does not exist in container "c"`, true},
+		{"could not find", `Could not find the file /x`, true},
+		{"permission denied", `permission denied`, false},
+		{"container gone", `no container with name "c"`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPodmanCpMissingPath(tc.stderr); got != tc.want {
+				t.Errorf("isPodmanCpMissingPath(%q)=%v, want %v", tc.stderr, got, tc.want)
+			}
+		})
 	}
 }
 

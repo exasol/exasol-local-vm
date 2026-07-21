@@ -1299,12 +1299,19 @@ someone runs `task ci-build-windows-launcher` on this branch.
 
 ## Phase 16 — Block `start` until the initial-create marker clears
 
-> **Landed (Option A).** `startCmd` now blocks after `podman run -d`
-> until either the `.exanano-initial-create-in-progress` marker inside
-> the `exasol-nano-data` volume is gone or a launcher-side timeout
-> expires. See
-> [launcher/windows/main.go](launcher/windows/main.go) (§ Phase 16
-> region) and the new `Exec`/`InspectState`/`LogsTail` helpers in
+> **Landed (Option A, refined).** `startCmd` now blocks after `podman
+> run -d` until either the `.exanano-initial-create-in-progress`
+> marker inside the `exasol-nano-data` volume is gone or a
+> launcher-side timeout expires. Marker probing switched from
+> `podman exec test ! -e ...` to `podman container cp` after the
+> first CI run revealed that the Nano image ships no `/bin/test`
+> (see [ci-downloads/run-29837904880/](ci-downloads/run-29837904880/)):
+> the initial exec-based probe silently returned exit 127 forever
+> and never observed the marker clearing. The cp-based
+> `ContainerFileExists` requires no in-container binaries at all.
+> See [launcher/windows/main.go](launcher/windows/main.go) (§ Phase
+> 16 region) and the
+> `InspectState` / `ContainerFileExists` / `LogsTail` helpers in
 > [launcher/windows/internal/podman/podman.go](launcher/windows/internal/podman/podman.go).
 
 Purpose: make `windows-runner start` return only once the DB is

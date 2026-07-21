@@ -879,7 +879,7 @@ const dbReadyTimeoutEnv = "EXASOL_LAUNCHER_START_TIMEOUT_SEC"
 // live container. Production code uses livePodmanDeps.
 type dbReadyDeps interface {
 	InspectState(name string) (podman.ContainerState, error)
-	Exec(name string, argv []string) (stdout, stderr string, exitCode int, err error)
+	ContainerFileExists(name, path string) (bool, error)
 	LogsTail(name string, lines int) (string, error)
 }
 
@@ -891,8 +891,8 @@ func (livePodmanDeps) InspectState(name string) (podman.ContainerState, error) {
 	return podman.InspectState(name)
 }
 
-func (livePodmanDeps) Exec(name string, argv []string) (string, string, int, error) {
-	return podman.Exec(name, argv)
+func (livePodmanDeps) ContainerFileExists(name, path string) (bool, error) {
+	return podman.ContainerFileExists(name, path)
 }
 
 func (livePodmanDeps) LogsTail(name string, lines int) (string, error) {
@@ -967,15 +967,21 @@ func resolveDBReadyTimeout() time.Duration {
 // initial-create marker, or until ctx is cancelled.
 //
 // State machine per poll:
-//   - InspectState reports "running": exec `test ! -e <marker>` in
-//     the container. Exit 0 → marker gone → return nil. Non-zero →
-//     marker still present → keep waiting.
+//   - InspectState reports "running": check whether the marker file
+//     still exists inside the container via ContainerFileExists.
+//     Absent → return nil. Present → keep waiting.
 //   - InspectState reports a terminal status ("exited", "removing",
 //     "stopped", "dead"): return *dbReadyStartupError with the tail
 //     of `podman logs` embedded, so a wait timeout is not paid for a
 //     container that has already given up.
 //   - Anything else ("created", "configured", "paused", ...): treat
 //     as transient, keep waiting.
+//
+// Marker probing uses `podman container cp` rather than
+// `podman exec test -e ...` because the Nano image is minimal and
+// ships no /bin/test or /bin/sh — a naive exec probe silently
+// returns exit 127 forever and never observes the marker clearing.
+// See ContainerFileExists for the full rationale.
 //
 // Every progressInterval a "Waiting for DB..." line is emitted to
 // out. On the first successful marker-cleared check the function
@@ -1006,15 +1012,14 @@ func waitForDBReady(
 
 		switch st.Status {
 		case "running":
-			_, _, ec, err := deps.Exec(containerName,
-				[]string{"test", "!", "-e", dbReadyMarkerPath})
+			exists, err := deps.ContainerFileExists(containerName, dbReadyMarkerPath)
 			if err != nil {
 				return fmt.Errorf(
-					"failed to probe DB readiness marker via podman exec on %q: %w",
+					"failed to probe DB readiness marker on %q: %w",
 					containerName, err,
 				)
 			}
-			if ec == 0 {
+			if !exists {
 				if markerSeen {
 					fmt.Fprintln(out, "Marker cleared; DB ready.")
 				} else {

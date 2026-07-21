@@ -1523,11 +1523,12 @@ func TestInitCmdSucceedsWhenPodmanCheckSoftFails(t *testing.T) {
 // --- Phase 16: waitForDBReady ------------------------------------------
 
 // fakeDBReadyDeps drives waitForDBReady from prebuilt scripts so unit
-// tests do not need a live container. Both statuses and execResults
-// advance one entry per call; when exhausted they stick at the last
-// entry (i.e. behave as if the container settled into that state). A
-// nil execFn means "always return exit 1" (marker still present) —
-// convenient for the timeout tests where the marker never clears.
+// tests do not need a live container. Both statuses and
+// existsResults advance one entry per call; when exhausted they
+// stick at the last entry (i.e. behave as if the container settled
+// into that state). A nil existsFn means "always return true" (marker
+// still present) — convenient for the timeout tests where the marker
+// never clears.
 type fakeDBReadyDeps struct {
 	mu sync.Mutex
 
@@ -1535,15 +1536,15 @@ type fakeDBReadyDeps struct {
 	statusesIdx int
 	inspectErr  error
 
-	execResults    []int
-	execResultsIdx int
-	execErr        error
+	existsResults    []bool
+	existsResultsIdx int
+	existsErr        error
 
 	logsTail string
 	logsErr  error
 
 	inspectCalls int
-	execCalls    int
+	existsCalls  int
 	logsCalls    int
 }
 
@@ -1566,23 +1567,23 @@ func (f *fakeDBReadyDeps) InspectState(name string) (podman.ContainerState, erro
 	return f.statuses[idx], nil
 }
 
-func (f *fakeDBReadyDeps) Exec(name string, argv []string) (string, string, int, error) {
+func (f *fakeDBReadyDeps) ContainerFileExists(name, path string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.execCalls++
-	if f.execErr != nil {
-		return "", "", -1, f.execErr
+	f.existsCalls++
+	if f.existsErr != nil {
+		return false, f.existsErr
 	}
-	if len(f.execResults) == 0 {
-		return "", "", 1, nil
+	if len(f.existsResults) == 0 {
+		return true, nil
 	}
-	idx := f.execResultsIdx
-	if idx >= len(f.execResults) {
-		idx = len(f.execResults) - 1
+	idx := f.existsResultsIdx
+	if idx >= len(f.existsResults) {
+		idx = len(f.existsResults) - 1
 	} else {
-		f.execResultsIdx++
+		f.existsResultsIdx++
 	}
-	return "", "", f.execResults[idx], nil
+	return f.existsResults[idx], nil
 }
 
 func (f *fakeDBReadyDeps) LogsTail(name string, lines int) (string, error) {
@@ -1606,8 +1607,8 @@ func runningRepeated(n int) []podman.ContainerState {
 func TestWaitForDBReady_MarkerAbsentFromFirstPoll(t *testing.T) {
 	t.Parallel()
 	deps := &fakeDBReadyDeps{
-		statuses:    []podman.ContainerState{{Status: "running"}},
-		execResults: []int{0}, // marker gone on the very first probe
+		statuses:      []podman.ContainerState{{Status: "running"}},
+		existsResults: []bool{false}, // marker gone on the very first probe
 	}
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -1616,8 +1617,8 @@ func TestWaitForDBReady_MarkerAbsentFromFirstPoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
-	if deps.execCalls != 1 {
-		t.Errorf("expected exactly 1 exec call, got %d", deps.execCalls)
+	if deps.existsCalls != 1 {
+		t.Errorf("expected exactly 1 exists call, got %d", deps.existsCalls)
 	}
 	// Marker was never observed present → prints "DB ready.", not
 	// "Marker cleared".
@@ -1632,8 +1633,8 @@ func TestWaitForDBReady_MarkerAbsentFromFirstPoll(t *testing.T) {
 func TestWaitForDBReady_MarkerPresentThenAbsent(t *testing.T) {
 	t.Parallel()
 	deps := &fakeDBReadyDeps{
-		statuses:    runningRepeated(1),
-		execResults: []int{1, 1, 1, 0}, // present three times, then cleared
+		statuses:      runningRepeated(1),
+		existsResults: []bool{true, true, true, false}, // present three times, then cleared
 	}
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -1642,8 +1643,8 @@ func TestWaitForDBReady_MarkerPresentThenAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
-	if deps.execCalls != 4 {
-		t.Errorf("expected 4 exec calls, got %d", deps.execCalls)
+	if deps.existsCalls != 4 {
+		t.Errorf("expected 4 exists calls, got %d", deps.existsCalls)
 	}
 	if !strings.Contains(out.String(), "Marker cleared; DB ready.") {
 		t.Errorf("expected 'Marker cleared; DB ready.' in output, got %q", out.String())
@@ -1657,8 +1658,8 @@ func TestWaitForDBReady_ContainerExitedReturnsStartupError(t *testing.T) {
 			{Status: "running"},
 			{Status: "exited", ExitCode: 137},
 		},
-		execResults: []int{1}, // first poll: marker present
-		logsTail:    "boom: OOM killed\n",
+		existsResults: []bool{true}, // first poll: marker present
+		logsTail:      "boom: OOM killed\n",
 	}
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -1691,9 +1692,9 @@ func TestWaitForDBReady_ContainerExitedReturnsStartupError(t *testing.T) {
 func TestWaitForDBReady_TimeoutReturnsTimeoutError(t *testing.T) {
 	t.Parallel()
 	deps := &fakeDBReadyDeps{
-		statuses:    runningRepeated(1),
-		execResults: []int{1}, // marker sticks around forever
-		logsTail:    "still creating...\n",
+		statuses:      runningRepeated(1),
+		existsResults: []bool{true}, // marker sticks around forever
+		logsTail:      "still creating...\n",
 	}
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -1752,11 +1753,16 @@ func TestWaitForDBReady_InspectErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestWaitForDBReady_ExecErrorPropagates(t *testing.T) {
+func TestWaitForDBReady_MarkerProbeErrorPropagates(t *testing.T) {
 	t.Parallel()
+	// A ContainerFileExists error must NOT be silently swallowed —
+	// the whole point of switching from `podman exec test` to
+	// `podman container cp` was to make silent probe failures
+	// impossible. If the probe reports an error, the launcher must
+	// abort instead of misreading it as "marker still present".
 	deps := &fakeDBReadyDeps{
-		statuses: runningRepeated(1),
-		execErr:  fmt.Errorf("exec plumbing broke"),
+		statuses:  runningRepeated(1),
+		existsErr: fmt.Errorf("podman cp plumbing broke"),
 	}
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -1765,8 +1771,8 @@ func TestWaitForDBReady_ExecErrorPropagates(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "exec plumbing broke") {
-		t.Errorf("error should propagate exec failure: %v", err)
+	if !strings.Contains(err.Error(), "podman cp plumbing broke") {
+		t.Errorf("error should propagate probe failure: %v", err)
 	}
 }
 
@@ -1780,7 +1786,7 @@ func TestWaitForDBReady_TransientNonRunningStatesKeepWaiting(t *testing.T) {
 			{Status: "configured"},
 			{Status: "running"},
 		},
-		execResults: []int{0},
+		existsResults: []bool{false},
 	}
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -1789,9 +1795,9 @@ func TestWaitForDBReady_TransientNonRunningStatesKeepWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil (transient states should keep waiting), got %v", err)
 	}
-	// Exec should only fire once, on the "running" poll.
-	if deps.execCalls != 1 {
-		t.Errorf("expected 1 exec call, got %d", deps.execCalls)
+	// The marker probe should only fire once, on the "running" poll.
+	if deps.existsCalls != 1 {
+		t.Errorf("expected 1 exists call, got %d", deps.existsCalls)
 	}
 }
 
@@ -1800,8 +1806,8 @@ func TestWaitForDBReady_EmitsProgressAtInterval(t *testing.T) {
 	// Marker stays present until poll 6; progress interval short
 	// enough that at least one "Waiting for DB..." line appears.
 	deps := &fakeDBReadyDeps{
-		statuses:    runningRepeated(1),
-		execResults: []int{1, 1, 1, 1, 1, 0},
+		statuses:      runningRepeated(1),
+		existsResults: []bool{true, true, true, true, true, false},
 	}
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

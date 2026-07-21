@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -315,13 +316,20 @@ func InspectState(name string) (ContainerState, error) {
 // Exec runs `podman exec <name> <argv...>` and returns the captured
 // stdout, stderr, and the child's exit code.
 //
-// A non-zero exit code is NOT treated as a Go error, because the
-// Phase 16 wait loop's `test ! -e /exa/.exanano-initial-create-in-progress`
-// probe needs to distinguish "the command inside the container said the
-// marker is still there" (exit 1, keep polling) from "podman itself
-// failed to run the command" (spawn error, abort). Genuine podman
-// failures (binary not on PATH, container gone mid-wait, ...) surface
-// as a non-nil error with exitCode == -1.
+// A non-zero exit code is NOT treated as a Go error, because
+// polling probes (see ContainerFileExists) need to distinguish "the
+// command inside the container said no" from "podman itself failed
+// to run the command". Genuine podman failures (binary not on PATH,
+// container gone mid-wait, ...) surface as a non-nil error with
+// exitCode == -1.
+//
+// Caveat: `podman exec` requires the requested command to actually
+// exist inside the container. The exasol/nano image is minimal and
+// does not ship /bin/test, /bin/sh, /bin/ls, or coreutils — attempts
+// to exec any of those return exit 127 (command not found) with a
+// message on stderr. For file-existence probes against Nano use
+// ContainerFileExists instead, which is podman-only and works even
+// against a distroless base.
 func Exec(name string, argv []string) (stdout, stderr string, exitCode int, err error) {
 	full := append([]string{"exec", name}, argv...)
 	cmd := exec.Command(binary, full...)
@@ -342,6 +350,75 @@ func Exec(name string, argv []string) (stdout, stderr string, exitCode int, err 
 		"podman exec %s %s failed to spawn: %w",
 		name, strings.Join(argv, " "), runErr,
 	)
+}
+
+// ContainerFileExists returns whether `path` exists inside the named
+// container's filesystem.
+//
+// Implemented via `podman container cp <name>:<path> -` (with stdout
+// discarded) rather than `podman exec test -e <path>` because the
+// probe must work against distroless / scratch base images that ship
+// no /bin/test, /bin/sh, or coreutils. `podman cp` reads the file
+// via podman's own storage driver, so no in-container binary is
+// required.
+//
+// Semantics:
+//   - podman cp exits 0 → file exists → returns (true, nil).
+//   - podman cp exits non-zero with a "no such file" / "does not
+//     exist in container" style stderr → returns (false, nil).
+//   - Any other non-zero exit (permission denied, container gone,
+//     podman socket broken, ...) surfaces as an error so a genuine
+//     plumbing failure is not silently misread as "file absent".
+//
+// stderr from every failing invocation is included in returned
+// errors so callers can spot silent regressions.
+func ContainerFileExists(name, path string) (bool, error) {
+	cmd := exec.Command(binary, "container", "cp", name+":"+path, "-")
+	cmd.Stdout = io.Discard
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if runErr == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		return false, fmt.Errorf(
+			"podman container cp %s:%s failed to spawn: %w",
+			name, path, runErr,
+		)
+	}
+	errText := strings.TrimSpace(stderr.String())
+	if isPodmanCpMissingPath(errText) {
+		return false, nil
+	}
+	return false, fmt.Errorf(
+		"podman container cp %s:%s failed (exit %d): %s",
+		name, path, exitErr.ExitCode(), errText,
+	)
+}
+
+// isPodmanCpMissingPath returns whether stderr from a failed
+// `podman container cp` invocation indicates that the source path
+// simply does not exist inside the container (as opposed to a
+// genuine plumbing failure).
+//
+// Podman's exact wording has drifted across releases; both current
+// and historical variants are covered here so a podman upgrade in
+// CI does not silently turn "marker gone" into a hard error.
+func isPodmanCpMissingPath(stderr string) bool {
+	needles := []string{
+		"no such file or directory",
+		"does not exist in container",
+		"could not find the file",
+	}
+	lower := strings.ToLower(stderr)
+	for _, n := range needles {
+		if strings.Contains(lower, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // LogsTail returns the last `lines` lines of the named container's
