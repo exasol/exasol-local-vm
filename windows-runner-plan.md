@@ -1297,6 +1297,214 @@ end-to-end CI run for the split will validate itself the next time
 someone runs `task ci-build-windows-launcher` on this branch.
 
 
+## Phase 16 — Block `start` until the initial-create marker clears
+
+> **Landed (Option A).** `startCmd` now blocks after `podman run -d`
+> until either the `.exanano-initial-create-in-progress` marker inside
+> the `exasol-nano-data` volume is gone or a launcher-side timeout
+> expires. See
+> [launcher/windows/main.go](launcher/windows/main.go) (§ Phase 16
+> region) and the new `Exec`/`InspectState`/`LogsTail` helpers in
+> [launcher/windows/internal/podman/podman.go](launcher/windows/internal/podman/podman.go).
+
+Purpose: make `windows-runner start` return only once the DB is
+past its initial-create bootstrap, so the mac-side "container up
+means DB is usable" contract also holds on windows. Also give the
+launcher first-hand evidence (in logs and in exit codes) of the
+`.exanano-initial-create-in-progress` marker lifecycle instead of
+inferring it after the fact from `podman logs`.
+
+Motivation:
+- The current windows `startCmd` returns as soon as `podman run
+  -d` exits, i.e. right after conmon has forked. At that point the
+  Nano image's own `/controller` process has barely started; the
+  `.exanano-initial-create-in-progress` marker inside the
+  `exasol-nano-data` volume may not even exist yet, let alone be
+  cleared. See the diagnostics captured in
+  [ci-downloads/podman-diagnostics/container-logs.txt](ci-downloads/podman-diagnostics/container-logs.txt),
+  where the marker is written at `08:17:43.694` and only cleared
+  at `08:17:52.618` — a ~9 s gap during which `windows-runner
+  start` has already returned success and any follow-up test that
+  hits port 8563 races with the create-in-progress path.
+- The mac guest-side [launcher/assets/init/init-db.sh](launcher/assets/init/init-db.sh)
+  handles the *pre-existing* marker via `recover_incomplete_initial_create`
+  (quarantines `/exa`, starts fresh), but it does not block on the
+  *current* create finishing either. Both platforms should have a
+  symmetric "start = DB reached ready state" contract, which is
+  cleanest to implement in the windows launcher because the Go
+  code already runs on the host and can poll the container state
+  natively.
+- Debugging Phase-16-adjacent issues (see the diagnostics dir
+  above) currently requires a human to run `podman exec` /
+  `podman logs` after the fact. A launcher-side wait loop that
+  emits a structured line per state transition would fold that
+  observation into the normal run.
+
+Proposed contract change for `startCmd`:
+
+1. After `podman run -d` succeeds and before writing
+   `vm-state.json`, call a new `waitForDBReady(ctx, cfg)` helper.
+2. `waitForDBReady` returns `nil` iff the container is running
+   AND the marker file is absent AND the DB process reports
+   ready. On timeout it returns a structured error that includes
+   the last observed marker state and the tail of the container
+   logs so the failure is self-diagnostic.
+3. Timeout default: 300s (matches the mac
+   `TestStartCmdBlocksUntilDBReady`-style ceiling — enough for a
+   cold create on a slow WSL2 machine, tight enough to catch a
+   real hang). Overridable via
+   `EXASOL_LAUNCHER_START_TIMEOUT_SEC` for CI.
+4. `vm-state.json` is only written after `waitForDBReady`
+   succeeds, so any downstream tool reading it can assume the DB
+   is actually reachable on the published ports.
+
+Implementation sketch (three sub-tactics, ordered from cheapest
+to most reliable — pick one or layer them):
+
+- **A. Poll the marker file via `podman exec`.** No extra
+  containers, no volume plumbing:
+  ```
+  podman exec <container> test ! -e /exa/.exanano-initial-create-in-progress
+  ```
+  Exits 0 once the marker is gone, non-zero while it exists (or
+  while the container is still starting up and `exec` itself
+  fails). Cheap (a fork per poll), no runtime dependencies,
+  works identically on mac and windows if we ever want to port
+  it. Downside: exits with non-zero for two different reasons
+  (marker present vs. container not yet ready for exec), so the
+  helper has to distinguish "keep waiting" from "give up" —
+  which means also polling `podman inspect --format
+  '{{.State.Status}}'` to detect an early `exited`/`removing`
+  transition and fail fast instead of timing out.
+- **B. Sidecar snapshotter attached to the same volume.** Start
+  a short-lived `podman run --rm -d -v exasol-nano-data:/exa:ro
+  alpine sh -c '…'` at the same time as the main container that
+  either (i) uses `inotifywait` to log every event on
+  `/exa/.exanano-initial-create-in-progress` and exits when the
+  marker is deleted, or (ii) polls with `stat` every 500 ms.
+  The launcher waits for the sidecar to exit 0. Downside:
+  requires an extra image with `inotify-tools` (adds MBs) or
+  accepts the polling flavor; also spawns a second container
+  the user did not ask for.
+- **C. Podman healthcheck on the DB container.** Add
+  `--health-cmd 'test ! -e /exa/.exanano-initial-create-in-progress
+  && exaplus -c localhost:$DB_PORT -u sys -p ... -q "select 1;"'`
+  and `--health-interval` / `--health-timeout` /
+  `--health-retries` in `buildPodmanRunArgs`, then have the
+  launcher poll `podman inspect --format
+  '{{.State.Health.Status}}'` until it reads `healthy`. Downside:
+  requires embedding SYS credentials in the healthcheck (or
+  relying on Nano's yet-to-exist unauthenticated liveness
+  endpoint), and adds a permanent runtime cost every N seconds
+  for the lifetime of the container — not just during startup.
+
+Recommended: start with **A** (fewest moving parts, no changes
+to `buildPodmanRunArgs`, no new images) and layer **B** in only
+if inotify-quality event logs turn out to be needed for
+debugging future regressions. **C** is a natural next step
+once/if Nano exposes a credential-free readiness endpoint.
+
+New `internal/podman/` surface:
+
+- `Exec(name string, argv []string) (stdout, stderr string, exitCode int, err error)`
+  — thin wrapper around `podman exec <name> <argv...>` that
+  captures both streams and returns the child's exit code
+  without treating a non-zero exit as a Go error (so the caller
+  can distinguish "marker still present, keep polling" from
+  "podman itself failed, abort").
+- `InspectState(name string) (podman.ContainerState, error)`
+  where `ContainerState` is a small struct exposing at least
+  `Status string` (`created|running|exited|removing|…`) and
+  `ExitCode int`. Used by the wait loop to fail fast if the
+  container exits during startup instead of continuing to poll
+  a dead container for the timeout window.
+
+New `internal/dbready/` package (or just a `waitForDBReady`
+function in `main.go` — bike-shed later): pure Go, takes a
+`context.Context`, a `dbReadyDeps` interface with `Exec` and
+`InspectState` methods, a poll interval, and a timeout. All
+time-based inputs come through parameters so the unit tests
+can drive the loop with a fake clock and a fake podman shim
+without sleeping.
+
+Wait-loop pseudocode:
+
+```
+poll every 500 ms:
+  st, err := deps.InspectState(name)
+  if err != nil: return err (podman broken)
+  switch st.Status:
+    case "created", "running":
+      _, _, ec, err := deps.Exec(name, []string{"test", "!", "-e",
+        "/exa/.exanano-initial-create-in-progress"})
+      if err != nil: return err (podman broken)
+      if ec == 0:  // marker cleared
+        return nil
+      // else keep waiting
+    case "exited", "removing", "stopped":
+      return &StartupFailedError{Status: st.Status, ExitCode: st.ExitCode,
+        LogsTail: fetchLogsTail(name, 200)}
+    default:
+      // "configured", "paused" etc: treat as transient, keep waiting
+  on ctx.Done(): return &StartupTimeoutError{...}
+```
+
+Progress reporting:
+
+- Emit one line to stdout every 5 s: `"Waiting for DB
+  initial-create to complete... (elapsed 15s, marker: present)"`.
+  Silent on the polling frequency itself so we do not spam the
+  console; a stateful "marker went from present to absent"
+  transition emits a distinct `"Marker cleared; DB ready"`
+  line.
+- On timeout, dump the last 200 lines of `podman logs
+  <container>` to stderr under a
+  `-- container-logs (tail) --` banner so the user does not
+  need to run `podman logs` themselves to file a bug.
+
+Test plan:
+
+- Unit tests for `waitForDBReady` with a fake `dbReadyDeps`
+  covering: (a) marker absent from the first poll → returns nil
+  immediately, (b) marker present then absent → returns nil
+  after N polls, (c) container transitions to `exited` mid-wait
+  → returns `StartupFailedError` with logs tail, (d) context
+  cancelled before marker clears → returns
+  `StartupTimeoutError`, (e) `podman exec` returns a genuine
+  error (e.g. `container not found`) → propagates as-is.
+- Unit tests for the new `Exec` and `InspectState` shims using
+  the existing fake-podman-shell-script rig in
+  [launcher/windows/internal/podman/podman_test.go](launcher/windows/internal/podman/podman_test.go).
+- Integration test (windows-tagged): stub Nano image whose
+  entrypoint sleeps 3 s, `touch /exa/.exanano-initial-create-in-progress`,
+  sleeps another 3 s, `rm` the marker. `windows-runner start`
+  must not return before ~6 s and must succeed. Complement with
+  a "never clears" case that exits with the timeout error and
+  the logs tail on stderr.
+- No changes needed in
+  [tests/status_test.go](tests/status_test.go) — the existing
+  "status is running" checks continue to pass because
+  `waitForDBReady` runs before `writeVMState`, so a successful
+  `start` still leaves the same on-disk state.
+
+Cross-platform note: this change is intentionally windows-only
+for now. The mac guest-side `init-db.sh` already blocks on Nano's
+own `-w` / "Database is now up and running!" line via
+[launcher/assets/init/init-db.sh](launcher/assets/init/init-db.sh),
+so the mac `launcher start` inherits that block for free. If a
+future refactor consolidates the marker-recovery logic into a
+shared helper (see the "mac-side symmetry" TODO at the top of
+[launcher/windows/main.go](launcher/windows/main.go)), the mac
+path can adopt the same `waitForDBReady` primitive.
+
+Verification: unit tests for the wait loop and the new podman
+shims pass; a hand-run `windows-runner start` on a machine with
+a stale marker (produced by killing an in-progress start) shows
+the `"Waiting for DB initial-create..."` lines, blocks until the
+Nano internal `-mode=create` retry finishes, and only then
+returns with `Started. VM state written to vm-state.json`.
+
+
 # Architechtural draft
 
 Stakeholder-facing summary of the proposed windows launcher architecture.

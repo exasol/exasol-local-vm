@@ -11,6 +11,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -498,6 +499,30 @@ func startCmd(
 		return err
 	}
 
+	// Phase 16: block until the DB container has cleared its
+	// initial-create marker. Without this, startCmd returns as soon as
+	// `podman run -d` forks — well before Nano's controller has
+	// finished the ~9s create — and any downstream test that hits the
+	// DB port races with the create-in-progress path. See
+	// windows-runner-plan.md § Phase 16 and
+	// ci-downloads/podman-diagnostics/container-logs.txt for the
+	// reference timing that motivated this block.
+	timeout := resolveDBReadyTimeout()
+	fmt.Printf("Waiting up to %s for DB initial-create to complete...\n",
+		timeout.Round(time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := waitForDBReady(
+		ctx,
+		newDBReadyDeps(),
+		cfg.ContainerName,
+		dbReadyPollInterval,
+		dbReadyProgressInterval,
+		os.Stdout,
+	); err != nil {
+		return err
+	}
+
 	// Persist the newly-agreed data size so subsequent starts and
 	// resize-data invocations can enforce the grow-only rule.
 	if current != dataSizeGB {
@@ -809,6 +834,230 @@ func writeVMState(chosenPorts map[string]int) error {
 		return fmt.Errorf("failed to write vm-state: %w", err)
 	}
 	return nil
+}
+
+// --- Phase 16: block start until initial-create marker clears ---------
+
+// dbReadyMarkerPath is the path inside the DB container that Nano's
+// controller creates while an initial DB create is in progress and
+// removes on successful completion. Matches EXA_INITIAL_CREATE_MARKER
+// in [launcher/assets/init/init-db.sh].
+const dbReadyMarkerPath = "/exa/.exanano-initial-create-in-progress"
+
+// dbReadyPollInterval is how often waitForDBReady polls the container
+// for its readiness state. Short enough that the "marker cleared"
+// transition is caught within human-noticeable latency; long enough
+// that we do not fork thousands of `podman exec` calls during a
+// normal ~9s create (see ci-downloads/podman-diagnostics/container-logs.txt
+// for the reference timing).
+const dbReadyPollInterval = 500 * time.Millisecond
+
+// dbReadyProgressInterval controls how often "Waiting for DB..."
+// lines are emitted to stdout. Chosen so a normal ~9s create produces
+// ~2 progress lines and a slow WSL2 machine's ~60s create produces
+// ~12, without spamming the console at the pollInterval rate.
+const dbReadyProgressInterval = 5 * time.Second
+
+// dbReadyDefaultTimeoutSeconds is the fallback timeout (in seconds)
+// applied when EXASOL_LAUNCHER_START_TIMEOUT_SEC is unset, empty,
+// unparseable, or non-positive. Sized to cover a cold create on a
+// slow WSL2 machine while still catching a genuine hang.
+const dbReadyDefaultTimeoutSeconds = 300
+
+// dbReadyLogsTailLines is how many lines of `podman logs` to embed in
+// a timeout / startup-failure error so the failure is self-diagnostic
+// without a follow-up `podman logs` invocation.
+const dbReadyLogsTailLines = 200
+
+// dbReadyTimeoutEnv is the environment variable that overrides the
+// default readiness timeout. Value is parsed as a positive integer
+// number of seconds; anything else falls back to the default.
+const dbReadyTimeoutEnv = "EXASOL_LAUNCHER_START_TIMEOUT_SEC"
+
+// dbReadyDeps abstracts the three podman calls waitForDBReady makes
+// so unit tests can drive the state machine with a fake instead of a
+// live container. Production code uses livePodmanDeps.
+type dbReadyDeps interface {
+	InspectState(name string) (podman.ContainerState, error)
+	Exec(name string, argv []string) (stdout, stderr string, exitCode int, err error)
+	LogsTail(name string, lines int) (string, error)
+}
+
+// livePodmanDeps is the production dbReadyDeps: every method is a
+// direct call to the internal/podman helpers.
+type livePodmanDeps struct{}
+
+func (livePodmanDeps) InspectState(name string) (podman.ContainerState, error) {
+	return podman.InspectState(name)
+}
+
+func (livePodmanDeps) Exec(name string, argv []string) (string, string, int, error) {
+	return podman.Exec(name, argv)
+}
+
+func (livePodmanDeps) LogsTail(name string, lines int) (string, error) {
+	return podman.LogsTail(name, lines)
+}
+
+// newDBReadyDeps constructs the dbReadyDeps used by startCmd. Kept as
+// a package-level var (rather than a bare constructor call) so tests
+// can swap in a fake without piping a factory through every function
+// signature between main() and waitForDBReady — same pattern the
+// Phase-14 promptIn/promptOut helpers use.
+var newDBReadyDeps = func() dbReadyDeps { return livePodmanDeps{} }
+
+// dbReadyStartupError describes an early container exit observed
+// during startCmd's wait phase. The tail of the container logs is
+// embedded so the caller does not need to run `podman logs`
+// separately to diagnose.
+type dbReadyStartupError struct {
+	Status   string
+	ExitCode int
+	LogsTail string
+}
+
+func (e *dbReadyStartupError) Error() string {
+	msg := fmt.Sprintf(
+		"DB container exited during startup (status=%s exit_code=%d)",
+		e.Status, e.ExitCode,
+	)
+	if strings.TrimSpace(e.LogsTail) != "" {
+		msg += "\n-- container logs (tail) --\n" + strings.TrimRight(e.LogsTail, "\n")
+	}
+	return msg
+}
+
+// dbReadyTimeoutError describes a wait that never observed the marker
+// clear before ctx expired. Elapsed is the actual wall time waited
+// (not the configured timeout) so slow-clock CI runs get an accurate
+// number in the error text.
+type dbReadyTimeoutError struct {
+	Elapsed    time.Duration
+	LastStatus string
+	LogsTail   string
+}
+
+func (e *dbReadyTimeoutError) Error() string {
+	msg := fmt.Sprintf(
+		"timed out after %s waiting for DB initial-create marker to clear "+
+			"(last container status=%s). Set %s=<seconds> to override.",
+		e.Elapsed.Round(time.Second), e.LastStatus, dbReadyTimeoutEnv,
+	)
+	if strings.TrimSpace(e.LogsTail) != "" {
+		msg += "\n-- container logs (tail) --\n" + strings.TrimRight(e.LogsTail, "\n")
+	}
+	return msg
+}
+
+// resolveDBReadyTimeout picks the effective timeout for waitForDBReady.
+// Reads dbReadyTimeoutEnv; falls back to dbReadyDefaultTimeoutSeconds
+// on unset, empty, unparseable, or non-positive values. Split out so
+// tests can drive it via t.Setenv without touching waitForDBReady.
+func resolveDBReadyTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(dbReadyTimeoutEnv))
+	if raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return time.Duration(dbReadyDefaultTimeoutSeconds) * time.Second
+}
+
+// waitForDBReady blocks until the DB container has cleared its
+// initial-create marker, or until ctx is cancelled.
+//
+// State machine per poll:
+//   - InspectState reports "running": exec `test ! -e <marker>` in
+//     the container. Exit 0 → marker gone → return nil. Non-zero →
+//     marker still present → keep waiting.
+//   - InspectState reports a terminal status ("exited", "removing",
+//     "stopped", "dead"): return *dbReadyStartupError with the tail
+//     of `podman logs` embedded, so a wait timeout is not paid for a
+//     container that has already given up.
+//   - Anything else ("created", "configured", "paused", ...): treat
+//     as transient, keep waiting.
+//
+// Every progressInterval a "Waiting for DB..." line is emitted to
+// out. On the first successful marker-cleared check the function
+// prints either "DB ready." (if the marker was never observed as
+// present) or "Marker cleared; DB ready." (if it was) so the
+// launcher log unambiguously distinguishes "there was no create to
+// wait for" from "we waited it out".
+func waitForDBReady(
+	ctx context.Context,
+	deps dbReadyDeps,
+	containerName string,
+	pollInterval, progressInterval time.Duration,
+	out io.Writer,
+) error {
+	start := time.Now()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	lastProgress := start
+	var lastStatus string
+	markerSeen := false
+
+	for {
+		st, err := deps.InspectState(containerName)
+		if err != nil {
+			return fmt.Errorf("failed to inspect container %q: %w", containerName, err)
+		}
+		lastStatus = st.Status
+
+		switch st.Status {
+		case "running":
+			_, _, ec, err := deps.Exec(containerName,
+				[]string{"test", "!", "-e", dbReadyMarkerPath})
+			if err != nil {
+				return fmt.Errorf(
+					"failed to probe DB readiness marker via podman exec on %q: %w",
+					containerName, err,
+				)
+			}
+			if ec == 0 {
+				if markerSeen {
+					fmt.Fprintln(out, "Marker cleared; DB ready.")
+				} else {
+					fmt.Fprintln(out, "DB ready.")
+				}
+				return nil
+			}
+			markerSeen = true
+		case "exited", "removing", "stopped", "dead":
+			tail, _ := deps.LogsTail(containerName, dbReadyLogsTailLines)
+			return &dbReadyStartupError{
+				Status:   st.Status,
+				ExitCode: st.ExitCode,
+				LogsTail: tail,
+			}
+		default:
+			// "created", "configured", "paused", or podman-version-specific
+			// interstitial states: keep waiting.
+		}
+
+		if since := time.Since(lastProgress); since >= progressInterval {
+			marker := "present"
+			if lastStatus != "running" {
+				marker = "container " + lastStatus
+			}
+			fmt.Fprintf(out,
+				"Waiting for DB initial-create to complete... (elapsed %s, marker: %s)\n",
+				time.Since(start).Round(time.Second), marker,
+			)
+			lastProgress = time.Now()
+		}
+
+		select {
+		case <-ctx.Done():
+			tail, _ := deps.LogsTail(containerName, dbReadyLogsTailLines)
+			return &dbReadyTimeoutError{
+				Elapsed:    time.Since(start),
+				LastStatus: lastStatus,
+				LogsTail:   tail,
+			}
+		case <-ticker.C:
+		}
+	}
 }
 
 func stopCmd() error {

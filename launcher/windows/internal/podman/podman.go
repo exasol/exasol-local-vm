@@ -39,11 +39,10 @@ func Available() error {
 }
 
 // MachineRunning checks that at least one podman machine is in the
-// "running" state. On windows/macOS podman ships its own WSL2/vfkit
-// backing VM which must be started before any container can run.
+// "running" state.
 //
 // The command output has one State value per configured machine. As long
-// as any of them reports "running" (case-insensitive) we consider the
+// as any of them reports "running" we consider the
 // prerequisite met.
 func MachineRunning() error {
 	cmd := exec.Command(binary, "machine", "inspect", "--format", "{{.State}}")
@@ -96,8 +95,7 @@ func LoadImage(tarballPath string) (string, error) {
 }
 
 // parseLoadedImage extracts the first image reference from `podman load`
-// stdout. Split out for direct unit testing so we do not need a fake
-// podman for pure parsing coverage.
+// stdout.
 func parseLoadedImage(output string) (string, error) {
 	prefixes := []string{"Loaded image: ", "Loaded image(s): "}
 	scanner := bufio.NewScanner(strings.NewReader(output))
@@ -166,9 +164,6 @@ func ContainerRunning(name string) (bool, error) {
 // Stop gracefully stops the named container, allowing up to timeout for a
 // clean shutdown before SIGKILL. Idempotent: uses `podman stop --ignore`
 // which succeeds if the container is already stopped or does not exist.
-//
-// timeout is rounded down to whole seconds; a negative timeout is clamped
-// to 0 (immediate SIGKILL).
 func Stop(name string, timeout time.Duration) error {
 	seconds := int(timeout.Seconds())
 	if seconds < 0 {
@@ -264,3 +259,121 @@ func StartMachine() error {
 	}
 	return nil
 }
+
+// ContainerState reflects the subset of `podman container inspect
+// --format ...` output that Phase 16's waitForDBReady needs.
+//
+// Status is one of podman's lifecycle strings — typically "created",
+// "running", "paused", "exited", "removing", or "dead". ExitCode is
+// only meaningful once Status has reached a terminal value ("exited",
+// "removing", "stopped", "dead").
+type ContainerState struct {
+	Status   string
+	ExitCode int
+}
+
+// InspectState returns the current lifecycle status and exit code of
+// the named container. Used by the Phase 16 wait loop to detect an
+// early exit (so a launcher-side timeout does not sit polling a dead
+// container until the deadline).
+//
+// The output format is deliberately a single line of two
+// space-separated fields, mirroring the shape stopCmd's inspect uses
+// so the fake-shim tests can dispatch on $2 alone. Callers must not
+// treat "unexpected format" as "container missing" — a missing
+// container makes podman itself exit non-zero, which surfaces here as
+// a wrapped error before parsing runs.
+func InspectState(name string) (ContainerState, error) {
+	cmd := exec.Command(binary, "container", "inspect",
+		"--format", "{{.State.Status}} {{.State.ExitCode}}", name)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return ContainerState{}, fmt.Errorf(
+			"podman container inspect %s failed (%w): %s",
+			name, err, strings.TrimSpace(stderr.String()),
+		)
+	}
+	fields := strings.Fields(strings.TrimSpace(stdout.String()))
+	if len(fields) != 2 {
+		return ContainerState{}, fmt.Errorf(
+			"unexpected podman container inspect output for %s: %q",
+			name, strings.TrimSpace(stdout.String()),
+		)
+	}
+	ec, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return ContainerState{}, fmt.Errorf(
+			"invalid exit code %q from podman container inspect for %s: %w",
+			fields[1], name, err,
+		)
+	}
+	return ContainerState{Status: fields[0], ExitCode: ec}, nil
+}
+
+// Exec runs `podman exec <name> <argv...>` and returns the captured
+// stdout, stderr, and the child's exit code.
+//
+// A non-zero exit code is NOT treated as a Go error, because the
+// Phase 16 wait loop's `test ! -e /exa/.exanano-initial-create-in-progress`
+// probe needs to distinguish "the command inside the container said the
+// marker is still there" (exit 1, keep polling) from "podman itself
+// failed to run the command" (spawn error, abort). Genuine podman
+// failures (binary not on PATH, container gone mid-wait, ...) surface
+// as a non-nil error with exitCode == -1.
+func Exec(name string, argv []string) (stdout, stderr string, exitCode int, err error) {
+	full := append([]string{"exec", name}, argv...)
+	cmd := exec.Command(binary, full...)
+	var out, errBuf bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errBuf
+	runErr := cmd.Run()
+	stdout = out.String()
+	stderr = errBuf.String()
+	if runErr == nil {
+		return stdout, stderr, 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		return stdout, stderr, exitErr.ExitCode(), nil
+	}
+	return stdout, stderr, -1, fmt.Errorf(
+		"podman exec %s %s failed to spawn: %w",
+		name, strings.Join(argv, " "), runErr,
+	)
+}
+
+// LogsTail returns the last `lines` lines of the named container's
+// podman-managed log stream. Passes --tail to keep the output bounded
+// when a container has produced megabytes of logs. A non-positive
+// `lines` value is normalised to logsTailDefaultLines so callers can
+// pass through a config value without a pre-check.
+//
+// Both stdout and stderr from `podman logs` are returned in the
+// combined output (podman writes container stderr onto its own
+// stderr; the launcher-facing consumer is a debug tail, so we merge
+// both streams). A non-zero exit from `podman logs` (e.g. container
+// gone) is returned as an error with whatever stderr podman emitted
+// so the caller can still surface it in a diagnostic message.
+func LogsTail(name string, lines int) (string, error) {
+	if lines <= 0 {
+		lines = logsTailDefaultLines
+	}
+	cmd := exec.Command(binary, "logs", "--tail", strconv.Itoa(lines), name)
+	var combined bytes.Buffer
+	cmd.Stdout = &combined
+	cmd.Stderr = &combined
+	if err := cmd.Run(); err != nil {
+		return combined.String(), fmt.Errorf(
+			"podman logs --tail %d %s failed: %w", lines, name, err,
+		)
+	}
+	return combined.String(), nil
+}
+
+// logsTailDefaultLines is the fallback bound applied when a caller
+// passes a non-positive `lines` argument to LogsTail. Kept as a
+// package constant so both LogsTail and its tests reference the same
+// value.
+const logsTailDefaultLines = 200

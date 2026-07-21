@@ -6,6 +6,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,9 +15,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ulikunitz/xz"
+
+	"windows-runner/internal/podman"
 )
 
 // TestMain forces all tests into the non-interactive branch of the
@@ -1512,5 +1517,358 @@ func TestInitCmdSucceedsWhenPodmanCheckSoftFails(t *testing.T) {
 	}
 	if _, err := os.Stat(runtimeConfigPath); err != nil {
 		t.Errorf("%s should exist: %v", runtimeConfigPath, err)
+	}
+}
+
+// --- Phase 16: waitForDBReady ------------------------------------------
+
+// fakeDBReadyDeps drives waitForDBReady from prebuilt scripts so unit
+// tests do not need a live container. Both statuses and execResults
+// advance one entry per call; when exhausted they stick at the last
+// entry (i.e. behave as if the container settled into that state). A
+// nil execFn means "always return exit 1" (marker still present) —
+// convenient for the timeout tests where the marker never clears.
+type fakeDBReadyDeps struct {
+	mu sync.Mutex
+
+	statuses    []podman.ContainerState
+	statusesIdx int
+	inspectErr  error
+
+	execResults    []int
+	execResultsIdx int
+	execErr        error
+
+	logsTail string
+	logsErr  error
+
+	inspectCalls int
+	execCalls    int
+	logsCalls    int
+}
+
+func (f *fakeDBReadyDeps) InspectState(name string) (podman.ContainerState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inspectCalls++
+	if f.inspectErr != nil {
+		return podman.ContainerState{}, f.inspectErr
+	}
+	if len(f.statuses) == 0 {
+		return podman.ContainerState{Status: "running"}, nil
+	}
+	idx := f.statusesIdx
+	if idx >= len(f.statuses) {
+		idx = len(f.statuses) - 1
+	} else {
+		f.statusesIdx++
+	}
+	return f.statuses[idx], nil
+}
+
+func (f *fakeDBReadyDeps) Exec(name string, argv []string) (string, string, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execCalls++
+	if f.execErr != nil {
+		return "", "", -1, f.execErr
+	}
+	if len(f.execResults) == 0 {
+		return "", "", 1, nil
+	}
+	idx := f.execResultsIdx
+	if idx >= len(f.execResults) {
+		idx = len(f.execResults) - 1
+	} else {
+		f.execResultsIdx++
+	}
+	return "", "", f.execResults[idx], nil
+}
+
+func (f *fakeDBReadyDeps) LogsTail(name string, lines int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logsCalls++
+	return f.logsTail, f.logsErr
+}
+
+// runningRepeated returns a slice of `n` "running" ContainerStates.
+// Used to keep InspectState answering "running" past the exhaustion
+// point (see fakeDBReadyDeps sticky-last-entry semantics).
+func runningRepeated(n int) []podman.ContainerState {
+	out := make([]podman.ContainerState, n)
+	for i := range out {
+		out[i] = podman.ContainerState{Status: "running"}
+	}
+	return out
+}
+
+func TestWaitForDBReady_MarkerAbsentFromFirstPoll(t *testing.T) {
+	t.Parallel()
+	deps := &fakeDBReadyDeps{
+		statuses:    []podman.ContainerState{{Status: "running"}},
+		execResults: []int{0}, // marker gone on the very first probe
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := waitForDBReady(ctx, deps, "c", 5*time.Millisecond, time.Hour, &out)
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if deps.execCalls != 1 {
+		t.Errorf("expected exactly 1 exec call, got %d", deps.execCalls)
+	}
+	// Marker was never observed present → prints "DB ready.", not
+	// "Marker cleared".
+	if !strings.Contains(out.String(), "DB ready.") {
+		t.Errorf("expected 'DB ready.' in output, got %q", out.String())
+	}
+	if strings.Contains(out.String(), "Marker cleared") {
+		t.Errorf("unexpected 'Marker cleared' when marker was never present: %q", out.String())
+	}
+}
+
+func TestWaitForDBReady_MarkerPresentThenAbsent(t *testing.T) {
+	t.Parallel()
+	deps := &fakeDBReadyDeps{
+		statuses:    runningRepeated(1),
+		execResults: []int{1, 1, 1, 0}, // present three times, then cleared
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waitForDBReady(ctx, deps, "c", 1*time.Millisecond, time.Hour, &out)
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if deps.execCalls != 4 {
+		t.Errorf("expected 4 exec calls, got %d", deps.execCalls)
+	}
+	if !strings.Contains(out.String(), "Marker cleared; DB ready.") {
+		t.Errorf("expected 'Marker cleared; DB ready.' in output, got %q", out.String())
+	}
+}
+
+func TestWaitForDBReady_ContainerExitedReturnsStartupError(t *testing.T) {
+	t.Parallel()
+	deps := &fakeDBReadyDeps{
+		statuses: []podman.ContainerState{
+			{Status: "running"},
+			{Status: "exited", ExitCode: 137},
+		},
+		execResults: []int{1}, // first poll: marker present
+		logsTail:    "boom: OOM killed\n",
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waitForDBReady(ctx, deps, "c", 1*time.Millisecond, time.Hour, &out)
+	if err == nil {
+		t.Fatal("expected startup error, got nil")
+	}
+	var startErr *dbReadyStartupError
+	if !errors.As(err, &startErr) {
+		t.Fatalf("expected *dbReadyStartupError, got %T (%v)", err, err)
+	}
+	if startErr.Status != "exited" {
+		t.Errorf("Status: want 'exited', got %q", startErr.Status)
+	}
+	if startErr.ExitCode != 137 {
+		t.Errorf("ExitCode: want 137, got %d", startErr.ExitCode)
+	}
+	if !strings.Contains(err.Error(), "boom: OOM killed") {
+		t.Errorf("error should embed logs tail: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit_code=137") {
+		t.Errorf("error should mention exit code: %v", err)
+	}
+	if deps.logsCalls == 0 {
+		t.Errorf("LogsTail should have been called at least once")
+	}
+}
+
+func TestWaitForDBReady_TimeoutReturnsTimeoutError(t *testing.T) {
+	t.Parallel()
+	deps := &fakeDBReadyDeps{
+		statuses:    runningRepeated(1),
+		execResults: []int{1}, // marker sticks around forever
+		logsTail:    "still creating...\n",
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := waitForDBReady(ctx, deps, "c", 2*time.Millisecond, time.Hour, &out)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	var toErr *dbReadyTimeoutError
+	if !errors.As(err, &toErr) {
+		t.Fatalf("expected *dbReadyTimeoutError, got %T (%v)", err, err)
+	}
+	if toErr.LastStatus != "running" {
+		t.Errorf("LastStatus: want 'running', got %q", toErr.LastStatus)
+	}
+	if !strings.Contains(err.Error(), "still creating") {
+		t.Errorf("timeout error should embed logs tail: %v", err)
+	}
+	if !strings.Contains(err.Error(), dbReadyTimeoutEnv) {
+		t.Errorf("timeout error should mention the override env var %q: %v", dbReadyTimeoutEnv, err)
+	}
+	// Elapsed must be > 0 and at most a reasonable multiple of the
+	// configured 20ms so a slow CI runner does not fail us.
+	if toErr.Elapsed <= 0 {
+		t.Errorf("Elapsed should be positive, got %v", toErr.Elapsed)
+	}
+	if toErr.Elapsed > 5*time.Second {
+		t.Errorf("Elapsed unreasonably large: %v", toErr.Elapsed)
+	}
+}
+
+func TestWaitForDBReady_InspectErrorPropagates(t *testing.T) {
+	t.Parallel()
+	deps := &fakeDBReadyDeps{
+		inspectErr: fmt.Errorf("podman socket gone"),
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waitForDBReady(ctx, deps, "c", 5*time.Millisecond, time.Hour, &out)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "podman socket gone") {
+		t.Errorf("error should propagate inspect failure: %v", err)
+	}
+	// Neither of the timeout nor startup wrappers should be applied to a
+	// genuine podman plumbing failure — the caller wants the raw cause.
+	var toErr *dbReadyTimeoutError
+	if errors.As(err, &toErr) {
+		t.Errorf("plumbing failure should not be wrapped as dbReadyTimeoutError: %v", err)
+	}
+	var startErr *dbReadyStartupError
+	if errors.As(err, &startErr) {
+		t.Errorf("plumbing failure should not be wrapped as dbReadyStartupError: %v", err)
+	}
+}
+
+func TestWaitForDBReady_ExecErrorPropagates(t *testing.T) {
+	t.Parallel()
+	deps := &fakeDBReadyDeps{
+		statuses: runningRepeated(1),
+		execErr:  fmt.Errorf("exec plumbing broke"),
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waitForDBReady(ctx, deps, "c", 5*time.Millisecond, time.Hour, &out)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exec plumbing broke") {
+		t.Errorf("error should propagate exec failure: %v", err)
+	}
+}
+
+func TestWaitForDBReady_TransientNonRunningStatesKeepWaiting(t *testing.T) {
+	t.Parallel()
+	// "created" then "running" + marker cleared. Should NOT return an
+	// error for the "created" interstitial.
+	deps := &fakeDBReadyDeps{
+		statuses: []podman.ContainerState{
+			{Status: "created"},
+			{Status: "configured"},
+			{Status: "running"},
+		},
+		execResults: []int{0},
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waitForDBReady(ctx, deps, "c", 1*time.Millisecond, time.Hour, &out)
+	if err != nil {
+		t.Fatalf("expected nil (transient states should keep waiting), got %v", err)
+	}
+	// Exec should only fire once, on the "running" poll.
+	if deps.execCalls != 1 {
+		t.Errorf("expected 1 exec call, got %d", deps.execCalls)
+	}
+}
+
+func TestWaitForDBReady_EmitsProgressAtInterval(t *testing.T) {
+	t.Parallel()
+	// Marker stays present until poll 6; progress interval short
+	// enough that at least one "Waiting for DB..." line appears.
+	deps := &fakeDBReadyDeps{
+		statuses:    runningRepeated(1),
+		execResults: []int{1, 1, 1, 1, 1, 0},
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := waitForDBReady(ctx, deps, "c", 5*time.Millisecond, 10*time.Millisecond, &out)
+	if err != nil {
+		t.Fatalf("expected nil, got %v", err)
+	}
+	if !strings.Contains(out.String(), "Waiting for DB initial-create to complete") {
+		t.Errorf("expected progress line, got: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "marker: present") {
+		t.Errorf("progress line should mention marker state: %q", out.String())
+	}
+}
+
+func TestResolveDBReadyTimeout(t *testing.T) {
+	def := time.Duration(dbReadyDefaultTimeoutSeconds) * time.Second
+	cases := []struct {
+		name string
+		env  string
+		set  bool
+		want time.Duration
+	}{
+		{"unset", "", false, def},
+		{"empty", "", true, def},
+		{"whitespace", "   ", true, def},
+		{"unparseable", "not-a-number", true, def},
+		{"zero", "0", true, def},
+		{"negative", "-5", true, def},
+		{"positive", "42", true, 42 * time.Second},
+		{"large", "3600", true, 3600 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv(dbReadyTimeoutEnv, tc.env)
+			} else {
+				t.Setenv(dbReadyTimeoutEnv, "")
+				os.Unsetenv(dbReadyTimeoutEnv)
+			}
+			got := resolveDBReadyTimeout()
+			if got != tc.want {
+				t.Errorf("resolveDBReadyTimeout()=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDBReadyStartupError_OmitsLogsSectionWhenEmpty(t *testing.T) {
+	e := &dbReadyStartupError{Status: "exited", ExitCode: 1, LogsTail: ""}
+	msg := e.Error()
+	if strings.Contains(msg, "container logs (tail)") {
+		t.Errorf("empty logs tail should not produce the logs banner: %q", msg)
+	}
+	if !strings.Contains(msg, "exit_code=1") {
+		t.Errorf("expected exit_code in message: %q", msg)
+	}
+}
+
+func TestDBReadyTimeoutError_OmitsLogsSectionWhenEmpty(t *testing.T) {
+	e := &dbReadyTimeoutError{Elapsed: 3 * time.Second, LastStatus: "running", LogsTail: ""}
+	msg := e.Error()
+	if strings.Contains(msg, "container logs (tail)") {
+		t.Errorf("empty logs tail should not produce the logs banner: %q", msg)
+	}
+	if !strings.Contains(msg, "last container status=running") {
+		t.Errorf("expected last container status in message: %q", msg)
 	}
 }

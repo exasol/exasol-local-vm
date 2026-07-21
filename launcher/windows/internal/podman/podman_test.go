@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -480,6 +481,212 @@ func TestStartMachine_PodmanFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "podman machine start failed") {
 		t.Errorf("error should mention the command: %v", err)
+	}
+}
+
+// --- Phase 16: InspectState / Exec / LogsTail -------------------------
+
+func TestInspectState_Success(t *testing.T) {
+	logPath := installFakePodman(t, `echo "running 0"; exit 0`)
+	got, err := InspectState("my-container")
+	if err != nil {
+		t.Fatalf("InspectState() unexpected error: %v", err)
+	}
+	if got.Status != "running" || got.ExitCode != 0 {
+		t.Errorf("state mismatch: got %+v, want {running 0}", got)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(calls), calls)
+	}
+	wantArgv := []string{
+		"container", "inspect", "--format",
+		"{{.State.Status}} {{.State.ExitCode}}", "my-container",
+	}
+	if got := calls[0]; !slicesEqual(got, wantArgv) {
+		t.Errorf("argv mismatch: want %v, got %v", wantArgv, got)
+	}
+}
+
+func TestInspectState_ExitedWithNonZeroExitCode(t *testing.T) {
+	installFakePodman(t, `echo "exited 137"; exit 0`)
+	got, err := InspectState("dead-container")
+	if err != nil {
+		t.Fatalf("InspectState() unexpected error: %v", err)
+	}
+	if got.Status != "exited" {
+		t.Errorf("Status: want %q, got %q", "exited", got.Status)
+	}
+	if got.ExitCode != 137 {
+		t.Errorf("ExitCode: want 137, got %d", got.ExitCode)
+	}
+}
+
+func TestInspectState_PodmanFails(t *testing.T) {
+	// Missing container is podman's own error path (exits non-zero).
+	installFakePodman(t, `echo "no such container: gone" >&2; exit 125`)
+	_, err := InspectState("gone")
+	if err == nil {
+		t.Fatal("expected error when podman container inspect fails")
+	}
+	if !strings.Contains(err.Error(), "no such container") {
+		t.Errorf("error should include podman stderr: %v", err)
+	}
+}
+
+func TestInspectState_UnexpectedFormat(t *testing.T) {
+	installFakePodman(t, `echo "just one field"; exit 0`)
+	_, err := InspectState("weird")
+	if err == nil {
+		t.Fatal("expected parse error for malformed output")
+	}
+	if !strings.Contains(err.Error(), "unexpected") {
+		t.Errorf("error should mention 'unexpected': %v", err)
+	}
+}
+
+func TestInspectState_UnparseableExitCode(t *testing.T) {
+	installFakePodman(t, `echo "running abc"; exit 0`)
+	_, err := InspectState("weird")
+	if err == nil {
+		t.Fatal("expected parse error for non-numeric exit code")
+	}
+	if !strings.Contains(err.Error(), "invalid exit code") {
+		t.Errorf("error should mention 'invalid exit code': %v", err)
+	}
+}
+
+func TestExec_SuccessCapturesStdoutStderr(t *testing.T) {
+	logPath := installFakePodman(t,
+		`printf 'to stdout\n'; printf 'to stderr\n' >&2; exit 0`)
+	stdout, stderr, ec, err := Exec("my-container", []string{"true"})
+	if err != nil {
+		t.Fatalf("Exec() unexpected error: %v", err)
+	}
+	if ec != 0 {
+		t.Errorf("exit code: want 0, got %d", ec)
+	}
+	if !strings.Contains(stdout, "to stdout") {
+		t.Errorf("stdout: want 'to stdout', got %q", stdout)
+	}
+	if !strings.Contains(stderr, "to stderr") {
+		t.Errorf("stderr: want 'to stderr', got %q", stderr)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	wantArgv := []string{"exec", "my-container", "true"}
+	if got := calls[0]; !slicesEqual(got, wantArgv) {
+		t.Errorf("argv mismatch: want %v, got %v", wantArgv, got)
+	}
+}
+
+func TestExec_NonZeroExitIsNotAGoError(t *testing.T) {
+	// The Phase 16 poll loop's `test ! -e ...` probe relies on Exec
+	// surfacing the exit code without treating it as an error, so a
+	// still-present marker (exit 1) does not abort the wait.
+	installFakePodman(t, `exit 1`)
+	_, _, ec, err := Exec("my-container", []string{"test", "!", "-e", "/marker"})
+	if err != nil {
+		t.Fatalf("Exec() with non-zero child should not error, got %v", err)
+	}
+	if ec != 1 {
+		t.Errorf("exit code: want 1, got %d", ec)
+	}
+}
+
+func TestExec_PropagatesArbitraryExitCode(t *testing.T) {
+	installFakePodman(t, `exit 42`)
+	_, _, ec, err := Exec("c", []string{"cmd"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ec != 42 {
+		t.Errorf("exit code: want 42, got %d", ec)
+	}
+}
+
+func TestExec_SpawnFailureReportsError(t *testing.T) {
+	// PATH deliberately empty so exec.Command cannot find "podman".
+	// A "cannot find binary" failure is a genuine plumbing error and
+	// must surface, unlike a merely-non-zero child.
+	t.Setenv("PATH", t.TempDir())
+	_, _, ec, err := Exec("c", []string{"cmd"})
+	if err == nil {
+		t.Fatal("expected error when podman is not on PATH")
+	}
+	if ec != -1 {
+		t.Errorf("exit code on spawn failure: want -1, got %d", ec)
+	}
+	if !strings.Contains(err.Error(), "podman exec") {
+		t.Errorf("error should mention the command: %v", err)
+	}
+}
+
+func TestLogsTail_Success(t *testing.T) {
+	logPath := installFakePodman(t, `printf 'line1\nline2\n'; exit 0`)
+	out, err := LogsTail("my-container", 50)
+	if err != nil {
+		t.Fatalf("LogsTail() unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "line1") || !strings.Contains(out, "line2") {
+		t.Errorf("output missing expected lines: %q", out)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	wantArgv := []string{"logs", "--tail", "50", "my-container"}
+	if got := calls[0]; !slicesEqual(got, wantArgv) {
+		t.Errorf("argv mismatch: want %v, got %v", wantArgv, got)
+	}
+}
+
+func TestLogsTail_MergesStderrIntoOutput(t *testing.T) {
+	// Container writes go to podman's stderr; the debug consumer wants
+	// them merged with stdout so the diagnostic is not split across
+	// two return values.
+	installFakePodman(t, `printf 'stdout line\n'; printf 'stderr line\n' >&2; exit 0`)
+	out, err := LogsTail("c", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "stdout line") || !strings.Contains(out, "stderr line") {
+		t.Errorf("expected merged output, got: %q", out)
+	}
+}
+
+func TestLogsTail_NormalisesNonPositiveLines(t *testing.T) {
+	logPath := installFakePodman(t, `exit 0`)
+	if _, err := LogsTail("c", 0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := LogsTail("c", -5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(calls))
+	}
+	want := strconv.Itoa(logsTailDefaultLines)
+	for i, c := range calls {
+		if len(c) < 3 || c[2] != want {
+			t.Errorf("call %d: want --tail %s, got %v", i, want, c)
+		}
+	}
+}
+
+func TestLogsTail_PodmanFails(t *testing.T) {
+	installFakePodman(t, `echo "no logs" >&2; exit 125`)
+	out, err := LogsTail("c", 10)
+	if err == nil {
+		t.Fatal("expected error when podman logs fails")
+	}
+	// Combined output is still returned so callers can surface it in
+	// a diagnostic even on failure.
+	if !strings.Contains(out, "no logs") {
+		t.Errorf("expected combined output to include stderr, got: %q", out)
 	}
 }
 
