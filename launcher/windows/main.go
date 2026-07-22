@@ -499,14 +499,11 @@ func startCmd(
 		return err
 	}
 
-	// Phase 16: block until the DB container has cleared its
+	// Block until the DB container has cleared its
 	// initial-create marker. Without this, startCmd returns as soon as
 	// `podman run -d` forks — well before Nano's controller has
 	// finished the ~9s create — and any downstream test that hits the
-	// DB port races with the create-in-progress path. See
-	// windows-runner-plan.md § Phase 16 and
-	// ci-downloads/podman-diagnostics/container-logs.txt for the
-	// reference timing that motivated this block.
+	// DB port races with the create-in-progress path.
 	timeout := resolveDBReadyTimeout()
 	fmt.Printf("Waiting up to %s for DB initial-create to complete...\n",
 		timeout.Round(time.Second))
@@ -572,10 +569,7 @@ func loadContainerConfig(path string) (dbContainerConfig, error) {
 }
 
 // buildPodmanRunArgs constructs the `podman run` argv for the DB
-// container. The shape mirrors the guest-side
-// launcher/assets/init/init-db.sh run_db_container function (see
-// init-db.sh#L396) so future divergence between the two paths is
-// intentional and reviewable.
+// container.
 //
 // hostPorts maps each service name (`db`, and any future siblings) to
 // the host-side port chosen by selectAllHostPorts. Container-side ports
@@ -608,15 +602,12 @@ func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostPorts map[st
 
 	// Version-check emits BOTH pre-image -e VERSION_CHECK_IDENTITY=...
 	// (only when enabled) and post-init VERSION_CHECK_*= key=value args.
-	// Matches the split in init-db.sh's run_db_container() where the
-	// identity has to travel via env because Nano's init parser treats
-	// ';' as a separator and personal-tier identities contain semicolons.
 	preImage, initExtras := versionCheckPodmanArgs(versionCheck, versionCheckOperatingSystemWindows)
 	args = append(args, preImage...)
 	args = append(args, imageRef, "init")
 	if len(cfg.Params) > 0 {
 		// Nano's `init params='k=v ...'` interface: single argv token,
-		// space-joined values. See init-db.sh's DB_PARAMS assignment.
+		// space-joined values.
 		args = append(args, "params="+strings.Join(cfg.Params, " "))
 	}
 	args = append(args, initExtras...)
@@ -756,7 +747,7 @@ func validatePortOverrides(overrides map[string]int, cfg dbContainerConfig) erro
 //     loopback), we return a wrapped error.
 //
 // The probe listener is closed before the function returns so podman
-// can bind the port. There is an unavoidable TOCTOU race window
+// can bind the port. There is an unavoidable race window
 // between our close and podman's bind; the mac path has the same race
 // and it has not been observed to matter in practice.
 func selectHostPort(serviceName string, containerPort int, overrides map[string]int) (int, error) {
@@ -835,8 +826,6 @@ func writeVMState(chosenPorts map[string]int) error {
 	}
 	return nil
 }
-
-// --- Phase 16: block start until initial-create marker clears ---------
 
 // dbReadyMarkerPath is the path inside the DB container that Nano's
 // controller creates while an initial DB create is in progress and
@@ -1079,9 +1068,8 @@ func stopCmd() error {
 		return fmt.Errorf("failed to load %s: %w", configPath, err)
 	}
 
-	// Phase 14: offer to install podman-for-windows if missing. Stop can
-	// safely no-op when podman is absent (there is provably no container
-	// this launcher could have started without it), so a declined prompt
+	// Offer to install podman-for-windows if missing. Stop can
+	// safely no-op when podman is absent so a declined prompt
 	// or non-interactive session both take the soft path: clean up local
 	// vm-state.json and exit 0.
 	installed, err := ensurePodmanInstalled(promptIn, promptOut, false)
@@ -1094,7 +1082,7 @@ func stopCmd() error {
 	}
 
 	// podman.Stop uses --ignore, so an absent or already-stopped container
-	// is a no-op with a clean exit. 30s matches the mac graceful window.
+	// is a no-op with a clean exit.
 	fmt.Printf("Stopping container %q...\n", cfg.ContainerName)
 	if err := podman.Stop(cfg.ContainerName, 30*time.Second); err != nil {
 		return err
@@ -1134,7 +1122,7 @@ func statusCmd() error {
 //
 // Any errors reaching podman are absorbed and treated as "not running":
 // if we cannot inspect the container, we conservatively report absence
-// rather than propagating an ambiguous signal to the test harness.
+// rather than propagating an ambiguous signal
 func statusCmdTo(w io.Writer) error {
 	running := checkContainerRunning()
 	out, err := json.Marshal(map[string]bool{"running": running})
@@ -1148,9 +1136,7 @@ func statusCmdTo(w io.Writer) error {
 }
 
 // checkContainerRunning returns whether the DB container is currently
-// running, absorbing every error mode (missing config, missing podman,
-// podman inspect failure) as "not running". Split out so statusCmdTo
-// stays focused on I/O.
+// running, absorbing every error mode as "not running".
 func checkContainerRunning() bool {
 	cfg, err := loadContainerConfig(filepath.Join(resourcesDir, "config.json"))
 	if err != nil {
@@ -1185,10 +1171,7 @@ func resizeDataDiskCmd(sizeArg string) error {
 	}
 
 	// Container must be stopped. If podman is unavailable, treat the
-	// state as "not running" (nothing we could ask, so we cannot claim
-	// it is running). Only a positive "container is running" answer
-	// blocks the resize — matches the plan text ("call
-	// podman.ContainerRunning and error if true").
+	// state as "not running"
 	if err := podman.Available(); err == nil {
 		running, err := podman.ContainerRunning(cfg.ContainerName)
 		if err == nil && running {
@@ -1250,10 +1233,7 @@ func writeDataSize(sizeGB int) error {
 }
 
 // enforceDataSizeGrowOnly rejects a requested size that is strictly
-// smaller than what was previously recorded. Message intentionally
-// contains the string "shrink" so tests/data_persistence_test.go
-// TestDataDiskShrinkRejected (which does a case-insensitive substring
-// match on "shrink") passes unchanged.
+// smaller than what was previously recorded.
 func enforceDataSizeGrowOnly(currentGB, requestedGB int) error {
 	if requestedGB < currentGB {
 		return fmt.Errorf("existing data size is %dGB, larger than requested %dGB; shrinking data volumes is not supported", currentGB, requestedGB)
