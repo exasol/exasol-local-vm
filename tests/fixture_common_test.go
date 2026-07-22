@@ -284,7 +284,17 @@ func (f *LauncherFixture) Cleanup() {
 		f.CopyLogsToFailuresDir(f.t.Name())
 	}
 	if f.vmRunning {
-		_ = exec.Command(f.BinaryPath, "stop").Run()
+		// cmd.Dir MUST be f.WorkDir so the launcher's stopCmd can find
+		// resources/config.json (relative path). Without it, stopCmd
+		// prints "No resources/config.json; nothing to stop." and
+		// no-ops — which on windows leaks the globally-named
+		// exasol-local-db container into the next test and cascades
+		// into "Container is already running" failures for
+		// TestPortOverride*, TestStatusLifecycle, and TestDBConnection.
+		// StopVM/run() sets cmd.Dir; this fallback path must too.
+		cmd := exec.Command(f.BinaryPath, "stop")
+		cmd.Dir = f.WorkDir
+		_ = cmd.Run()
 	}
 	os.RemoveAll(f.WorkDir)
 }
