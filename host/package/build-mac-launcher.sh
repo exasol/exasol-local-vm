@@ -50,11 +50,11 @@ go mod download
 # Use directory structure: release/launcher/{os}/{arch}/launcher
 # Note: CGO is required (vz/v3 binds Apple's Virtualization.framework), so CGO_ENABLED=0 is not an option.
 # -trimpath strips local paths; -ldflags="-s -w" drops the symbol table and DWARF debug data.
-RUNNER_VERSION="${RUNNER_VERSION:-$(git -C "$ROOT_DIR" describe --tags --always --dirty)}"
+LAUNCHER_VERSION="${LAUNCHER_VERSION:-$(git -C "$ROOT_DIR" describe --tags --always --dirty)}"
 LAUNCHER_OUTPUT_DIR="$ROOT_DIR/release/launcher/darwin/$ARCH"
 mkdir -p "$LAUNCHER_OUTPUT_DIR"
 LAUNCHER_OUTPUT="$LAUNCHER_OUTPUT_DIR/launcher"
-GOOS=darwin GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w -X main.runnerVersion=$RUNNER_VERSION" -o "$LAUNCHER_OUTPUT" .
+GOOS=darwin GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w -X main.launcherVersion=$LAUNCHER_VERSION" -o "$LAUNCHER_OUTPUT" .
 
 # Clean up generated files
 rm -f vm-package.tar.xz

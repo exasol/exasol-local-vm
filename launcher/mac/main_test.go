@@ -20,9 +20,9 @@ import (
 )
 
 func TestVersionCommandOutput(t *testing.T) {
-	previousVersion := runnerVersion
-	runnerVersion = "v1.2.3"
-	t.Cleanup(func() { runnerVersion = previousVersion })
+	previousVersion := launcherVersion
+	launcherVersion = "v1.2.3"
+	t.Cleanup(func() { launcherVersion = previousVersion })
 
 	var output bytes.Buffer
 	versionCmd(&output)
@@ -64,7 +64,7 @@ func TestAuthorizedKeyFromPrivateKeyMatchesGeneratedPublicKey(t *testing.T) {
 	}
 }
 
-func TestVersionCheckRuntimeConfigFromOptionsUsesRunnerContract(t *testing.T) {
+func TestVersionCheckRuntimeConfigFromOptionsUsesLauncherContract(t *testing.T) {
 	config := versionCheckRuntimeConfigFromOptions(VersionCheckOptions{
 		Enabled:         false,
 		IntervalSeconds: 42,

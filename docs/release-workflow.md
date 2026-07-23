@@ -5,7 +5,7 @@
 The release process uses a reusable-workflow pattern with three workflows:
 
 1. **build-mac.yml** — Reusable workflow that builds the mac launcher (and its embedded Linux disk image).
-2. **build-windows.yml** — Reusable workflow that builds the windows launcher. Fully independent of `build-mac.yml`; installs podman-for-windows on the runner and pulls the container tarball inline.
+2. **build-windows.yml** — Reusable workflow that builds the windows launcher. Fully independent of `build-mac.yml`; installs podman-for-windows on the launcher and pulls the container tarball inline.
 3. **release.yml** — Release workflow that calls both build workflows in parallel and creates GitHub releases.
 
 ## How It Works
@@ -102,9 +102,9 @@ Each release includes:
 - `linux-x86_64.tar.xz` - x86_64 VM package  
 
 ### macOS Launcher
-- `mac-runner-aarch64` - Signed binary (raw)
-- `mac-runner-aarch64.zip` - Notarized binary (recommended for distribution)
-- `mac-runner-aarch64.zip.sha256` - Checksum
+- `mac-launcher-aarch64` - Signed binary (raw)
+- `mac-launcher-aarch64.zip` - Notarized binary (recommended for distribution)
+- `mac-launcher-aarch64.zip.sha256` - Checksum
 
 ## Configuration
 

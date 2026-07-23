@@ -1,7 +1,7 @@
 // Copyright 2026 Exasol AG
 // SPDX-License-Identifier: MIT
 
-// Package podman is the internal wrapper the windows-runner launcher uses
+// Package podman is the internal wrapper the windows-launcher uses
 // to talk to the natively installed podman-for-windows. Every function is
 // a thin shim around a single `podman` subprocess so that behavior can be
 // exercised by unit tests using a fake `podman` shell script on PATH — no

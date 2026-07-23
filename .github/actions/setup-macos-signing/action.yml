@@ -64,7 +64,7 @@ runs:
             -certpbe PBE-SHA1-3DES
         fi
     - name: Import signing certificate into temporary keychain
-      if: runner.os == 'macOS'
+      if: launcher.os == 'macOS'
       id: import-certificate
       shell: bash
       run: |

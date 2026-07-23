@@ -1,4 +1,4 @@
-module windows-runner
+module windows-launcher
 
 go 1.25.0
 

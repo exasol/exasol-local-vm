@@ -20,7 +20,7 @@ var binary = "winget"
 // to override the assumed post-install location of podman.exe. Production
 // callers do not set it; the default is %LOCALAPPDATA%\Programs\Podman
 // (matches the user-scope MSI install layout).
-const podmanInstallDirOverrideEnv = "WINDOWS_RUNNER_TEST_PODMAN_INSTALL_DIR"
+const podmanInstallDirOverrideEnv = "WINDOWS_LAUNCHER_TEST_PODMAN_INSTALL_DIR"
 
 // InstallPodman runs `winget install --exact --id RedHat.Podman` with the
 // flags needed to complete unattended once the user has already consented
@@ -71,7 +71,7 @@ func InstallPodman(w io.Writer) error {
 // current process's PATH so subsequent exec.LookPath("podman") calls
 // resolve within the same launcher invocation, without waiting for the
 // user to open a new shell. The PATH mutation is process-local and does
-// not persist across launcher invocations — a fresh `windows-runner`
+// not persist across launcher invocations — a fresh `windows-launcher`
 // process on a new shell will already have the updated PATH from
 // winget's own environment mutation.
 func EnsurePodmanOnPath() error {

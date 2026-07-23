@@ -93,9 +93,9 @@ const (
 
 var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
 
-// runnerVersion is set at build time with -ldflags. Local development builds
+// launcherVersion is set at build time with -ldflags. Local development builds
 // intentionally report "dev".
-var runnerVersion = "dev"
+var launcherVersion = "dev"
 
 // readLastLines reads the last n lines from a file
 func readLastLines(filePath string, n int) ([]string, error) {
@@ -661,7 +661,7 @@ func waitForInitOutput(consoleLogPath string, timeout time.Duration) (*InitOutpu
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: mac-runner <command> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: mac-launcher <command> [options]")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  init [--ssh-key <private-key>]    Initialize VM")
@@ -683,7 +683,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  health-check                      Print JSON {\"ports\": {\"<name>\": {\"state\": ...}}}")
 		fmt.Fprintln(os.Stderr, "                                    after freshly probing every forwarded port")
 		fmt.Fprintln(os.Stderr, "  resize-data <size>                Resize data disk to SIZE GB (VM must be stopped)")
-		fmt.Fprintln(os.Stderr, "  version                           Print runner version")
+		fmt.Fprintln(os.Stderr, "  version                           Print launcher version")
 		os.Exit(1)
 	}
 
@@ -694,7 +694,7 @@ func main() {
 		initFlags.SetOutput(os.Stderr)
 		sshKeyPath := initFlags.String("ssh-key", "", "Use an existing SSH private key instead of generating one")
 		initFlags.Usage = func() {
-			fmt.Fprintln(os.Stderr, "Usage: mac-runner init [--ssh-key <private-key>]")
+			fmt.Fprintln(os.Stderr, "Usage: mac-launcher init [--ssh-key <private-key>]")
 			initFlags.PrintDefaults()
 		}
 		if parseErr := initFlags.Parse(os.Args[2:]); parseErr != nil {
@@ -718,7 +718,7 @@ func main() {
 		var slcMounts slcMountList
 		startFlags.Var(&slcMounts, "slc", "Script language container mount as <image>=<target> (repeatable)")
 		startFlags.Usage = func() {
-			fmt.Fprintln(os.Stderr, "Usage: mac-runner start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
+			fmt.Fprintln(os.Stderr, "Usage: mac-launcher start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
 			startFlags.PrintDefaults()
 		}
 		if parseErr := startFlags.Parse(os.Args[2:]); parseErr != nil {
@@ -758,7 +758,7 @@ func main() {
 		err = healthCheckCmd()
 	case "resize-data":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: mac-runner resize-data <new_size_gb>")
+			fmt.Fprintln(os.Stderr, "Usage: mac-launcher resize-data <new_size_gb>")
 			os.Exit(1)
 		}
 		err = resizeDataDiskCmd(os.Args[2])
@@ -777,7 +777,7 @@ func main() {
 }
 
 func versionCmd(output io.Writer) {
-	fmt.Fprintln(output, runnerVersion)
+	fmt.Fprintln(output, launcherVersion)
 }
 
 // extractTarXZ extracts a tar.xz archive to the specified output directory.
@@ -926,7 +926,7 @@ func initCmd(sshKeyPath string) error {
 	fmt.Println("Successfully initialized VM")
 	fmt.Printf("VM files extracted to: %s/\n", vmDir)
 	fmt.Printf("Shared folder: %s/ -> /mnt/host (inside VM)\n", sharedDir)
-	fmt.Println("Run 'mac-runner start <cpu_count> <ram_size> <data_size_gb>' to start the VM")
+	fmt.Println("Run 'mac-launcher start <cpu_count> <ram_size> <data_size_gb>' to start the VM")
 	return nil
 }
 
@@ -1067,7 +1067,7 @@ func startCmd(
 	// Check if VM has been initialized
 	vmDir := "vm"
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
-		return fmt.Errorf("VM not initialized. Run 'mac-runner init' first")
+		return fmt.Errorf("VM not initialized. Run 'mac-launcher init' first")
 	}
 	if err := refreshInitDBScript(sharedDir); err != nil {
 		return err
@@ -1253,7 +1253,7 @@ func startCmd(
 		fmt.Println("VM started successfully in background")
 		fmt.Printf("Shared folder: %s/ -> /mnt/host (inside VM)\n", sharedDir)
 		fmt.Println("Check vm.log for VM output")
-		fmt.Println("Use 'mac-runner stop' to stop the VM")
+		fmt.Println("Use 'mac-launcher stop' to stop the VM")
 		return nil
 
 	case degradedErr := <-degradedCh:
@@ -2041,7 +2041,7 @@ func stopCmd() error {
 func resizeDataDiskCmd(newSizeStr string) error {
 	// Check if VM is running
 	if isVMRunning() {
-		return fmt.Errorf("VM is currently running. Stop the VM first with 'mac-runner stop'")
+		return fmt.Errorf("VM is currently running. Stop the VM first with 'mac-launcher stop'")
 	}
 
 	// Parse and validate new size
@@ -2054,7 +2054,7 @@ func resizeDataDiskCmd(newSizeStr string) error {
 	vmDir := "vm"
 	dataDiskPath := filepath.Join(vmDir, "data.img")
 	if _, err := os.Stat(dataDiskPath); os.IsNotExist(err) {
-		return fmt.Errorf("data disk not found: %s. Initialize VM first with 'mac-runner init'", dataDiskPath)
+		return fmt.Errorf("data disk not found: %s. Initialize VM first with 'mac-launcher init'", dataDiskPath)
 	}
 
 	// Get current size

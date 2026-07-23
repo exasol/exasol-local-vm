@@ -100,7 +100,7 @@ jobs:
       - name: Download container tarball
         run: |
           # Download container image for the Mac launcher to embed
-          # We do this on Linux because Mac CI runners don't support virtualization
+          # We do this on Linux because Mac CI launchers don't support virtualization
           task download-db-container IMG_ARCH=aarch64
           echo "✓ Container tarball downloaded to release/"
           ls -lh release/exasol-nano-db-aarch64.tar.gz
@@ -349,9 +349,9 @@ jobs:
           # Package the launcher directory contents (launcher binary, manifest.json, etc.)
           # Change to the directory and zip contents to avoid including parent directory in archive
           cd release/launcher/darwin/aarch64
-          ditto -c -k . ../../../../dist/mac-runner-aarch64.zip
+          ditto -c -k . ../../../../dist/mac-launcher-aarch64.zip
           cd ../../../../
-          shasum -a 256 dist/mac-runner-aarch64.zip > dist/mac-runner-aarch64.zip.sha256
+          shasum -a 256 dist/mac-launcher-aarch64.zip > dist/mac-launcher-aarch64.zip.sha256
       
       - name: Notarize macOS launcher
         env:
@@ -401,7 +401,7 @@ jobs:
           echo "✓ Notarization credentials validated"
           
           xcrun notarytool submit \
-            dist/mac-runner-aarch64.zip \
+            dist/mac-launcher-aarch64.zip \
             --issuer "$MACOS_NOTARY_ISSUER_ID" \
             --key-id "$MACOS_NOTARY_KEY_ID" \
             --key "$KEY_PATH" \
@@ -422,11 +422,11 @@ jobs:
       - name: Verify notarized artifacts
         run: |
           echo "Notarized zip:"
-          ls -lh dist/mac-runner-aarch64.zip
-          ls -lh dist/mac-runner-aarch64.zip.sha256
+          ls -lh dist/mac-launcher-aarch64.zip
+          ls -lh dist/mac-launcher-aarch64.zip.sha256
           echo ""
           echo "Checksum:"
-          cat dist/mac-runner-aarch64.zip.sha256
+          cat dist/mac-launcher-aarch64.zip.sha256
       
       - name: Upload macOS launcher
         id: upload
@@ -434,8 +434,8 @@ jobs:
         with:
           name: mac-launcher
           path: |
-            dist/mac-runner-aarch64.zip
-            dist/mac-runner-aarch64.zip.sha256
+            dist/mac-launcher-aarch64.zip
+            dist/mac-launcher-aarch64.zip.sha256
           retention-days: 7
 
   test-mac-launcher:
@@ -466,7 +466,7 @@ jobs:
       - name: Install Task
         run: |
           set -euo pipefail
-          TASK_BIN_DIR="$RUNNER_TEMP/task-bin"
+          TASK_BIN_DIR="$LAUNCHER_TEMP/task-bin"
           mkdir -p "$TASK_BIN_DIR"
           sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b "$TASK_BIN_DIR"
           echo "$TASK_BIN_DIR" >> "$GITHUB_PATH"

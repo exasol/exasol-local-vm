@@ -216,8 +216,8 @@ echo ""
 ls -lh ci-downloads/
 echo ""
 
-if [ -f ci-downloads/mac-runner-aarch64.zip ]; then
-  echo "✓ Notarized zip: ci-downloads/mac-runner-aarch64.zip"
+if [ -f ci-downloads/mac-launcher-aarch64.zip ]; then
+  echo "✓ Notarized zip: ci-downloads/mac-launcher-aarch64.zip"
 fi
 
 if [ "$SKIP_LINUX_BUILD" != "true" ]; then
@@ -227,6 +227,6 @@ if [ "$SKIP_LINUX_BUILD" != "true" ]; then
   echo "   This will reuse Linux packages from run $RUN_ID"
 fi
 
-if [ -f ci-downloads/mac-runner-aarch64.zip ]; then
-  echo "✓ Notarized: ci-downloads/mac-runner-aarch64.zip"
+if [ -f ci-downloads/mac-launcher-aarch64.zip ]; then
+  echo "✓ Notarized: ci-downloads/mac-launcher-aarch64.zip"
 fi

@@ -98,7 +98,7 @@ IMG_ARCH="${1}"
 shift
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUNNER_IMAGE="${VM_RUNNER_IMAGE:-exasol-local-vm-runner:latest}"
+LAUNCHER_IMAGE="${VM_LAUNCHER_IMAGE:-exasol-local-vm-launcher:latest}"
 CONTAINER_NAME="${VM_CONTAINER_NAME:-exasol-local-vm}"
 OUTPUT_DIR="${VM_OUTPUT_DIR:-$ROOT_DIR/output/$IMG_ARCH}"
 SHARED_DIR="${VM_SHARED_DIR:-$ROOT_DIR/shared}"
@@ -134,9 +134,9 @@ check_vm_artifacts() {
     fi
 }
 
-check_runner_image() {
-    if ! podman image exists "$RUNNER_IMAGE"; then
-        echo "Error: runner image is missing: $RUNNER_IMAGE" >&2
+check_launcher_image() {
+    if ! podman image exists "$LAUNCHER_IMAGE"; then
+        echo "Error: launcher image is missing: $LAUNCHER_IMAGE" >&2
         echo "Run: task build-qemu-container" >&2
         exit 1
     fi
@@ -224,7 +224,7 @@ EOF
 require_command podman "task install-deps"
 
 check_vm_artifacts
-check_runner_image
+check_launcher_image
 
 if podman container exists "$CONTAINER_NAME"; then
     if [ "$(podman inspect --format '{{.State.Running}}' "$CONTAINER_NAME")" = "true" ]; then
@@ -269,10 +269,10 @@ fi
 
 if [ "$ATTACHED" = "true" ]; then
     echo "==> Starting attached VM container: $CONTAINER_NAME"
-    exec podman run -it "${RUN_ARGS[@]}" "$RUNNER_IMAGE"
+    exec podman run -it "${RUN_ARGS[@]}" "$LAUNCHER_IMAGE"
 fi
 
 echo "==> Starting detached VM container: $CONTAINER_NAME"
-podman run -d -t "${RUN_ARGS[@]}" "$RUNNER_IMAGE"
+podman run -d -t "${RUN_ARGS[@]}" "$LAUNCHER_IMAGE"
 echo "==> Attach with: podman attach --detach-keys ctrl-p,ctrl-q $CONTAINER_NAME"
 echo "==> Stop with: task stop-vm"

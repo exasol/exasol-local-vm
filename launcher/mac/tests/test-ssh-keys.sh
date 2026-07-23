@@ -22,7 +22,7 @@ if [ "$IMG_ARCH" != "aarch64" ]; then
 fi
 
 TEST_DIR="$(mktemp -d)"
-LAUNCHER="./release/mac-runner-${IMG_ARCH}"
+LAUNCHER="./release/mac-launcher-${IMG_ARCH}"
 
 if [ ! -f "$LAUNCHER" ]; then
     echo "Error: Mac launcher not found at $LAUNCHER" >&2
