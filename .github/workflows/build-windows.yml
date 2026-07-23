@@ -15,6 +15,8 @@ name: Build Windows Launcher
 
 on:
   workflow_dispatch:
+  push:
+  pull_request:
   workflow_call:
     secrets:
       # SSL.com eSigner cloud code-signing credentials. All optional so
