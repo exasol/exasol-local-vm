@@ -21,7 +21,7 @@ import (
 
 	"github.com/ulikunitz/xz"
 
-	"windows-runner/internal/podman"
+	"windows-launcher/internal/podman"
 )
 
 // TestMain forces all tests into the non-interactive branch of the
@@ -780,7 +780,7 @@ func TestStopCmdWithoutConfigCleansStateFile(t *testing.T) {
 }
 
 func TestStopCmdTreatsMissingPodmanAsNothingToStop(t *testing.T) {
-	// Phase 14: stop now no-ops when podman is missing rather than
+	// Stop now no-ops when podman is missing rather than
 	// erroring, because there is provably no container this launcher
 	// could have started without podman. The prompt is skipped in
 	// non-interactive contexts (no *os.File stdin), so this exercises
@@ -1053,10 +1053,10 @@ func TestReadDataSizeRejectsGarbage(t *testing.T) {
 
 func TestEnforceDataSizeGrowOnly(t *testing.T) {
 	cases := []struct {
-		name             string
-		currentGB        int
-		requestedGB      int
-		expectShrinkErr  bool
+		name            string
+		currentGB       int
+		requestedGB     int
+		expectShrinkErr bool
 	}{
 		{"equal is fine", 10, 10, false},
 		{"grow is fine", 10, 20, false},
@@ -1231,7 +1231,7 @@ func installFakeWingetInEmptyPath(t *testing.T, body string) (argvLogPath string
 }
 
 // stageFakePodmanInstallDir seeds a fresh temp directory with a fake
-// podman shim and points WINDOWS_RUNNER_TEST_PODMAN_INSTALL_DIR at it.
+// podman shim and points WINDOWS_LAUNCHER_TEST_PODMAN_INSTALL_DIR at it.
 // After winget.EnsurePodmanOnPath() prepends that directory to PATH,
 // subsequent podman calls invoke this shim. The shim logs argv to a
 // file so tests can assert on the install-flow's podman invocations
@@ -1252,7 +1252,7 @@ func stageFakePodmanInstallDir(t *testing.T, body string) (argvLogPath string) {
 	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake podman shim in install dir: %v", err)
 	}
-	t.Setenv("WINDOWS_RUNNER_TEST_PODMAN_INSTALL_DIR", dir)
+	t.Setenv("WINDOWS_LAUNCHER_TEST_PODMAN_INSTALL_DIR", dir)
 	return argvLogPath
 }
 
@@ -1323,7 +1323,7 @@ func TestEnsurePodmanInstalled_InteractiveDeclineOptional(t *testing.T) {
 	if installed {
 		t.Error("expected installed=false after decline")
 	}
-	if !strings.Contains(out.String(), "prompted again when you run 'windows-runner start'") {
+	if !strings.Contains(out.String(), "prompted again when you run 'windows-launcher start'") {
 		t.Errorf("expected re-prompt hint in output, got %q", out.String())
 	}
 }

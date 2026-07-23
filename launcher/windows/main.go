@@ -1,7 +1,7 @@
 // Copyright 2026 Exasol AG
 // SPDX-License-Identifier: MIT
 
-// Package main is the windows-runner launcher: a CLI that delegates
+// Package main is the windows-launcher launcher: a CLI that delegates
 // container lifecycle to a natively installed podman-for-windows so the
 // same on-disk contract and integration tests used by the mac launcher can
 // be reused on windows.
@@ -28,8 +28,8 @@ import (
 
 	"github.com/ulikunitz/xz"
 
-	"windows-runner/internal/podman"
-	"windows-runner/internal/winget"
+	"windows-launcher/internal/podman"
+	"windows-launcher/internal/winget"
 )
 
 // initAssets is the embedded launcher/assets/windows/init/ directory,
@@ -95,7 +95,7 @@ const (
 
 	// dataSizePath is the sidecar file the windows launcher uses to fake
 	// the mac raw-disk-image size contract. See the "Differences with the
-	// mac version" section in windows-runner-plan.md.
+	// mac version" section in windows-launcher-plan.md.
 	dataSizePath = "resources/data-size.txt"
 )
 
@@ -233,7 +233,7 @@ func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive
 		if required {
 			return false, errors.New("cannot proceed without podman-for-windows")
 		}
-		fmt.Fprintln(out, "Skipping podman install. You will be prompted again when you run 'windows-runner start'.")
+		fmt.Fprintln(out, "Skipping podman install. You will be prompted again when you run 'windows-launcher start'.")
 		return false, nil
 	}
 	fmt.Fprintln(out, "Installing podman-for-windows via winget...")
@@ -368,7 +368,7 @@ func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
 	fmt.Printf("Runtime config written to: %s\n", runtimeConfigPath)
 
 	fmt.Printf("Resources extracted to: %s/\n", resourcesDir)
-	fmt.Println("Initialized. Run 'windows-runner start <cpu> <ram_mb> <data_size_gb>' to start.")
+	fmt.Println("Initialized. Run 'windows-launcher start <cpu> <ram_mb> <data_size_gb>' to start.")
 
 	// Offer to install podman-for-windows if it's missing. Init
 	// itself has no runtime dependency on podman, so this is best-effort:
@@ -536,7 +536,7 @@ func startCmd(
 }
 
 // dbContainerConfig is the subset of resources/config.json (the `.db`
-// object) that windows-runner needs to build a `podman run` argv.
+// object) that windows-launcher needs to build a `podman run` argv.
 // Mirrors the schema the mac guest-side init-db.sh consumes.
 type dbContainerConfig struct {
 	ContainerName string         `json:"container_name"`
@@ -1165,7 +1165,7 @@ func resizeDataDiskCmd(sizeArg string) error {
 	cfg, err := loadContainerConfig(configPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("launcher not initialized: run 'windows-runner init' first")
+			return fmt.Errorf("launcher not initialized: run 'windows-launcher init' first")
 		}
 		return fmt.Errorf("failed to load %s: %w", configPath, err)
 	}
@@ -1175,7 +1175,7 @@ func resizeDataDiskCmd(sizeArg string) error {
 	if err := podman.Available(); err == nil {
 		running, err := podman.ContainerRunning(cfg.ContainerName)
 		if err == nil && running {
-			return fmt.Errorf("container %q is currently running. Stop it first with 'windows-runner stop'", cfg.ContainerName)
+			return fmt.Errorf("container %q is currently running. Stop it first with 'windows-launcher stop'", cfg.ContainerName)
 		}
 	}
 
@@ -1184,7 +1184,7 @@ func resizeDataDiskCmd(sizeArg string) error {
 		return err
 	}
 	if current == 0 {
-		return fmt.Errorf("data size has not been recorded yet: run 'windows-runner start <cpu> <ram> <size>' first")
+		return fmt.Errorf("data size has not been recorded yet: run 'windows-launcher start <cpu> <ram> <size>' first")
 	}
 	if newSizeGB <= current {
 		return fmt.Errorf("new size (%dGB) must be larger than current size (%dGB). Shrinking is not supported", newSizeGB, current)
@@ -1243,7 +1243,7 @@ func enforceDataSizeGrowOnly(currentGB, requestedGB int) error {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: windows-runner <command> [options]")
+		fmt.Fprintln(os.Stderr, "Usage: windows-launcher <command> [options]")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  init [--ssh-key <private-key>]    Initialize launcher working directory")
@@ -1270,7 +1270,7 @@ func main() {
 		initFlags.SetOutput(os.Stderr)
 		sshKeyPath := initFlags.String("ssh-key", "", "Use an existing SSH private key instead of generating one")
 		initFlags.Usage = func() {
-			fmt.Fprintln(os.Stderr, "Usage: windows-runner init [--ssh-key <private-key>]")
+			fmt.Fprintln(os.Stderr, "Usage: windows-launcher init [--ssh-key <private-key>]")
 			initFlags.PrintDefaults()
 		}
 		if parseErr := initFlags.Parse(os.Args[2:]); parseErr != nil {
@@ -1292,7 +1292,7 @@ func main() {
 		startFlags.StringVar(&versionCheckOptions.Identity, "version-check-identity", versionCheckOptions.Identity, "Identity string for scheduled local database version checks")
 		startFlags.StringVar(&versionCheckOptions.URL, "version-check-url", versionCheckOptions.URL, "Version-check URL override for scheduled local database version checks")
 		startFlags.Usage = func() {
-			fmt.Fprintln(os.Stderr, "Usage: windows-runner start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
+			fmt.Fprintln(os.Stderr, "Usage: windows-launcher start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
 			startFlags.PrintDefaults()
 		}
 		if parseErr := startFlags.Parse(os.Args[2:]); parseErr != nil {
@@ -1319,7 +1319,7 @@ func main() {
 		err = statusCmd()
 	case "resize-data":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: windows-runner resize-data <new_size_gb>")
+			fmt.Fprintln(os.Stderr, "Usage: windows-launcher resize-data <new_size_gb>")
 			os.Exit(1)
 		}
 		err = resizeDataDiskCmd(os.Args[2])

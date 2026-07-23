@@ -9,12 +9,12 @@ set -euo pipefail
 #
 # Easiest way to run this is via the provided Containerfile
 #
-#   podman build -t exasol-local-vm-runner:latest host/run
+#   podman build -t exasol-local-vm-launcher:latest host/run
 #   podman run --rm -ti \
 #     --privileged \
 #     --network=host \
 #     --mount="type=bind,src=${PWD}/output/aarch64,dst=/vm-image,relabel=shared,ro" \
-#     exasol-local-vm-runner:latest
+#     exasol-local-vm-launcher:latest
 #
 # Or just:
 #

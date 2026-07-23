@@ -1,4 +1,4 @@
-module mac-runner
+module mac-launcher
 
 go 1.25.0
 

@@ -52,7 +52,7 @@ Common entry points:
   primary release path
 - `launcher/assets/` — initialization assets embedded into runtime artifacts
 - `host/build/` — build pipeline for runtime backend assets
-- `host/run/` — Linux/QEMU development runner
+- `host/run/` — Linux/QEMU development launcher
 - `container/` — Linux guest environment used by the current macOS backend
 - `docs/requirements.md` — product requirements
 - `docs/architecture.md` — current architecture overview

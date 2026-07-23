@@ -2,7 +2,7 @@
 # Copyright 2026 Exasol AG
 # SPDX-License-Identifier: MIT
 
-# Build the windows-runner launcher for windows/amd64 (podman-for-windows
+# Build the windows-launcher for windows/amd64 (podman-for-windows
 # is x86_64-only in practice, so we only cross-compile that target).
 #
 # Unlike host/package/build-mac-launcher.sh this script does NOT embed a
@@ -84,5 +84,5 @@ echo "==> Launcher binary: $LAUNCHER_OUTPUT ($(du -h "$LAUNCHER_OUTPUT" | cut -f
 # windows launcher is signed in CI via the SSLcom/esigner-codesign
 # GitHub Action, which authenticates against SSL.com's eSigner cloud
 # HSM using the ESIGN_* repository secrets. Local builds produce an
-# unsigned binary; see windows-runner-plan.md § "Windows code signing"
+# unsigned binary; see windows-launcher-plan.md § "Windows code signing"
 # for the design rationale.

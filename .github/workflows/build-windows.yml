@@ -6,7 +6,7 @@ name: Build Windows Launcher
 # Self-contained windows launcher build + test pipeline. Fully
 # independent of build-mac.yml (which builds the mac launcher and its
 # embedded Linux disk image): the container tarball the windows launcher
-# embeds is pulled directly on the windows runner via podman-for-windows,
+# embeds is pulled directly on the windows launcher via podman-for-windows,
 # so this workflow has no cross-OS artifact dependencies.
 #
 # The dev helper `task ci-build-windows-launcher` dispatches this
@@ -84,12 +84,12 @@ jobs:
         # Installs podman + starts a WSL2-backed machine so the
         # `task download-db-container` step in the build below can
         # `podman pull --platform linux/amd64` and `podman save` the
-        # x86_64 Nano container tarball directly on this runner. This
+        # x86_64 Nano container tarball directly on this launcher. This
         # replaces the old cross-workflow dependency where the tarball
         # was pre-staged by build-disk-images on ubuntu.
         #
         # CI installs at machine scope (winget's default when running
-        # as admin, which the runner does). The launcher's own runtime
+        # as admin, which the launcher does). The launcher's own runtime
         # install (Phase 14, ensurePodmanInstalled in main.go) uses
         # --scope user for the non-admin end-user case.
         shell: pwsh
@@ -173,7 +173,7 @@ jobs:
         if: env.ESIGN_USERNAME != ''
         # Pinned to v1.3.2 (release from 2025-12-22). CodeSignTool talks
         # to SSL.com's HSM: the private key never leaves SSL.com's
-        # infrastructure, and no PFX is materialised on the runner.
+        # infrastructure, and no PFX is materialised on the launcher.
         uses: sslcom/esigner-codesign@cf5f6c1d38ad10f47e3ed9aca873f429b1a8d85b # v1.3.2
         with:
           command:       sign
@@ -215,7 +215,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Compress-Archive `
             -Path release/launcher/windows/x86_64/* `
-            -DestinationPath dist/windows-runner-x86_64.zip `
+            -DestinationPath dist/windows-launcher-x86_64.zip `
             -Force
 
       - name: Compute checksum
@@ -224,13 +224,13 @@ jobs:
           # sha256sum ships with Git for Windows and produces the same
           # '<hex>  <path>\n' shape as the mac 'shasum -a 256' step, so
           # downstream verifiers work identically on both platforms.
-          sha256sum dist/windows-runner-x86_64.zip > dist/windows-runner-x86_64.zip.sha256
-          cat dist/windows-runner-x86_64.zip.sha256
+          sha256sum dist/windows-launcher-x86_64.zip > dist/windows-launcher-x86_64.zip.sha256
+          cat dist/windows-launcher-x86_64.zip.sha256
 
       - name: Verify launcher artifacts
         run: |
-          ls -lh dist/windows-runner-x86_64.zip
-          ls -lh dist/windows-runner-x86_64.zip.sha256
+          ls -lh dist/windows-launcher-x86_64.zip
+          ls -lh dist/windows-launcher-x86_64.zip.sha256
 
       - name: Upload windows launcher
         id: upload
@@ -238,15 +238,15 @@ jobs:
         with:
           name: windows-launcher
           path: |
-            dist/windows-runner-x86_64.zip
-            dist/windows-runner-x86_64.zip.sha256
+            dist/windows-launcher-x86_64.zip
+            dist/windows-launcher-x86_64.zip.sha256
           retention-days: 7
 
   test-windows-launcher:
     # GitHub-hosted windows-latest, with podman-for-windows installed on
-    # the fly via winget below. See windows-runner-plan.md § "Refactor
+    # the fly via winget below. See windows-launcher-plan.md § "Refactor
     # Phase 13" for why we prefer this over the earlier self-hosted-
-    # runner plan.
+    # launcher plan.
     runs-on: windows-latest
     needs: build-windows-launcher
     if: ${{ always() && needs.build-windows-launcher.result == 'success' }}
@@ -307,7 +307,7 @@ jobs:
           podman --version
 
           # Initialize a fresh WSL2-backed machine with 40 GB of disk.
-          # windows-latest runners give each job a clean VM, so init is
+          # windows-latest launchers give each job a clean VM, so init is
           # always the first-time path here.
           podman machine init --disk-size 40
           # Rootful mode - see the build-windows-launcher job for the

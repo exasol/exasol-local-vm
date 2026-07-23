@@ -21,7 +21,7 @@ import (
 // Platform defaults consumed by the shared code in fixture_common_test.go.
 const (
 	launcherBinaryName = "launcher"
-	launcherZipDefault = "../dist/mac-runner-aarch64.zip"
+	launcherZipDefault = "../dist/mac-launcher-aarch64.zip"
 )
 
 // SSHKeyPath returns the path to the ED25519 private key `launcher init`

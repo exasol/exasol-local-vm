@@ -13,12 +13,12 @@ import (
 // Platform defaults consumed by the shared code in fixture_common_test.go.
 const (
 	launcherBinaryName = "launcher.exe"
-	launcherZipDefault = "../dist/windows-runner-x86_64.zip"
+	launcherZipDefault = "../dist/windows-launcher-x86_64.zip"
 )
 
 // SSHCaptureDiagnostics is a no-op on windows: there is no guest VM to SSH
 // into. Podman's own logs are captured by CopyLogsToFailuresDir via
-// vm-state.json (and podman ps / podman logs left to the runner's post-job
+// vm-state.json (and podman ps / podman logs left to the launcher's post-job
 // steps if needed).
 func (f *LauncherFixture) SSHCaptureDiagnostics(testName string) {
 	f.t.Helper()

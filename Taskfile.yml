@@ -99,10 +99,10 @@ tasks:
       - ./host/build/build-artifacts.sh "{{.IMG_ARCH}}"
 
   build-qemu-container:
-    desc: Build the Podman/QEMU runner container image for starting the VM
+    desc: Build the Podman/QEMU launcher container image for starting the VM
     run: once
     cmds:
-      - podman build --arch "$(uname -m)" -t exasol-local-vm-runner:latest host/run
+      - podman build --arch "$(uname -m)" -t exasol-local-vm-launcher:latest host/run
 
   ensure-vm-image:
     run: when_changed
@@ -124,12 +124,12 @@ tasks:
 
   ensure-qemu-container:
     status:
-      - podman image exists exasol-local-vm-runner:latest
+      - podman image exists exasol-local-vm-launcher:latest
     cmds:
       - task: build-qemu-container
 
   start-vm:
-    desc: Start the VM in a detached Podman runner container
+    desc: Start the VM in a detached Podman launcher container
     run: once
     requires:
       vars:
@@ -144,7 +144,7 @@ tasks:
       - ./host/run/start-qemu-container.sh "{{.IMG_ARCH}}"
 
   start-vm-attached:
-    desc: Start the VM in an attached Podman runner container
+    desc: Start the VM in an attached Podman launcher container
     run: once
     requires:
       vars:
@@ -159,7 +159,7 @@ tasks:
       - ./host/run/start-qemu-container.sh -a "{{.IMG_ARCH}}"
 
   stop-vm:
-    desc: Stop the Podman runner container for the VM
+    desc: Stop the Podman launcher container for the VM
     cmds:
       - ./host/run/stop-qemu-container.sh
 
@@ -167,7 +167,7 @@ tasks:
     desc: |
       Run launcher integration tests in ./tests. The fixture auto-detects the
       host platform and looks for the corresponding launcher zip under
-      ../dist/ (mac-runner-aarch64.zip on macOS, windows-runner-x86_64.zip on
+      ../dist/ (mac-launcher-aarch64.zip on macOS, windows-launcher-x86_64.zip on
       Windows). Override with the LAUNCHER_ZIP env var. Cross-platform tests
       run on both hosts; the mac-only ones (SSH, raw disk image, forceful
       kill of the launcher daemon) are gated by //go:build darwin.

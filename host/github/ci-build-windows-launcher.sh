@@ -10,7 +10,7 @@ set -euo pipefail
 #
 # Since Phase 15 the windows launcher lives in its own workflow file
 # (.github/workflows/build-windows.yml) that is fully independent of the
-# mac build path: it installs podman-for-windows on the windows runner
+# mac build path: it installs podman-for-windows on the windows launcher
 # and pulls the container tarball inline. There is nothing to reuse
 # between runs, so this helper takes no flags.
 #
@@ -20,7 +20,7 @@ set -euo pipefail
 
 WORKFLOW_FILE="build-windows.yml"
 LAUNCHER_ARTIFACT="windows-launcher"
-LAUNCHER_ZIP="windows-runner-x86_64.zip"
+LAUNCHER_ZIP="windows-launcher-x86_64.zip"
 FAILURE_LOGS_ARTIFACT="test-failure-logs-windows"
 
 if [ $# -gt 0 ]; then
