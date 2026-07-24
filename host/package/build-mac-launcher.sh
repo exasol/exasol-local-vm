@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
-    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
+    echo "Error: pass image architecture as argument (aarch64)" >&2
     exit 1
 fi
 IMG_ARCH="${1}"
@@ -14,11 +14,12 @@ shift
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 ARCH="$IMG_ARCH"
-case "$ARCH" in
-    x86_64) PACKAGE_NAME="mac-x86_64"; GOARCH=amd64 ;;
-    aarch64) PACKAGE_NAME="mac-arm64"; GOARCH=arm64 ;;
-    *) echo "Error: unknown architecture: $ARCH" >&2; exit 1 ;;
-esac
+if [ "$ARCH" != "aarch64" ]; then
+    echo "Error: macOS provider builds only support aarch64, got: $ARCH" >&2
+    exit 1
+fi
+PACKAGE_NAME="mac-arm64"
+GOARCH="arm64"
 
 VM_ARTIFACTS_TARBALL="${RELEASE_FILE:-$ROOT_DIR/release/$PACKAGE_NAME.tar.xz}"
 
@@ -28,16 +29,16 @@ if [ ! -f "$VM_ARTIFACTS_TARBALL" ]; then
     exit 1
 fi
 
-echo "==> Building macOS launcher for $ARCH..."
+echo "==> Building macOS provider for $ARCH..."
 echo "    Release archive: $VM_ARTIFACTS_TARBALL"
 
-LAUNCHER_DIR="$ROOT_DIR/launcher/mac"
-pushd "$LAUNCHER_DIR" > /dev/null
+PROVIDER_SOURCE_DIR="$ROOT_DIR/launcher/mac"
+pushd "$PROVIDER_SOURCE_DIR" > /dev/null
 
 # Copy the release archive to be embedded
 cp "$VM_ARTIFACTS_TARBALL" vm-package.tar.xz
 
-# Compress launcher/assets/init directory to be embedded
+# Compress the provider initialization assets to be embedded.
 echo "==> Creating init assets tarball..."
 tar -C "$ROOT_DIR/launcher/assets" -cf - init | xz -9 --extreme > init-assets.tar.xz
 
@@ -46,15 +47,14 @@ echo "Updating Go dependencies..."
 go mod tidy
 go mod download
 
-# Build the launcher binary
-# Use directory structure: release/launcher/{os}/{arch}/launcher
+# Build the provider binary.
 # Note: CGO is required (vz/v3 binds Apple's Virtualization.framework), so CGO_ENABLED=0 is not an option.
 # -trimpath strips local paths; -ldflags="-s -w" drops the symbol table and DWARF debug data.
-RUNNER_VERSION="${RUNNER_VERSION:-$(git -C "$ROOT_DIR" describe --tags --always --dirty)}"
-LAUNCHER_OUTPUT_DIR="$ROOT_DIR/release/launcher/darwin/$ARCH"
-mkdir -p "$LAUNCHER_OUTPUT_DIR"
-LAUNCHER_OUTPUT="$LAUNCHER_OUTPUT_DIR/launcher"
-GOOS=darwin GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w -X main.runnerVersion=$RUNNER_VERSION" -o "$LAUNCHER_OUTPUT" .
+PROVIDER_VERSION="${PROVIDER_VERSION:-$(git -C "$ROOT_DIR" describe --tags --always --dirty)}"
+PROVIDER_OUTPUT_DIR="$ROOT_DIR/release/local-vm/darwin/$ARCH"
+mkdir -p "$PROVIDER_OUTPUT_DIR"
+PROVIDER_OUTPUT="$PROVIDER_OUTPUT_DIR/local-vm"
+GOOS=darwin GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w -X main.providerVersion=$PROVIDER_VERSION" -o "$PROVIDER_OUTPUT" .
 
 # Clean up generated files
 rm -f vm-package.tar.xz
@@ -62,18 +62,23 @@ rm -f init-assets.tar.xz
 
 popd > /dev/null
 
-chmod +x "$LAUNCHER_OUTPUT"
+chmod +x "$PROVIDER_OUTPUT"
 
-echo "==> Launcher binary: $LAUNCHER_OUTPUT"
+echo "==> Provider binary: $PROVIDER_OUTPUT"
 
-# Sign the launcher (required)
+# Release builds are signed. A manually built artifact used through Personal's
+# LOCAL_VM_BINARY development input may explicitly opt into an unsigned build.
 if [ -z "${MACOS_SIGN_KEYCHAIN:-}" ] || [ -z "${MACOS_SIGN_IDENTITY:-}" ]; then
-  echo "Error: Code signing is required but credentials are not set" >&2
-  echo "Please set MACOS_SIGN_KEYCHAIN and MACOS_SIGN_IDENTITY environment variables" >&2
+  if [ "${ALLOW_UNSIGNED_LOCAL_VM:-}" = "1" ]; then
+    echo "==> Leaving development local-vm artifact unsigned"
+    echo "==> Provider binary: $PROVIDER_OUTPUT"
+    exit 0
+  fi
+  echo "Error: Code signing is required; set signing credentials or use ALLOW_UNSIGNED_LOCAL_VM=1 for a development-only artifact" >&2
   exit 1
 fi
 
-echo "==> Signing macOS launcher with virtualization entitlement..."
+echo "==> Signing macOS provider with virtualization entitlement..."
 
 codesign \
   --force \
@@ -82,15 +87,15 @@ codesign \
   --keychain "${MACOS_SIGN_KEYCHAIN}" \
   --entitlements "$ROOT_DIR/launcher/mac/entitlements.plist" \
   --sign "${MACOS_SIGN_IDENTITY}" \
-  "${LAUNCHER_OUTPUT}"
+  "${PROVIDER_OUTPUT}"
 
 echo "==> Verifying virtualization entitlement..."
-codesign -d --entitlements :- "${LAUNCHER_OUTPUT}" 2>&1 | tee /tmp/launcher.entitlements
-if grep -q '<key>com.apple.security.virtualization</key>' /tmp/launcher.entitlements; then
+codesign -d --entitlements :- "${PROVIDER_OUTPUT}" 2>&1 | tee /tmp/provider.entitlements
+if grep -q '<key>com.apple.security.virtualization</key>' /tmp/provider.entitlements; then
   echo "✓ Virtualization entitlement verified"
 else
   echo "✗ Virtualization entitlement missing!" >&2
   exit 1
 fi
 
-echo "==> Signed launcher binary: $LAUNCHER_OUTPUT"
+echo "==> Signed provider binary: $PROVIDER_OUTPUT"

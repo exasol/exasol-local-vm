@@ -23,8 +23,6 @@ KERNEL_CMDLINE="${KERNEL_CMDLINE:-console=hvc0}"
 KERNEL_FILE="${ARTIFACT_DIR}/vmlinuz-virt"
 INITRAMFS_FILE="${ARTIFACT_DIR}/initramfs.img"
 RAW_DISK_FILE="${ARTIFACT_DIR}/disk.img"
-RAW_DISK_THIN_FILE="${ARTIFACT_DIR}/disk_thin.img"
-VHDX_FILE="${ARTIFACT_DIR}/disk.vhdx"
 ARCH_FILE="${ARTIFACT_DIR}/arch.txt"
 CMDLINE_FILE="${ARTIFACT_DIR}/kernel-cmdline.txt"
 
@@ -41,10 +39,9 @@ cp "${IMAGE_KERNEL}" "${KERNEL_FILE}"
 
 ### write rootfs to initramfs
 #
-# The initramfs becomes our rootfs for the whole vm runtime, we never pivot to
-# another root on a persistent disk. Data and logs go to a directory mounted
-# from the host. So we pack the whole container image that we built as an
-# initramfs, with only a few exceptions.
+# The initramfs remains the root filesystem for the whole VM runtime. We pack
+# the guest contents image into it with only a few exceptions. Writable runtime
+# state lives on the separate disk mounted at /var.
 #
 # We exclude /boot, which contains the kernel and default alpine initramfs
 # because we don't need them and it takes up space. The default initramfs is
@@ -52,17 +49,12 @@ cp "${IMAGE_KERNEL}" "${KERNEL_FILE}"
 # isn't needed because both of our boot modes start it from a different place
 # than /boot.
 #
-# Our two boot modes are:
+# The packaged macOS provider boots the UKI from the EFI system partition.
+# Development QEMU runs use the separate kernel, initrd, and command line
+# artifacts emitted alongside the disk.
 #
-#   - Thin image: kernel/initrd/cmdline are passed to the vm manager and started
-#     directly, the vm doesn't need /boot at all.
-#   - Fat image: We pack the kernel and initrd together into a UKI below and put
-#     it in the EFI system partition. Then the firmware starts that UKI directly
-#     and we don't need the separate kernel binary.
-#
-# We exclude /var because we pack it into the actual disk image so it can be
-# grown during vm startup. We need a place where the VM can put bigger files and
-# e.g. container images at runtime
+# We exclude /var because the guest initializes it on the attached runtime disk.
+# This gives Podman and other VM services persistent writable space.
 
 pushd "${IMAGE_DIR}"
 find . -xdev -not -path './boot/*' -not -path './var/*' |
@@ -132,14 +124,13 @@ EOF
 # - https://github.com/systemd/systemd/issues/40774
 # - https://github.com/systemd/systemd/issues/36370
 #
-# This means that the fat image is too big because our kernel + initrd is
-# only ~75MiB. However, because the rest of the ESP is empty this compresses
-# extremely well and currently we mostly care about the thin image anyway.
+# This means that the raw image is larger than the kernel and initrd require.
+# The empty portion of the ESP compresses extremely well in the provider package.
 
 # Remove target files because systemd-repart refuses to overwrite them
 # This is technically racy for concurrent builds but we probably don't care and
 # littering `output` with temporary files is just a different failure mode.
-rm -f "${RAW_DISK_THIN_FILE}" "${RAW_DISK_FILE}" "${VHDX_FILE}"
+rm -f "${RAW_DISK_FILE}"
 
 SYSTEMD_REPART_ARGS=(
     --dry-run=no
@@ -152,11 +143,4 @@ SYSTEMD_REPART_ARGS=(
     --copy-source="${COPY_SOURCE_DIR}"
 )
 
-# Exclude esp from the thin image to save space because with the thin image
-# you're passing the kernel/initrd/cmdline directly to your vm manager and don't
-# need it duplicated in the esp/boot
-systemd-repart "${SYSTEMD_REPART_ARGS[@]}" --exclude-partitions=esp "${RAW_DISK_THIN_FILE}"
-
 systemd-repart "${SYSTEMD_REPART_ARGS[@]}"  "${RAW_DISK_FILE}"
-
-qemu-img convert -f raw -O vhdx -o subformat=dynamic "${RAW_DISK_FILE}" "${VHDX_FILE}"

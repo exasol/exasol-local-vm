@@ -1,24 +1,23 @@
+#!/bin/sh
 # Copyright 2026 Exasol AG
 # SPDX-License-Identifier: MIT
 
-#!/bin/sh
 # Import SSH keys from shared folder
-# Based on container/import-shared-keys.sh
 set -eu
 
 # Validate required environment variables
-if [ -z "${EXASOL_VM_HOST_SHARED_DIR:-}" ]; then
-  echo "Error: EXASOL_VM_HOST_SHARED_DIR environment variable is not set" >&2
+if [ -z "${LOCAL_VM_HOST_SHARED_DIR:-}" ]; then
+  echo "Error: LOCAL_VM_HOST_SHARED_DIR environment variable is not set" >&2
   exit 1
 fi
 
-if [ ! -d "$EXASOL_VM_HOST_SHARED_DIR" ]; then
-  echo "Error: EXASOL_VM_HOST_SHARED_DIR directory does not exist: $EXASOL_VM_HOST_SHARED_DIR" >&2
+if [ ! -d "$LOCAL_VM_HOST_SHARED_DIR" ]; then
+  echo "Error: LOCAL_VM_HOST_SHARED_DIR directory does not exist: $LOCAL_VM_HOST_SHARED_DIR" >&2
   exit 1
 fi
 
 AUTHORIZED_KEYS="authorized_keys"
-SHARED_KEYS="$EXASOL_VM_HOST_SHARED_DIR/$AUTHORIZED_KEYS"
+SHARED_KEYS="$LOCAL_VM_HOST_SHARED_DIR/$AUTHORIZED_KEYS"
 
 log_msg() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [SSH] $1"
@@ -80,11 +79,5 @@ setup_user_keys() {
 
 # Set up SSH keys for root user
 setup_user_keys "/root"
-
-# Update init output file with SSH port
-if [ -n "${INIT_OUTPUT_FILE:-}" ]; then
-  jq '.ports.ssh = 22' "$INIT_OUTPUT_FILE" > "${INIT_OUTPUT_FILE}.tmp" && mv "${INIT_OUTPUT_FILE}.tmp" "$INIT_OUTPUT_FILE"
-  log_msg "Updated init output file with SSH port"
-fi
 
 log_msg "SSH keys imported successfully"

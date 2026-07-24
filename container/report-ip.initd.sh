@@ -21,7 +21,7 @@ start() {
         
         if [ -n "$IP" ]; then
                 # Log to console in a parseable format
-                echo "*** EXASOL_VM_IP=$IP ***" > /dev/console
+                echo "*** LOCAL_VM_IP=$IP ***" > /dev/console
                 eend 0
         else
                 ewarn "Could not determine VM IP address"

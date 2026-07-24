@@ -65,15 +65,15 @@ export MACOS_SIGN_KEYCHAIN="/path/to/your/signing.keychain"
 export MACOS_SIGN_IDENTITY="Developer ID Application: Your Name (TEAM_ID)"
 
 # Build with signing
-task build-mac-launcher IMG_ARCH=aarch64
+task build-mac-provider IMG_ARCH=aarch64
 ```
 
 ## Verification
 
-After signing, the launcher will be verified to ensure the virtualization entitlement is present:
+After signing, the provider will be verified to ensure the virtualization entitlement is present:
 
 ```bash
-codesign -d --entitlements :- release/launcher/darwin/aarch64/launcher
+codesign -d --entitlements :- release/local-vm/darwin/aarch64/local-vm
 ```
 
 You should see:
@@ -84,8 +84,8 @@ You should see:
 
 ## Notarization
 
-The build workflow automatically notarizes the launcher binary with Apple if the notarization secrets are configured. This removes "unverified developer" warnings when users download and run the launcher.
+The build workflow automatically notarizes the provider binary with Apple. This removes "unverified developer" warnings when users download and run the provider.
 
-Notarization happens after signing and produces a `.zip` file that contains the notarized binary. Both the raw binary and the notarized zip are included in the build artifacts.
+Notarization happens after signing and validates the `.zip` file containing the provider. The archive and its SHA-256 checksum are included in the build artifacts.
 
 See [Apple's notarization documentation](https://developer.apple.com/documentation/security/notarizing_macos_software_before_distribution) for more details.

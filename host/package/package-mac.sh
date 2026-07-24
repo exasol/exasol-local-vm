@@ -5,7 +5,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
-    echo "Error: pass image architecture as argument (x86_64 or aarch64)" >&2
+    echo "Error: pass image architecture as argument (aarch64)" >&2
     exit 1
 fi
 IMG_ARCH="${1}"
@@ -29,11 +29,11 @@ if [ ! -f "$ARCH_FILE" ]; then
 fi
 
 ARCH="$(tr -d '\n' < "$ARCH_FILE")"
-case "$ARCH" in
-    x86_64) PACKAGE_NAME="mac-x86_64" ;;
-    aarch64) PACKAGE_NAME="mac-arm64" ;;
-    *) echo "Error: unknown architecture: $ARCH" >&2; exit 1 ;;
-esac
+if [ "$ARCH" != "aarch64" ]; then
+    echo "Error: macOS provider packaging only supports aarch64, got: $ARCH" >&2
+    exit 1
+fi
+PACKAGE_NAME="mac-arm64"
 
 PACKAGE_DIR="$ROOT_DIR/package/$PACKAGE_NAME"
 RELEASE_FILE="$ROOT_DIR/release/$PACKAGE_NAME.tar.xz"
@@ -45,18 +45,18 @@ cp "$RAW_DISK" "$PACKAGE_DIR/disk.img"
 # Kernel, initramfs, and cmdline are bundled in the ESP partition as a UKI
 # Modern ARM64 kernels have EFI stub and require UEFI boot
 
-# Create the release archive first (without launcher).
-# This archive is embedded into the macOS launcher binary, so it is packed at the
+# Create the VM payload archive.
+# This archive is embedded into the macOS provider binary, so it is packed at the
 # maximum xz level. -9 --extreme costs build-time CPU/memory only; launch-time
 # decompression is unaffected.
 tar -C "$ROOT_DIR/package" -cf - "$PACKAGE_NAME" | xz -9 --extreme -v > "$RELEASE_FILE"
 
 echo "==> macOS package archive created: $RELEASE_FILE"
 
-# Build the Go launcher with embedded release archive
-echo "==> Building macOS launcher..."
-LAUNCHER_DIR="$ROOT_DIR/launcher/mac"
-pushd "$LAUNCHER_DIR" > /dev/null
+# Stage the payload for the Go provider build.
+echo "==> Staging macOS provider payload..."
+PROVIDER_SOURCE_DIR="$ROOT_DIR/launcher/mac"
+pushd "$PROVIDER_SOURCE_DIR" > /dev/null
 
 # Copy the release archive to be embedded
 cp "$RELEASE_FILE" vm-package.tar.xz

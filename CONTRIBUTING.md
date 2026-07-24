@@ -54,6 +54,5 @@ This repository is licensed under the [MIT License](./LICENSE). By submitting
 a pull request, you agree that your contributions are licensed under the same
 terms.
 
-This repository may build or run Exasol software that is distributed under its
-own license terms. The MIT License for this repository does not change the
-license terms of separately distributed Exasol products or images.
+This repository builds a generic macOS VM provider. Caller-owned workloads and
+images are supplied at runtime and remain subject to their own license terms.

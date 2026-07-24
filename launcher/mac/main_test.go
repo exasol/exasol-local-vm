@@ -4,191 +4,58 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
-func TestVersionCommandOutput(t *testing.T) {
-	previousVersion := runnerVersion
-	runnerVersion = "v1.2.3"
-	t.Cleanup(func() { runnerVersion = previousVersion })
-
-	var output bytes.Buffer
-	versionCmd(&output)
-	if got, want := output.String(), "v1.2.3\n"; got != want {
-		t.Fatalf("version output = %q, want %q", got, want)
-	}
-}
-
-func TestAuthorizedKeyFromPrivateKeyMatchesGeneratedPublicKey(t *testing.T) {
+func TestGenerateSSHKeyPairWritesMatchingKeys(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
 	privateKeyPath := filepath.Join(tempDir, "id_ed25519")
-	generatedAuthorizedKeysPath := filepath.Join(tempDir, "generated_authorized_keys")
-	importedAuthorizedKeysPath := filepath.Join(tempDir, "imported_authorized_keys")
+	authorizedKeysPath := filepath.Join(tempDir, "authorized_keys")
 
-	if err := generateSSHKeyPair(privateKeyPath, generatedAuthorizedKeysPath); err != nil {
+	if err := generateSSHKeyPair(privateKeyPath, authorizedKeysPath); err != nil {
 		t.Fatalf("generateSSHKeyPair() error = %v", err)
 	}
 
-	authorizedKey, err := authorizedKeyFromPrivateKey(privateKeyPath)
+	privateKeyInfo, err := os.Stat(privateKeyPath)
 	if err != nil {
-		t.Fatalf("authorizedKeyFromPrivateKey() error = %v", err)
+		t.Fatalf("failed to stat private key: %v", err)
 	}
-	if err := os.WriteFile(importedAuthorizedKeysPath, authorizedKey, 0644); err != nil {
-		t.Fatalf("failed to write imported authorized key: %v", err)
+	if got := privateKeyInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("private key mode = %o, want 600", got)
 	}
 
-	generatedAuthorizedKey, err := os.ReadFile(generatedAuthorizedKeysPath)
+	privateKey, err := os.ReadFile(privateKeyPath)
 	if err != nil {
-		t.Fatalf("failed to read generated authorized key: %v", err)
+		t.Fatalf("failed to read private key: %v", err)
 	}
-	importedAuthorizedKey, err := os.ReadFile(importedAuthorizedKeysPath)
+	signer, err := ssh.ParsePrivateKey(privateKey)
 	if err != nil {
-		t.Fatalf("failed to read imported authorized key: %v", err)
-	}
-	if string(importedAuthorizedKey) != string(generatedAuthorizedKey) {
-		t.Fatalf("imported authorized key does not match generated public key")
-	}
-}
-
-func TestVersionCheckRuntimeConfigFromOptionsUsesRunnerContract(t *testing.T) {
-	config := versionCheckRuntimeConfigFromOptions(VersionCheckOptions{
-		Enabled:         false,
-		IntervalSeconds: 42,
-		Identity:        "exasol-personal;deployment;small;default",
-		URL:             "https://metrics.example.test/v1/version-check",
-	})
-
-	if config.Enabled {
-		t.Fatal("expected version checks to be disabled")
-	}
-	if config.IntervalSeconds != 42 {
-		t.Fatalf("expected interval 42, got %d", config.IntervalSeconds)
-	}
-	if config.Identity != "exasol-personal;deployment;small;default" {
-		t.Fatalf("unexpected identity: %q", config.Identity)
-	}
-	if config.URL != "https://metrics.example.test/v1/version-check" {
-		t.Fatalf("unexpected URL: %q", config.URL)
-	}
-	if config.OperatingSystem != versionCheckOperatingSystem(runtime.GOOS) {
-		t.Fatalf("unexpected operating system: %q", config.OperatingSystem)
-	}
-}
-
-func TestVersionCheckRuntimeConfigFromOptionsDefaults(t *testing.T) {
-	config := versionCheckRuntimeConfigFromOptions(VersionCheckOptions{
-		Enabled: true,
-	})
-
-	if !config.Enabled {
-		t.Fatal("expected version checks to be enabled")
-	}
-	if config.IntervalSeconds != defaultVersionCheckIntervalSeconds {
-		t.Fatalf("expected default interval %d, got %d", defaultVersionCheckIntervalSeconds, config.IntervalSeconds)
-	}
-	if config.Identity != defaultVersionCheckIdentity {
-		t.Fatalf("expected default identity %q, got %q", defaultVersionCheckIdentity, config.Identity)
-	}
-	if config.URL != defaultVersionCheckURL {
-		t.Fatalf("expected default URL %q, got %q", defaultVersionCheckURL, config.URL)
-	}
-	if config.OperatingSystem != versionCheckOperatingSystem(runtime.GOOS) {
-		t.Fatalf("unexpected operating system: %q", config.OperatingSystem)
-	}
-}
-
-func TestVersionCheckOperatingSystem(t *testing.T) {
-	tests := map[string]string{
-		"darwin":  "MacOS",
-		"linux":   "Linux",
-		"windows": "Windows",
-		"":        "unknown",
-		"freebsd": "freebsd",
+		t.Fatalf("failed to parse generated private key: %v", err)
 	}
 
-	for goos, want := range tests {
-		if got := versionCheckOperatingSystem(goos); got != want {
-			t.Fatalf("versionCheckOperatingSystem(%q) = %q, want %q", goos, got, want)
-		}
-	}
-}
-
-func TestWriteVersionCheckRuntimeConfig(t *testing.T) {
-	tempDir := t.TempDir()
-	config := VersionCheckRuntimeConfig{
-		Enabled:         true,
-		IntervalSeconds: 7,
-		Identity:        "exasol-personal;deployment;small;default",
-		URL:             "https://metrics.example.test/v1/version-check",
-		OperatingSystem: "MacOS",
-	}
-
-	if err := writeVersionCheckRuntimeConfig(tempDir, config); err != nil {
-		t.Fatalf("writeVersionCheckRuntimeConfig() error = %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(tempDir, versionCheckRuntimeConfigName))
+	authorizedKey, err := os.ReadFile(authorizedKeysPath)
 	if err != nil {
-		t.Fatalf("failed to read version-check runtime config: %v", err)
+		t.Fatalf("failed to read authorized key: %v", err)
 	}
-
-	var decoded VersionCheckRuntimeConfig
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("failed to parse version-check runtime config: %v", err)
-	}
-	if decoded != config {
-		t.Fatalf("decoded config mismatch: got %+v, want %+v", decoded, config)
-	}
-}
-
-func TestRefreshInitDBScriptUpdatesOnlyDatabaseInitializer(t *testing.T) {
-	sharedDir := t.TempDir()
-	initDir := filepath.Join(sharedDir, "init")
-	if err := os.MkdirAll(initDir, 0755); err != nil {
-		t.Fatalf("failed to create init directory: %v", err)
-	}
-
-	initDBPath := filepath.Join(initDir, "init-db.sh")
-	if err := os.WriteFile(initDBPath, []byte("old initializer"), 0644); err != nil {
-		t.Fatalf("failed to seed old init-db.sh: %v", err)
-	}
-	sshKeyPath := filepath.Join(sharedDir, "authorized_keys")
-	const sshKey = "preserve this SSH key\n"
-	if err := os.WriteFile(sshKeyPath, []byte(sshKey), 0600); err != nil {
-		t.Fatalf("failed to seed authorized_keys: %v", err)
-	}
-
-	if err := refreshInitDBScript(sharedDir); err != nil {
-		t.Fatalf("refreshInitDBScript() error = %v", err)
-	}
-
-	updatedScript, err := os.ReadFile(initDBPath)
+	publicKey, _, _, _, err := ssh.ParseAuthorizedKey(authorizedKey)
 	if err != nil {
-		t.Fatalf("failed to read refreshed init-db.sh: %v", err)
+		t.Fatalf("failed to parse authorized key: %v", err)
 	}
-	if string(updatedScript) == "old initializer" || len(updatedScript) == 0 {
-		t.Fatalf("init-db.sh was not refreshed")
-	}
-	preservedKey, err := os.ReadFile(sshKeyPath)
-	if err != nil {
-		t.Fatalf("failed to read authorized_keys: %v", err)
-	}
-	if string(preservedKey) != sshKey {
-		t.Fatalf("authorized_keys changed during init-db.sh refresh: got %q", preservedKey)
+	if got, want := ssh.FingerprintSHA256(publicKey), ssh.FingerprintSHA256(signer.PublicKey()); got != want {
+		t.Fatalf("public key fingerprint = %q, want %q", got, want)
 	}
 }
 
@@ -324,29 +191,29 @@ func newRefusedTCPAddr(t *testing.T) *net.TCPAddr {
 	return addr
 }
 
-func TestLoopbackForwarderProbeReachable(t *testing.T) {
+func TestTCPForwarderProbeReachable(t *testing.T) {
 	t.Parallel()
 
 	addr, closer := newReachableTCPAddr(t)
 	defer closer.Close()
 
-	forwarder := &LoopbackForwarder{name: "test", guestHost: addr.IP.String(), guestPort: addr.Port}
+	forwarder := &tcpForwarder{name: "test", guestHost: addr.IP.String(), guestPort: addr.Port}
 
-	state := forwarder.Probe(context.Background(), time.Second)
+	state := forwarder.probe(context.Background(), time.Second)
 	if state != "reachable" {
-		t.Fatalf("Probe() state = %q, want %q", state, "reachable")
+		t.Fatalf("probe() state = %q, want %q", state, "reachable")
 	}
 }
 
-func TestLoopbackForwarderProbeRefused(t *testing.T) {
+func TestTCPForwarderProbeRefused(t *testing.T) {
 	t.Parallel()
 
 	addr := newRefusedTCPAddr(t)
-	forwarder := &LoopbackForwarder{name: "test", guestHost: addr.IP.String(), guestPort: addr.Port}
+	forwarder := &tcpForwarder{name: "test", guestHost: addr.IP.String(), guestPort: addr.Port}
 
-	state := forwarder.Probe(context.Background(), time.Second)
+	state := forwarder.probe(context.Background(), time.Second)
 	if state != "refused" {
-		t.Fatalf("Probe() state = %q, want %q", state, "refused")
+		t.Fatalf("probe() state = %q, want %q", state, "refused")
 	}
 }
 
@@ -354,15 +221,15 @@ func TestProbeForwardersReportsEveryRegisteredPort(t *testing.T) {
 	// Not run in parallel: exercises the package-level forwarder registry,
 	// which must not race with other tests touching it.
 	previous := forwarderRegistry
-	forwarderRegistry = map[string]*LoopbackForwarder{}
+	forwarderRegistry = map[string]*tcpForwarder{}
 	t.Cleanup(func() { forwarderRegistry = previous })
 
 	reachableAddr, closer := newReachableTCPAddr(t)
 	defer closer.Close()
 	refusedAddr := newRefusedTCPAddr(t)
 
-	registerForwarder("ssh", &LoopbackForwarder{name: "ssh", guestHost: reachableAddr.IP.String(), guestPort: reachableAddr.Port})
-	registerForwarder("db", &LoopbackForwarder{name: "db", guestHost: refusedAddr.IP.String(), guestPort: refusedAddr.Port})
+	registerForwarder("ssh", &tcpForwarder{name: "ssh", guestHost: reachableAddr.IP.String(), guestPort: reachableAddr.Port})
+	registerForwarder("echo", &tcpForwarder{name: "echo", guestHost: refusedAddr.IP.String(), guestPort: refusedAddr.Port})
 
 	got := probeForwarders(context.Background())
 
@@ -372,8 +239,8 @@ func TestProbeForwardersReportsEveryRegisteredPort(t *testing.T) {
 	if got["ssh"].State != "reachable" {
 		t.Fatalf("ssh state = %q, want %q", got["ssh"].State, "reachable")
 	}
-	if got["db"].State != "refused" {
-		t.Fatalf("db state = %q, want %q", got["db"].State, "refused")
+	if got["echo"].State != "refused" {
+		t.Fatalf("echo state = %q, want %q", got["echo"].State, "refused")
 	}
 }
 
@@ -411,8 +278,8 @@ func TestQueryHealthCheckParsesPortStates(t *testing.T) {
 		}
 		json.NewEncoder(conn).Encode(map[string]any{ //nolint:errcheck
 			"ports": map[string]portHealthResponse{
-				"ssh": {State: "reachable"},
-				"db":  {State: "blocked"},
+				"ssh":  {State: "reachable"},
+				"echo": {State: "blocked"},
 			},
 		})
 	}()
@@ -424,7 +291,7 @@ func TestQueryHealthCheckParsesPortStates(t *testing.T) {
 	if ports["ssh"].State != "reachable" {
 		t.Fatalf("ssh state = %q, want %q", ports["ssh"].State, "reachable")
 	}
-	if ports["db"].State != "blocked" {
-		t.Fatalf("db state = %q, want %q", ports["db"].State, "blocked")
+	if ports["echo"].State != "blocked" {
+		t.Fatalf("echo state = %q, want %q", ports["echo"].State, "blocked")
 	}
 }

@@ -36,7 +36,7 @@ start() {
   disk="$(find_data_disk)"
   if [ -z "$disk" ] || [ ! -b "$disk" ]; then
     eerror "No data disk found among /dev/vd* devices."
-    eerror "Ensure the launcher creates and attaches data.img."
+    eerror "Ensure the provider creates and attaches data.img."
     eend 1
     return 1
   fi
@@ -44,7 +44,7 @@ start() {
   einfo "Detected data disk: $disk"
   # Persist for downstream services (grow-var-fs, etc.)
   mkdir -p /run
-  echo "$disk" > /run/exasol-data-disk
+  echo "$disk" > /run/local-vm-runtime-disk
 
   # Diagnostics: log everything we know about this device so a future wipe
   # incident is debuggable from vm-console.log.
@@ -69,14 +69,14 @@ start() {
     fsblocks="$(printf '%s\n' "$sb" | awk -F: '/^Block count:/ {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
     fsbsize="$(printf '%s\n' "$sb"  | awk -F: '/^Block size:/  {gsub(/[[:space:]]/,"",$2); print $2; exit}')"
     einfo "Data disk has valid ext4 superblock (label='$fslabel' blocks=$fsblocks blocksize=$fsbsize)"
-    if [ "$fslabel" = "exasol-data" ]; then
+    if [ "$fslabel" = "local-vm-runtime" ]; then
       einfo "Data disk already formatted with expected label; skipping format"
       eend 0
       return 0
     fi
     # Valid ext4 but wrong label: relabel in place (preserves data).
-    einfo "Relabeling existing ext4 fs to 'exasol-data' (preserving data)..."
-    if e2label "$disk" exasol-data >/dev/null 2>&1; then
+    einfo "Relabeling existing ext4 fs to 'local-vm-runtime' (preserving data)..."
+    if e2label "$disk" local-vm-runtime >/dev/null 2>&1; then
       einfo "Relabeled successfully"
       eend 0
       return 0
@@ -97,7 +97,7 @@ start() {
   fi
 
   einfo "Formatting data disk as ext4 (no valid ext4 superblock found)..."
-  if mkfs.ext4 -L exasol-data -F "$disk" >/dev/null 2>&1; then
+  if mkfs.ext4 -L local-vm-runtime -F "$disk" >/dev/null 2>&1; then
     einfo "Data disk formatted successfully"
     /sbin/mdev -s
     sleep 1

@@ -2,7 +2,7 @@
 # Copyright 2026 Exasol AG
 # SPDX-License-Identifier: MIT
 
-name="grow-var-vs"
+name="grow-var-fs"
 description="Resize /var to fill image"
 
 depend() {
@@ -15,13 +15,13 @@ start() {
   ebegin "Growing partition and filesystem"
 
   # format-data-disk identifies the actual data disk (vda or vdb depending on
-  # virtio enumeration order) and writes it to /run/exasol-data-disk.
-  if [ -r /run/exasol-data-disk ]; then
-    disk="$(cat /run/exasol-data-disk)"
+  # virtio enumeration order) and writes it to /run/local-vm-runtime-disk.
+  if [ -r /run/local-vm-runtime-disk ]; then
+    disk="$(cat /run/local-vm-runtime-disk)"
   fi
 
   if [ -z "$disk" ] || [ ! -b "$disk" ]; then
-    eerror "Data disk path not found (expected in /run/exasol-data-disk)"
+    eerror "Data disk path not found (expected in /run/local-vm-runtime-disk)"
     eend 1
     return 1
   fi

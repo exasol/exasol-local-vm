@@ -1,4 +1,4 @@
-module mac-runner
+module github.com/exasol/exasol-local-vm/launcher/mac
 
 go 1.25.0
 

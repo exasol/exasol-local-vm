@@ -31,16 +31,16 @@ start() {
     fi
     
     # Set environment variables for the init script
-    export EXASOL_VM_INIT_DIR="/mnt/host/init"
-    export EXASOL_VM_HOST_SHARED_DIR="/mnt/host"
+    export LOCAL_VM_INIT_DIR="/mnt/host/init"
+    export LOCAL_VM_HOST_SHARED_DIR="/mnt/host"
     
     # Run init script and capture output to both console and log file
-    # This allows the launcher to see the output markers in console log
+    # This allows the provider to see the output markers in the console log.
     # while also keeping a persistent log for debugging
     INIT_LOG="/mnt/host/init.log"
     # Use POSIX-compliant approach: write to log first, then cat to console
     # This properly captures the init script exit code
-    sh "$INIT_SCRIPT" 2>&1 > "$INIT_LOG"
+    sh "$INIT_SCRIPT" > "$INIT_LOG" 2>&1
     result=$?
     cat "$INIT_LOG"
     

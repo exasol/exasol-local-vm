@@ -43,7 +43,6 @@ body:
       options:
         - Linux
         - macOS
-        - Windows
         - Other
         - Not applicable
 
