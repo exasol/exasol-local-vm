@@ -584,6 +584,47 @@ func TestMachineIsRootful_PodmanFails(t *testing.T) {
 	}
 }
 
+func TestMachineState_Success(t *testing.T) {
+	logPath := installFakePodman(t, `echo Running; exit 0`)
+	state, err := MachineState()
+	if err != nil {
+		t.Fatalf("MachineState() unexpected error: %v", err)
+	}
+	if state != "Running" {
+		t.Errorf("expected state 'Running', got %q", state)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 podman call, got %d: %v", len(calls), calls)
+	}
+	want := []string{"machine", "inspect", "--format", "{{.State}}", "podman-machine-default"}
+	if got := calls[0]; !slicesEqual(got, want) {
+		t.Errorf("argv mismatch: want %v, got %v", want, got)
+	}
+}
+
+func TestMachineState_TrimsWhitespace(t *testing.T) {
+	installFakePodman(t, `printf '  Stopped\n\n'; exit 0`)
+	state, err := MachineState()
+	if err != nil {
+		t.Fatalf("MachineState() unexpected error: %v", err)
+	}
+	if state != "Stopped" {
+		t.Errorf("expected trimmed state 'Stopped', got %q", state)
+	}
+}
+
+func TestMachineState_PodmanFails(t *testing.T) {
+	installFakePodman(t, `echo "machine does not exist" >&2; exit 125`)
+	_, err := MachineState()
+	if err == nil {
+		t.Fatal("expected error when podman machine inspect fails")
+	}
+	if !strings.Contains(err.Error(), "podman machine inspect --format .State failed") {
+		t.Errorf("error should mention the command, got: %v", err)
+	}
+}
+
 func TestStopMachine_Success(t *testing.T) {
 	logPath := installFakePodman(t, `exit 0`)
 	if err := StopMachine(); err != nil {
