@@ -17,3 +17,8 @@ launcher/assets/init/exasol-nano-db.tar.gz
 launcher/assets/init/exasol-nano-db.tar.gz.metadata
 launcher/assets/windows/init/exasol-nano-db.tar.gz
 launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata
+
+# Per-launcher-install container ID written by `windows-launcher init`
+# (plan.md § "Allow multiple instances to be launched simultaneously").
+# Never ships in the launcher zip and never belongs in source control.
+.containerId
