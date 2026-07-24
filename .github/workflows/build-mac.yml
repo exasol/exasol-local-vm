@@ -466,7 +466,7 @@ jobs:
       - name: Install Task
         run: |
           set -euo pipefail
-          TASK_BIN_DIR="$LAUNCHER_TEMP/task-bin"
+          TASK_BIN_DIR="$RUNNER_TEMP/task-bin"
           mkdir -p "$TASK_BIN_DIR"
           sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b "$TASK_BIN_DIR"
           echo "$TASK_BIN_DIR" >> "$GITHUB_PATH"
