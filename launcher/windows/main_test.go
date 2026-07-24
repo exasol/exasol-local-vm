@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -243,6 +244,219 @@ func TestLoadContainerConfigInvalidJSON(t *testing.T) {
 	}
 }
 
+// --- Plan section 2: per-install container ID ---------------------------
+
+func TestGenerateContainerIDIsHex8(t *testing.T) {
+	id, err := generateContainerID()
+	if err != nil {
+		t.Fatalf("generateContainerID: %v", err)
+	}
+	if len(id) != 8 {
+		t.Errorf("expected 8-char id, got %q", id)
+	}
+	// hex.DecodeString accepts only [0-9a-fA-F].
+	if _, err := hex.DecodeString(id); err != nil {
+		t.Errorf("id %q is not valid hex: %v", id, err)
+	}
+}
+
+func TestGenerateContainerIDIsRandom(t *testing.T) {
+	// Two calls in the same process almost certainly differ; a
+	// collision would happen 1 in 2^32 runs and indicates entropy
+	// starvation rather than a code bug.
+	a, err := generateContainerID()
+	if err != nil {
+		t.Fatalf("generateContainerID #1: %v", err)
+	}
+	b, err := generateContainerID()
+	if err != nil {
+		t.Fatalf("generateContainerID #2: %v", err)
+	}
+	if a == b {
+		t.Errorf("two consecutive IDs collided: %q == %q", a, b)
+	}
+}
+
+func TestReadContainerIDMissingReturnsErrNotExist(t *testing.T) {
+	t.Chdir(t.TempDir())
+	_, err := readContainerID()
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected os.ErrNotExist, got %v", err)
+	}
+}
+
+func TestReadContainerIDTrimsWhitespace(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(containerIDPath, []byte("a1b2c3d4\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	id, err := readContainerID()
+	if err != nil {
+		t.Fatalf("readContainerID: %v", err)
+	}
+	if id != "a1b2c3d4" {
+		t.Errorf("expected trimmed id, got %q", id)
+	}
+}
+
+func TestReadContainerIDRejectsEmpty(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(containerIDPath, []byte("   \n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := readContainerID(); err == nil {
+		t.Fatal("expected error on empty containerId file")
+	}
+}
+
+func TestWriteContainerIDRoundTrips(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := writeContainerID("deadbeef"); err != nil {
+		t.Fatalf("writeContainerID: %v", err)
+	}
+	got, err := readContainerID()
+	if err != nil {
+		t.Fatalf("readContainerID: %v", err)
+	}
+	if got != "deadbeef" {
+		t.Errorf("expected round-trip 'deadbeef', got %q", got)
+	}
+}
+
+func TestEnsureContainerIDCreatesWhenMissing(t *testing.T) {
+	t.Chdir(t.TempDir())
+	id, err := ensureContainerID()
+	if err != nil {
+		t.Fatalf("ensureContainerID: %v", err)
+	}
+	if len(id) != 8 {
+		t.Errorf("expected 8-char id, got %q", id)
+	}
+	got, err := readContainerID()
+	if err != nil {
+		t.Fatalf("readContainerID after ensure: %v", err)
+	}
+	if got != id {
+		t.Errorf("ensureContainerID did not persist id: got %q, want %q", got, id)
+	}
+}
+
+func TestEnsureContainerIDReusesExisting(t *testing.T) {
+	// Second ensure on the same working dir must return the same id —
+	// this is the "restart with data preserved" contract.
+	t.Chdir(t.TempDir())
+	first, err := ensureContainerID()
+	if err != nil {
+		t.Fatalf("ensureContainerID #1: %v", err)
+	}
+	second, err := ensureContainerID()
+	if err != nil {
+		t.Fatalf("ensureContainerID #2: %v", err)
+	}
+	if first != second {
+		t.Errorf("expected reuse, got %q then %q", first, second)
+	}
+}
+
+func TestComposeContainerName(t *testing.T) {
+	if got := composeContainerName("exasol-local-db", "a1b2c3d4"); got != "exasol-local-db-a1b2c3d4" {
+		t.Errorf("composeContainerName mismatch: %q", got)
+	}
+}
+
+func TestComposeVolumeName(t *testing.T) {
+	if got := composeVolumeName("a1b2c3d4"); got != "exasol-nano-data-a1b2c3d4" {
+		t.Errorf("composeVolumeName mismatch: %q", got)
+	}
+}
+
+func TestInitCmdWritesContainerID(t *testing.T) {
+	// initCmd must persist a .containerId so subsequent start/stop
+	// have a per-install suffix to use.
+	assets := buildTestTarXZ(t, map[string][]byte{
+		"init/config.json":           []byte(`{"db":{"container_name":"c"}}`),
+		"init/exasol-nano-db.tar.gz": []byte("payload"),
+	})
+	t.Chdir(t.TempDir())
+
+	if err := initCmdWithAssets("", assets); err != nil {
+		t.Fatalf("initCmdWithAssets: %v", err)
+	}
+	id, err := readContainerID()
+	if err != nil {
+		t.Fatalf("readContainerID: %v", err)
+	}
+	if len(id) != 8 {
+		t.Errorf("expected 8-char id, got %q", id)
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		t.Errorf("id %q is not valid hex: %v", id, err)
+	}
+}
+
+func TestInitCmdPreservesExistingContainerID(t *testing.T) {
+	// A second init on the same working dir must not regenerate the id
+	// — that would orphan the previous container's data volume.
+	assets := buildTestTarXZ(t, map[string][]byte{
+		"init/config.json":           []byte(`{"db":{"container_name":"c"}}`),
+		"init/exasol-nano-db.tar.gz": []byte("payload"),
+	})
+	t.Chdir(t.TempDir())
+
+	if err := initCmdWithAssets("", assets); err != nil {
+		t.Fatalf("first init: %v", err)
+	}
+	first, err := readContainerID()
+	if err != nil {
+		t.Fatalf("readContainerID after first init: %v", err)
+	}
+	if err := initCmdWithAssets("", assets); err != nil {
+		t.Fatalf("second init: %v", err)
+	}
+	second, err := readContainerID()
+	if err != nil {
+		t.Fatalf("readContainerID after second init: %v", err)
+	}
+	if first != second {
+		t.Errorf("second init changed id: %q -> %q", first, second)
+	}
+}
+
+func TestStopCmdMissingContainerIDIsNoOp(t *testing.T) {
+	// resources/config.json present but no .containerId (impossible in
+	// practice since init writes both, but this guards against a
+	// hand-edited working dir stopping some other launcher's
+	// container via the legacy shared name).
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
+		t.Fatalf("mkdir resources: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(resourcesDir, "config.json"),
+		[]byte(`{"db":{"container_name":"c"}}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(vmStatePath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("seed vm-state: %v", err)
+	}
+	logPath := installFakePodman(t, `exit 0`)
+
+	if err := stopCmd(); err != nil {
+		t.Fatalf("stopCmd: %v", err)
+	}
+	// No podman calls should have been made — we short-circuit before
+	// any stop/rm.
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 0 {
+		t.Errorf("expected 0 podman calls in missing-.containerId path, got %d: %v",
+			len(calls), calls)
+	}
+	// vm-state.json still gets cleaned up (matches the "no
+	// resources/config.json" branch).
+	if _, err := os.Stat(vmStatePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected vm-state removed, stat err was %v", err)
+	}
+}
+
 // TestBuildPodmanRunArgsExactArgv locks in the argv shape for the
 // canonical Phase 1 fixture config: any drift here is a
 // user-observable behavior change (podman flag order, added/removed
@@ -258,7 +472,7 @@ func TestBuildPodmanRunArgsExactArgv(t *testing.T) {
 		Restart:       "always",
 		Params:        []string{"maxConnectionsLicenseLimit=20"},
 	}
-	got := buildPodmanRunArgs(cfg, "docker.io/exasol/nano:2026.2.0-nano.2", map[string]int{"db": 8563}, VersionCheckOptions{})
+	got := buildPodmanRunArgs(cfg, "docker.io/exasol/nano:2026.2.0-nano.2", map[string]int{"db": 8563}, "exasol-nano-data-testid", VersionCheckOptions{})
 	want := []string{
 		"run", "-d",
 		"--name", "exasol-local-db",
@@ -267,7 +481,7 @@ func TestBuildPodmanRunArgsExactArgv(t *testing.T) {
 		"--security-opt", "unmask=ALL",
 		"--restart", "always",
 		"-p", "8563:8563",
-		"-v", "exasol-nano-data:/exa",
+		"-v", "exasol-nano-data-testid:/exa",
 		"docker.io/exasol/nano:2026.2.0-nano.2",
 		"init",
 		"params=maxConnectionsLicenseLimit=20",
@@ -293,7 +507,7 @@ func TestBuildPodmanRunArgsHostPortMayDifferFromContainerPort(t *testing.T) {
 		SecurityOpt:   "unmask=ALL",
 		Restart:       "always",
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 9090}, VersionCheckOptions{})
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 9090}, "exasol-nano-data-testid", VersionCheckOptions{})
 	var mapping string
 	for i, tok := range got {
 		if tok == "-p" && i+1 < len(got) {
@@ -319,7 +533,7 @@ func TestBuildPodmanRunArgsMultiPortsAreDeterministic(t *testing.T) {
 		SecurityOpt:   "unmask=ALL",
 		Restart:       "always",
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563, "metrics": 9100}, VersionCheckOptions{})
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563, "metrics": 9100}, "exasol-nano-data-testid", VersionCheckOptions{})
 	// Collect all -p mappings in the order they appear.
 	var mappings []string
 	for i := 0; i < len(got); i++ {
@@ -347,7 +561,7 @@ func TestBuildPodmanRunArgsOmitsParamsWhenEmpty(t *testing.T) {
 		Restart:       "always",
 		// no Params
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563}, VersionCheckOptions{})
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563}, "exasol-nano-data-testid", VersionCheckOptions{})
 	for _, tok := range got {
 		if strings.HasPrefix(tok, "params=") {
 			t.Errorf("did not expect a params= token when config has no params, got argv %v", got)
@@ -385,7 +599,7 @@ func TestBuildPodmanRunArgsJoinsMultipleParamsWithSpace(t *testing.T) {
 		Restart:       "always",
 		Params:        []string{"a=1", "b=2", "c=3"},
 	}
-	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563}, VersionCheckOptions{})
+	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563}, "exasol-nano-data-testid", VersionCheckOptions{})
 	var paramsTok string
 	for _, tok := range got {
 		if strings.HasPrefix(tok, "params=") {
@@ -690,7 +904,11 @@ func readArgvCalls(t *testing.T, logPath string) [][]string {
 
 // writeFixtureResources creates ./resources/config.json in the current
 // working directory with the canonical shipping schema. Used by
-// stop/status tests that need loadContainerConfig to succeed.
+// stop/status tests that need loadContainerConfig to succeed. Also
+// writes a fixed .containerId ("testid") so stop/status/resize can
+// compose the per-install container name; every stop/status test in
+// this file uses this helper, so anywhere the test's expected argv
+// references the container name it must use "exasol-local-db-testid".
 func writeFixtureResources(t *testing.T) {
 	t.Helper()
 	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
@@ -710,6 +928,9 @@ func writeFixtureResources(t *testing.T) {
 }`)
 	if err := os.WriteFile(filepath.Join(resourcesDir, "config.json"), fixture, 0o644); err != nil {
 		t.Fatalf("write fixture config: %v", err)
+	}
+	if err := os.WriteFile(containerIDPath, []byte("testid\n"), 0o644); err != nil {
+		t.Fatalf("write fixture container id: %v", err)
 	}
 }
 
@@ -736,11 +957,11 @@ func TestStopCmdHappyPath(t *testing.T) {
 	if len(calls) != 3 {
 		t.Fatalf("expected 3 podman calls, got %d: %v", len(calls), calls)
 	}
-	wantStop := []string{"stop", "--ignore", "--time", "30", "exasol-local-db"}
+	wantStop := []string{"stop", "--ignore", "--time", "30", "exasol-local-db-testid"}
 	if !stringsEqual(calls[1], wantStop) {
 		t.Errorf("stop argv: want %v, got %v", wantStop, calls[1])
 	}
-	wantRm := []string{"rm", "--ignore", "exasol-local-db"}
+	wantRm := []string{"rm", "--ignore", "exasol-local-db-testid"}
 	if !stringsEqual(calls[2], wantRm) {
 		t.Errorf("rm argv: want %v, got %v", wantRm, calls[2])
 	}
@@ -972,6 +1193,7 @@ func TestBuildPodmanRunArgsInsertsVersionCheckIdentityBeforeImage(t *testing.T) 
 		Restart:       "always",
 	}
 	got := buildPodmanRunArgs(cfg, "img:v1", map[string]int{"db": 8563},
+		"exasol-nano-data-testid",
 		VersionCheckOptions{Enabled: true, Identity: "me"})
 	// -e must appear before the image ref, and VERSION_CHECK_IDENTITY=me
 	// must be the immediately-following argv token.

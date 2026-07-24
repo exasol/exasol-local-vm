@@ -12,7 +12,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -78,10 +80,18 @@ const (
 	runtimeConfigPath = "vm-config.json"
 	vmStatePath       = "vm-state.json"
 
-	// dataVolumeName is the podman named volume that persists /exa
-	// across container restarts. Matches the mac guest-side
+	// containerIDPath holds the 8-char hex suffix appended to the podman
+	// container name and data volume name, so multiple launcher installs
+	// on the same podman machine don't collide. Written on `init`, read
+	// by `start` / `stop` / `status`. See plan.md § "Allow multiple
+	// instances to be launched simultaneously".
+	containerIDPath = ".containerId"
+
+	// dataVolumeBaseName is the prefix the launcher composes with the
+	// per-install container ID to form the actual podman volume name
+	// (e.g. exasol-nano-data-a1b2c3d4). Matches the mac guest-side
 	// -v "$EXA_DATA_DIR:/exa" bind mount in launcher/assets/init/init-db.sh.
-	dataVolumeName = "exasol-nano-data"
+	dataVolumeBaseName = "exasol-nano-data"
 
 	// TODO This should come from code shared between the mac and windows versions
 	versionCheckMinIntervalSeconds      = 60
@@ -372,6 +382,106 @@ func writeRuntimeConfig(config RuntimeConfig) error {
 	return nil
 }
 
+// generateContainerID returns 8 hex chars from crypto/rand. Used as
+// the per-launcher-install suffix that keeps multiple launcher installs
+// on the same podman machine from colliding on container / volume
+// names. See plan.md § "Allow multiple instances to be launched
+// simultaneously".
+//
+// 4 bytes gives 2^32 ≈ 4.3 billion suffixes — enough to avoid collision
+// on any realistic single host without the ergonomic cost of a longer
+// suffix in `podman ps` output.
+func generateContainerID() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate container id: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// readContainerID loads the persisted suffix from containerIDPath. A
+// missing file is returned as os.ErrNotExist wrapped verbatim so
+// callers can distinguish "init has not run" from a real I/O error.
+func readContainerID() (string, error) {
+	data, err := os.ReadFile(containerIDPath)
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(data))
+	if id == "" {
+		return "", fmt.Errorf("%s is empty", containerIDPath)
+	}
+	return id, nil
+}
+
+// writeContainerID persists the suffix. Trailing newline for readable
+// `cat`.
+func writeContainerID(id string) error {
+	if err := os.WriteFile(containerIDPath, []byte(id+"\n"), 0644); err != nil {
+		return fmt.Errorf("write %s: %w", containerIDPath, err)
+	}
+	return nil
+}
+
+// composeContainerName joins a base container name from config.json
+// with the per-install ID suffix. Kept as a helper (rather than
+// inlined) so tests can assert on the exact naming scheme and future
+// callers (status, resize-data, diagnostics) share one implementation.
+func composeContainerName(base, id string) string {
+	return base + "-" + id
+}
+
+// composeVolumeName is the analogue of composeContainerName for the
+// podman data volume that mounts /exa inside the container.
+func composeVolumeName(id string) string {
+	return dataVolumeBaseName + "-" + id
+}
+
+// ensureContainerID reads .containerId if it exists; otherwise
+// generates a new suffix, writes it, and returns it. Called from
+// initCmd so the ID is available to every subsequent invocation.
+// Idempotent: re-running init on an existing working dir reuses the
+// prior suffix so the previous container's data volume is still
+// addressable.
+func ensureContainerID() (string, error) {
+	id, err := readContainerID()
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	id, err = generateContainerID()
+	if err != nil {
+		return "", err
+	}
+	if err := writeContainerID(id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// loadCfgWithContainerID is the shared "startCmd/stopCmd/statusCmd
+// pre-flight" helper: it loads resources/config.json, reads
+// .containerId, and returns a dbContainerConfig whose ContainerName is
+// the composed per-install name, along with the composed volume name.
+// A missing .containerId is signalled by os.ErrNotExist so callers can
+// treat it as "launcher not initialized" (start) or "nothing to stop"
+// (stop) as appropriate.
+func loadCfgWithContainerID() (dbContainerConfig, string, error) {
+	cfg, err := loadContainerConfig(filepath.Join(resourcesDir, "config.json"))
+	if err != nil {
+		return dbContainerConfig{}, "", err
+	}
+	id, err := readContainerID()
+	if err != nil {
+		return dbContainerConfig{}, "", err
+	}
+	cfg.ContainerName = composeContainerName(cfg.ContainerName, id)
+	return cfg, composeVolumeName(id), nil
+}
+
+
 // extractTarXZ extracts a tar.xz archive to the specified output directory.
 // pathTransform is an optional function to transform archive paths before
 // extracting; returning "" from pathTransform skips the entry.
@@ -468,6 +578,18 @@ func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
 	}
 	fmt.Printf("Runtime config written to: %s\n", runtimeConfigPath)
 
+	// Allocate a per-install container ID suffix (idempotent: reuses an
+	// existing .containerId if init has already run in this working
+	// directory). Both the podman container name and the data volume
+	// name compose this suffix so two launcher installs on the same
+	// podman machine don't collide. See plan.md § "Allow multiple
+	// instances to be launched simultaneously".
+	id, err := ensureContainerID()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Container ID: %s (written to %s)\n", id, containerIDPath)
+
 	fmt.Printf("Resources extracted to: %s/\n", resourcesDir)
 	fmt.Println("Initialized. Run 'windows-launcher start <cpu> <ram_mb> <data_size_gb>' to start.")
 
@@ -523,6 +645,19 @@ func startCmd(
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w", configPath, err)
 	}
+	// Compose the per-install container and volume names from the ID
+	// written by init. A missing .containerId means the user has not run
+	// init in this working directory; surface that as a clean
+	// pointer-to-fix rather than a generic file-not-found.
+	id, err := readContainerID()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("launcher not initialized in this directory: run 'windows-launcher init' first")
+		}
+		return err
+	}
+	cfg.ContainerName = composeContainerName(cfg.ContainerName, id)
+	volumeName := composeVolumeName(id)
 
 	// Every override must name a service the container actually exposes.
 	// TestPortOverrideFailsForUnknownService requires the error text to
@@ -609,7 +744,7 @@ func startCmd(
 	}
 	fmt.Printf("Loaded image: %s\n", imageRef)
 
-	args := buildPodmanRunArgs(cfg, imageRef, hostPorts, versionCheckOptions)
+	args := buildPodmanRunArgs(cfg, imageRef, hostPorts, volumeName, versionCheckOptions)
 	for _, svc := range sortedKeys(hostPorts) {
 		fmt.Printf("Publishing %s: localhost:%d -> container:%d\n", svc, hostPorts[svc], cfg.Ports[svc])
 	}
@@ -694,10 +829,13 @@ func loadContainerConfig(path string) (dbContainerConfig, error) {
 // come from cfg.Ports. Services are emitted in alphabetical order so
 // the argv is deterministic and test-assertable.
 //
+// volumeName is the composed per-install podman volume that mounts
+// /exa inside the container (see composeVolumeName).
+//
 // versionCheck controls whether the container is launched with Nano's
 // periodic version-check plumbing enabled and what parameters are
 // baked into exasol.conf on first boot. See versionCheckPodmanArgs.
-func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostPorts map[string]int, versionCheck VersionCheckOptions) []string {
+func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostPorts map[string]int, volumeName string, versionCheck VersionCheckOptions) []string {
 	args := []string{
 		"run", "-d",
 		"--name", cfg.ContainerName,
@@ -716,7 +854,7 @@ func buildPodmanRunArgs(cfg dbContainerConfig, imageRef string, hostPorts map[st
 		}
 		args = append(args, "-p", fmt.Sprintf("%d:%d", hostPort, containerPort))
 	}
-	args = append(args, "-v", dataVolumeName+":/exa")
+	args = append(args, "-v", volumeName+":/exa")
 
 	// Version-check emits BOTH pre-image -e VERSION_CHECK_IDENTITY=...
 	// (only when enabled) and post-init VERSION_CHECK_*= key=value args.
@@ -1185,6 +1323,19 @@ func stopCmd() error {
 		}
 		return fmt.Errorf("failed to load %s: %w", configPath, err)
 	}
+	// Compose the per-install container name. A missing .containerId
+	// means init never wrote one for this working directory; treat that
+	// as "nothing to stop" rather than falling back to the legacy shared
+	// name (which could stop another launcher install's container).
+	id, err := readContainerID()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Println("No .containerId; nothing to stop.")
+			return removeVMState()
+		}
+		return err
+	}
+	cfg.ContainerName = composeContainerName(cfg.ContainerName, id)
 
 	// Offer to install podman-for-windows if missing. Stop can
 	// safely no-op when podman is absent so a declined prompt
@@ -1264,7 +1415,7 @@ func statusCmdTo(w io.Writer) error {
 // checkContainerRunning returns whether the DB container is currently
 // running, absorbing every error mode as "not running".
 func checkContainerRunning() bool {
-	cfg, err := loadContainerConfig(filepath.Join(resourcesDir, "config.json"))
+	cfg, _, err := loadCfgWithContainerID()
 	if err != nil {
 		return false
 	}
@@ -1295,6 +1446,14 @@ func resizeDataDiskCmd(sizeArg string) error {
 		}
 		return fmt.Errorf("failed to load %s: %w", configPath, err)
 	}
+	id, err := readContainerID()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("launcher not initialized: run 'windows-launcher init' first")
+		}
+		return err
+	}
+	cfg.ContainerName = composeContainerName(cfg.ContainerName, id)
 
 	// Container must be stopped. If podman is unavailable, treat the
 	// state as "not running"
