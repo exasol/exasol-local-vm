@@ -321,6 +321,22 @@ func ensureRootfulPodmanMachineCtx(in io.Reader, out io.Writer, required, intera
 		return false, err
 	}
 	if rootful {
+		// The machine is the mode we need. Make sure it is actually
+		// running before returning ok — a rootful machine that was
+		// stopped (user closed WSL, rebooted, ran `podman machine
+		// stop`, etc.) would otherwise trip the caller's next podman
+		// command with "no machine is running", which the launcher
+		// should not require the user to fix by hand.
+		state, err := podman.MachineState()
+		if err != nil {
+			return false, err
+		}
+		if !strings.EqualFold(state, "running") {
+			fmt.Fprintf(out, "Podman machine is rootful but %s; starting it...\n", state)
+			if err := podman.StartMachine(); err != nil {
+				return false, err
+			}
+		}
 		return true, nil
 	}
 	// Rootless — we require rootful. Explain, then prompt.
@@ -691,11 +707,10 @@ func startCmd(
 	// Same required=true policy for the rootful-machine invariant: start
 	// against a rootless machine hits the pasta TLS-reset bug, so the
 	// plan requires we either use an existing rootful machine or convert
-	// with the user's consent.
+	// with the user's consent. ensureRootfulPodmanMachine also verifies
+	// the machine is actually running (and starts it if not), so we do
+	// not need a separate podman.MachineRunning() check here.
 	if _, err := ensureRootfulPodmanMachine(promptIn, promptOut, true); err != nil {
-		return err
-	}
-	if err := podman.MachineRunning(); err != nil {
 		return err
 	}
 

@@ -317,6 +317,26 @@ func MachineIsRootful() (bool, error) {
 	}
 }
 
+// MachineState returns the current lifecycle state of the default
+// podman machine, e.g. "running", "stopped", "starting". Callers
+// typically compare against "running" (case-insensitively) to decide
+// whether a StartMachine is needed. Only meaningful when
+// MachineExists() has already returned true.
+func MachineState() (string, error) {
+	cmd := exec.Command(binary, "machine", "inspect",
+		"--format", "{{.State}}", DefaultMachineName)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf(
+			"podman machine inspect --format .State failed (%w): %s",
+			err, strings.TrimSpace(stderr.String()),
+		)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
 // StopMachine stops the default podman machine. Blocks until the stop
 // completes or podman reports an error. Required before SetMachineRootful
 // because podman rejects the mode change on a running machine.

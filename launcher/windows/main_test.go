@@ -1676,23 +1676,27 @@ func TestEnsurePodmanInstalled_InteractiveWingetFails(t *testing.T) {
 
 // fakePodmanMachineScript is a shell case-switch that gives the fake
 // podman shim realistic responses for the machine subcommands
-// ensureRootfulPodmanMachine invokes. Callers pass listOutput and
-// rootfulOutput to control the two branches; the rest of the machine
-// verbs (init/start/stop/set) succeed silently.
+// ensureRootfulPodmanMachine invokes. Callers pass listOutput,
+// rootfulOutput, and stateOutput to control the three branches; the
+// rest of the machine verbs (init/start/stop/set) succeed silently.
 //
 //	listOutput    stdout for `machine list --format {{.Name}}`. Empty
 //	              string ⇒ no machines. Include DefaultMachineName to
 //	              take the "exists" branch.
 //	rootfulOutput stdout for `machine inspect --format {{.Rootful}} ...`.
 //	              "true" or "false" per the branch you want to exercise.
-func fakePodmanMachineScript(listOutput, rootfulOutput string) string {
+//	stateOutput   stdout for `machine inspect --format {{.State}} ...`.
+//	              "Running" to take the "no-start needed" branch,
+//	              anything else (e.g. "Stopped") to force a start.
+func fakePodmanMachineScript(listOutput, rootfulOutput, stateOutput string) string {
 	// The shim logs argv already; this body only needs to emit the right
 	// stdout per subcommand. We use case-globs against "$@" so the exact
-	// argv from InitMachine / MachineExists / MachineIsRootful is
-	// recognised without hard-coding every arg.
+	// argv from InitMachine / MachineExists / MachineIsRootful / MachineState
+	// is recognised without hard-coding every arg.
 	return `case "$*" in
   "machine list --format {{.Name}}") printf '%s' "` + listOutput + `" ;;
   "machine inspect --format {{.Rootful}} podman-machine-default") printf '%s' "` + rootfulOutput + `" ;;
+  "machine inspect --format {{.State}} podman-machine-default") printf '%s' "` + stateOutput + `" ;;
   *) : ;;
 esac
 exit 0`
@@ -1701,7 +1705,7 @@ exit 0`
 func TestEnsureRootfulPodmanMachine_NoMachine_CreatesRootful(t *testing.T) {
 	// machine list returns nothing ⇒ MachineExists=false ⇒ init rootful
 	// + start.
-	logPath := installFakePodman(t, fakePodmanMachineScript("", ""))
+	logPath := installFakePodman(t, fakePodmanMachineScript("", "", ""))
 
 	var out bytes.Buffer
 	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true)
@@ -1733,10 +1737,11 @@ func TestEnsureRootfulPodmanMachine_NoMachine_CreatesRootful(t *testing.T) {
 	}
 }
 
-func TestEnsureRootfulPodmanMachine_ExistingRootful_NoOp(t *testing.T) {
-	// Machine exists AND is rootful ⇒ inspect twice (list + rootful),
-	// no init/start/stop/set.
-	logPath := installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "true\n"))
+func TestEnsureRootfulPodmanMachine_ExistingRootfulAndRunning_NoOp(t *testing.T) {
+	// Machine exists, is rootful, is already running ⇒ inspect three
+	// times (list + rootful + state) and stop there.
+	logPath := installFakePodman(t, fakePodmanMachineScript(
+		"podman-machine-default\n", "true\n", "Running\n"))
 
 	var out bytes.Buffer
 	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true)
@@ -1744,22 +1749,53 @@ func TestEnsureRootfulPodmanMachine_ExistingRootful_NoOp(t *testing.T) {
 		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
 	}
 	if !ok {
-		t.Fatal("expected ok=true when machine already rootful")
+		t.Fatal("expected ok=true when machine already rootful and running")
 	}
 	calls := readArgvCalls(t, logPath)
-	if len(calls) != 2 {
-		t.Fatalf("expected exactly 2 podman calls (list + inspect rootful), got %d: %v", len(calls), calls)
+	if len(calls) != 3 {
+		t.Fatalf("expected exactly 3 podman calls (list + inspect rootful + inspect state), got %d: %v",
+			len(calls), calls)
 	}
 	// No output on the noop path — silent success is important for
 	// callers on hot paths.
 	if out.Len() != 0 {
-		t.Errorf("expected silent output when machine is already rootful, got %q", out.String())
+		t.Errorf("expected silent output when machine is already rootful and running, got %q", out.String())
+	}
+}
+
+func TestEnsureRootfulPodmanMachine_ExistingRootfulButStopped_StartsIt(t *testing.T) {
+	// Machine exists rootful but is currently Stopped (user rebooted,
+	// closed WSL, ran `podman machine stop`, etc.) ⇒ we must start it
+	// before returning ok so the caller's next podman command does not
+	// trip the "no machine is running" prerequisite check.
+	logPath := installFakePodman(t, fakePodmanMachineScript(
+		"podman-machine-default\n", "true\n", "Stopped\n"))
+
+	var out bytes.Buffer
+	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true)
+	if err != nil {
+		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true after successful start of stopped rootful machine")
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 4 {
+		t.Fatalf("expected 4 podman calls (list, inspect rootful, inspect state, start), got %d: %v",
+			len(calls), calls)
+	}
+	wantStart := []string{"machine", "start"}
+	if !stringsEqual(calls[3], wantStart) {
+		t.Errorf("call 4: want %v, got %v", wantStart, calls[3])
+	}
+	if !strings.Contains(out.String(), "starting it") {
+		t.Errorf("expected 'starting it' progress message in output, got %q", out.String())
 	}
 }
 
 func TestEnsureRootfulPodmanMachine_Rootless_AcceptConverts(t *testing.T) {
 	// Rootless machine + interactive Y ⇒ stop + set --rootful + start.
-	logPath := installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n"))
+	logPath := installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("Y\n")
@@ -1800,7 +1836,7 @@ func TestEnsureRootfulPodmanMachine_Rootless_AcceptConverts(t *testing.T) {
 
 func TestEnsureRootfulPodmanMachine_Rootless_DeclineRequired(t *testing.T) {
 	// Rootless machine + interactive N + required=true ⇒ error.
-	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n"))
+	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("n\n")
@@ -1816,7 +1852,7 @@ func TestEnsureRootfulPodmanMachine_Rootless_DeclineRequired(t *testing.T) {
 func TestEnsureRootfulPodmanMachine_Rootless_DeclineOptional(t *testing.T) {
 	// Rootless machine + interactive N + required=false ⇒ (false, nil)
 	// with a re-prompt hint.
-	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n"))
+	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("n\n")
@@ -1835,7 +1871,7 @@ func TestEnsureRootfulPodmanMachine_Rootless_DeclineOptional(t *testing.T) {
 func TestEnsureRootfulPodmanMachine_Rootless_NonInteractiveRequired(t *testing.T) {
 	// Rootless + non-interactive + required=true ⇒ error with a
 	// script-friendly hint on how to fix it manually.
-	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n"))
+	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
 
 	var out bytes.Buffer
 	_, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, false)
@@ -1850,7 +1886,7 @@ func TestEnsureRootfulPodmanMachine_Rootless_NonInteractiveRequired(t *testing.T
 func TestEnsureRootfulPodmanMachine_Rootless_NonInteractiveOptional(t *testing.T) {
 	// Rootless + non-interactive + required=false ⇒ (false, nil) with
 	// the manual-fix hint printed to out (not returned as error).
-	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n"))
+	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
 
 	var out bytes.Buffer
 	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, false, false)
