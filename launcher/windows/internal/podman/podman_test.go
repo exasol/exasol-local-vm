@@ -420,10 +420,25 @@ func TestRun_Failure(t *testing.T) {
 	}
 }
 
-func TestInitMachine_Success(t *testing.T) {
+func TestInitMachine_Success_Rootful(t *testing.T) {
 	logPath := installFakePodman(t, `exit 0`)
-	if err := InitMachine(40); err != nil {
-		t.Fatalf("InitMachine() unexpected error: %v", err)
+	if err := InitMachine(true, 40); err != nil {
+		t.Fatalf("InitMachine(true, 40) unexpected error: %v", err)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 podman call, got %d: %v", len(calls), calls)
+	}
+	want := []string{"machine", "init", "--disk-size", "40", "--rootful"}
+	if got := calls[0]; !slicesEqual(got, want) {
+		t.Errorf("argv mismatch: want %v, got %v", want, got)
+	}
+}
+
+func TestInitMachine_Success_Rootless(t *testing.T) {
+	logPath := installFakePodman(t, `exit 0`)
+	if err := InitMachine(false, 40); err != nil {
+		t.Fatalf("InitMachine(false, 40) unexpected error: %v", err)
 	}
 	calls := readArgvCalls(t, logPath)
 	if len(calls) != 1 {
@@ -440,21 +455,183 @@ func TestInitMachine_RejectsNonPositiveSize(t *testing.T) {
 	// would be visible (podman not found → different error).
 	t.Setenv("PATH", t.TempDir())
 	for _, size := range []int{0, -1, -100} {
-		if err := InitMachine(size); err == nil {
-			t.Errorf("InitMachine(%d): expected error, got nil", size)
+		if err := InitMachine(true, size); err == nil {
+			t.Errorf("InitMachine(true, %d): expected error, got nil", size)
 		} else if !strings.Contains(err.Error(), "must be positive") {
-			t.Errorf("InitMachine(%d): expected 'must be positive' error, got %v", size, err)
+			t.Errorf("InitMachine(true, %d): expected 'must be positive' error, got %v", size, err)
 		}
 	}
 }
 
 func TestInitMachine_PodmanFails(t *testing.T) {
 	installFakePodman(t, `echo "machine already exists" >&2; exit 125`)
-	err := InitMachine(40)
+	err := InitMachine(true, 40)
 	if err == nil {
 		t.Fatal("expected error when podman machine init fails")
 	}
 	if !strings.Contains(err.Error(), "podman machine init failed") {
+		t.Errorf("error should mention the command: %v", err)
+	}
+}
+
+// --- Plan section 1: rootful default machine helpers -----------------
+
+func TestMachineExists_Present(t *testing.T) {
+	logPath := installFakePodman(t, `printf 'podman-machine-default\n'; exit 0`)
+	exists, err := MachineExists()
+	if err != nil {
+		t.Fatalf("MachineExists() unexpected error: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected exists=true when default machine name appears in output")
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 podman call, got %d: %v", len(calls), calls)
+	}
+	want := []string{"machine", "list", "--format", "{{.Name}}"}
+	if got := calls[0]; !slicesEqual(got, want) {
+		t.Errorf("argv mismatch: want %v, got %v", want, got)
+	}
+}
+
+func TestMachineExists_Absent(t *testing.T) {
+	// Non-default machine present but not our target → exists=false, no error.
+	installFakePodman(t, `printf 'some-other-machine\n'; exit 0`)
+	exists, err := MachineExists()
+	if err != nil {
+		t.Fatalf("MachineExists() unexpected error: %v", err)
+	}
+	if exists {
+		t.Fatal("expected exists=false when default machine name is not listed")
+	}
+}
+
+func TestMachineExists_EmptyOutput(t *testing.T) {
+	installFakePodman(t, `exit 0`)
+	exists, err := MachineExists()
+	if err != nil {
+		t.Fatalf("MachineExists() unexpected error: %v", err)
+	}
+	if exists {
+		t.Fatal("expected exists=false when podman list returns no output")
+	}
+}
+
+func TestMachineExists_PodmanFails(t *testing.T) {
+	installFakePodman(t, `echo "provider not installed" >&2; exit 125`)
+	_, err := MachineExists()
+	if err == nil {
+		t.Fatal("expected error when podman machine list fails")
+	}
+	if !strings.Contains(err.Error(), "podman machine list failed") {
+		t.Errorf("error should mention the command: %v", err)
+	}
+	if !strings.Contains(err.Error(), "provider not installed") {
+		t.Errorf("error should surface stderr, got: %v", err)
+	}
+}
+
+func TestMachineIsRootful_True(t *testing.T) {
+	logPath := installFakePodman(t, `echo true; exit 0`)
+	rootful, err := MachineIsRootful()
+	if err != nil {
+		t.Fatalf("MachineIsRootful() unexpected error: %v", err)
+	}
+	if !rootful {
+		t.Fatal("expected rootful=true when podman prints 'true'")
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 podman call, got %d: %v", len(calls), calls)
+	}
+	want := []string{"machine", "inspect", "--format", "{{.Rootful}}", "podman-machine-default"}
+	if got := calls[0]; !slicesEqual(got, want) {
+		t.Errorf("argv mismatch: want %v, got %v", want, got)
+	}
+}
+
+func TestMachineIsRootful_False(t *testing.T) {
+	installFakePodman(t, `echo false; exit 0`)
+	rootful, err := MachineIsRootful()
+	if err != nil {
+		t.Fatalf("MachineIsRootful() unexpected error: %v", err)
+	}
+	if rootful {
+		t.Fatal("expected rootful=false when podman prints 'false'")
+	}
+}
+
+func TestMachineIsRootful_UnexpectedOutput(t *testing.T) {
+	installFakePodman(t, `echo maybe; exit 0`)
+	_, err := MachineIsRootful()
+	if err == nil {
+		t.Fatal("expected error on unexpected .Rootful value")
+	}
+	if !strings.Contains(err.Error(), "unexpected podman machine .Rootful value") {
+		t.Errorf("error should mention unexpected value, got: %v", err)
+	}
+}
+
+func TestMachineIsRootful_PodmanFails(t *testing.T) {
+	installFakePodman(t, `echo "machine does not exist" >&2; exit 125`)
+	_, err := MachineIsRootful()
+	if err == nil {
+		t.Fatal("expected error when podman machine inspect fails")
+	}
+	if !strings.Contains(err.Error(), "podman machine inspect --format .Rootful failed") {
+		t.Errorf("error should mention the command, got: %v", err)
+	}
+}
+
+func TestStopMachine_Success(t *testing.T) {
+	logPath := installFakePodman(t, `exit 0`)
+	if err := StopMachine(); err != nil {
+		t.Fatalf("StopMachine() unexpected error: %v", err)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 podman call, got %d: %v", len(calls), calls)
+	}
+	want := []string{"machine", "stop"}
+	if got := calls[0]; !slicesEqual(got, want) {
+		t.Errorf("argv mismatch: want %v, got %v", want, got)
+	}
+}
+
+func TestStopMachine_PodmanFails(t *testing.T) {
+	installFakePodman(t, `exit 125`)
+	err := StopMachine()
+	if err == nil {
+		t.Fatal("expected error when podman machine stop fails")
+	}
+	if !strings.Contains(err.Error(), "podman machine stop failed") {
+		t.Errorf("error should mention the command: %v", err)
+	}
+}
+
+func TestSetMachineRootful_Success(t *testing.T) {
+	logPath := installFakePodman(t, `exit 0`)
+	if err := SetMachineRootful(); err != nil {
+		t.Fatalf("SetMachineRootful() unexpected error: %v", err)
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 podman call, got %d: %v", len(calls), calls)
+	}
+	want := []string{"machine", "set", "--rootful"}
+	if got := calls[0]; !slicesEqual(got, want) {
+		t.Errorf("argv mismatch: want %v, got %v", want, got)
+	}
+}
+
+func TestSetMachineRootful_PodmanFails(t *testing.T) {
+	installFakePodman(t, `exit 125`)
+	err := SetMachineRootful()
+	if err == nil {
+		t.Fatal("expected error when podman machine set --rootful fails")
+	}
+	if !strings.Contains(err.Error(), "podman machine set --rootful failed") {
 		t.Errorf("error should mention the command: %v", err)
 	}
 }

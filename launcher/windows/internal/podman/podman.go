@@ -24,6 +24,12 @@ import (
 
 var binary = "podman"
 
+// DefaultMachineName is the podman-for-windows default machine name that
+// the launcher targets exclusively. See plan.md § "Ensure --rootful
+// podman machine" for why we do not enumerate or select between multiple
+// machines.
+const DefaultMachineName = "podman-machine-default"
+
 // Available checks that a podman binary is on PATH and can report its
 // version. It is intended as the very first pre-flight check the launcher
 // performs on start-up.
@@ -220,6 +226,10 @@ func Run(args []string) error {
 // own output so the user can watch progress — the first-time WSL2
 // image download is a multi-minute step.
 //
+// rootful=true adds --rootful so the machine is created in rootful mode
+// from the outset. See the ensureRootfulPodmanMachine doc comment in
+// main.go for the plan-level rationale.
+//
 // diskSizeGB is passed through directly. Zero or negative values
 // return an argument error before invoking podman.
 //
@@ -231,18 +241,104 @@ func Run(args []string) error {
 // every current release, so relying on the default keeps us compatible
 // across both 5.x and 6.x. Users who want Hyper-V can set
 // CONTAINERS_MACHINE_PROVIDER=hyperv in their environment.
-func InitMachine(diskSizeGB int) error {
+func InitMachine(rootful bool, diskSizeGB int) error {
 	if diskSizeGB <= 0 {
 		return fmt.Errorf("podman machine init: disk size must be positive, got %d", diskSizeGB)
 	}
-	cmd := exec.Command(binary,
+	args := []string{
 		"machine", "init",
 		"--disk-size", strconv.Itoa(diskSizeGB),
-	)
+	}
+	if rootful {
+		args = append(args, "--rootful")
+	}
+	cmd := exec.Command(binary, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("podman machine init failed: %w", err)
+	}
+	return nil
+}
+
+// MachineExists reports whether the default podman machine
+// (DefaultMachineName) exists — regardless of whether it is currently
+// running or stopped.
+//
+// Uses `podman machine list --format '{{.Name}}'` and matches by name
+// so that transient errors (socket unreachable, provider not installed,
+// etc.) surface as an error return rather than as a spurious
+// "does not exist" false.
+func MachineExists() (bool, error) {
+	cmd := exec.Command(binary, "machine", "list", "--format", "{{.Name}}")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf(
+			"podman machine list failed (%w): %s",
+			err, strings.TrimSpace(stderr.String()),
+		)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if strings.TrimSpace(line) == DefaultMachineName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// MachineIsRootful reports whether the default podman machine is
+// configured as rootful. Only meaningful when MachineExists() has
+// already returned true; a "does not exist" error from podman is
+// propagated as an error.
+func MachineIsRootful() (bool, error) {
+	cmd := exec.Command(binary, "machine", "inspect",
+		"--format", "{{.Rootful}}", DefaultMachineName)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf(
+			"podman machine inspect --format .Rootful failed (%w): %s",
+			err, strings.TrimSpace(stderr.String()),
+		)
+	}
+	switch strings.ToLower(strings.TrimSpace(stdout.String())) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf(
+			"unexpected podman machine .Rootful value: %q",
+			strings.TrimSpace(stdout.String()),
+		)
+	}
+}
+
+// StopMachine stops the default podman machine. Blocks until the stop
+// completes or podman reports an error. Required before SetMachineRootful
+// because podman rejects the mode change on a running machine.
+func StopMachine() error {
+	cmd := exec.Command(binary, "machine", "stop")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("podman machine stop failed: %w", err)
+	}
+	return nil
+}
+
+// SetMachineRootful flips the default machine to rootful. Podman
+// requires the machine to be stopped first — callers must call
+// StopMachine ahead of this.
+func SetMachineRootful() error {
+	cmd := exec.Command(binary, "machine", "set", "--rootful")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("podman machine set --rootful failed: %w", err)
 	}
 	return nil
 }

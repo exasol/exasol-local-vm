@@ -216,14 +216,14 @@ func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive
 			return false, errors.New(
 				"podman-for-windows is not installed. Re-run this command interactively " +
 					"to install it via winget, or run 'winget install --exact --id RedHat.Podman' " +
-					"and 'podman machine init && podman machine start' first",
+					"and 'podman machine init --rootful && podman machine start' first",
 			)
 		}
 		return false, nil
 	}
 	fmt.Fprintln(out, "podman-for-windows is not installed on this system.")
 	ok, err := promptYesNo(in, out,
-		"Install podman-for-windows via winget and initialize a WSL2 backing VM now (~2-5 minutes)?",
+		"Install podman-for-windows via winget now (~2-5 minutes)?",
 		true,
 	)
 	if err != nil {
@@ -246,15 +246,116 @@ func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive
 	if err := podman.Available(); err != nil {
 		return false, fmt.Errorf("winget install completed but podman is still not on PATH: %w", err)
 	}
-	fmt.Fprintln(out, "Initializing podman WSL2 machine with 40GB disk (this may take a few minutes)...")
-	if err := podman.InitMachine(40); err != nil {
+	fmt.Fprintln(out, "Podman is installed.")
+	return true, nil
+}
+
+// machineDiskSizeGB is the WSL2 backing-disk size passed to
+// `podman machine init --disk-size`. Sized to hold the Exasol nano
+// container image plus data-directory working space with room to spare;
+// larger than the WSL2 default kept us from running out during long
+// integration runs on CI. Not user-tunable — override manually via
+// `podman machine set --disk-size` if you know what you are doing.
+const machineDiskSizeGB = 40
+
+// ensureRootfulPodmanMachine enforces the plan's decision tree on the
+// default podman machine (see plan.md § "Ensure --rootful podman
+// machine"). Callers pass required=true for commands that cannot
+// proceed with a rootless or non-existent machine (start), and
+// required=false for commands that can tolerate a soft failure (init,
+// stop).
+//
+// The launcher targets the default machine only (podman.DefaultMachineName);
+// users with a non-default multi-machine setup are on their own.
+//
+// Decision tree:
+//
+//  1. Default machine does not exist  → create it as rootful, start it,
+//     no prompt.
+//  2. Machine exists and is rootful   → use it, no prompt.
+//  3. Machine exists and is rootless  → prompt to convert. On accept:
+//     stop → `podman machine set --rootful` → start. On decline: error
+//     when required=true, warning-return otherwise.
+//
+// A pre-existing rootless machine cannot serve the launcher because
+// podman-for-windows's rootless port-forwarding path (pasta) resets
+// long-lived TLS connections mid-handshake for at least the Exasol
+// wss:// endpoint. Rootful sidesteps pasta and forwards ports through
+// the WSL2 kernel's nftables path instead.
+//
+// Returns (ok, err). ok is true iff a rootful default machine is ready
+// after this call.
+func ensureRootfulPodmanMachine(in io.Reader, out io.Writer, required bool) (bool, error) {
+	return ensureRootfulPodmanMachineCtx(in, out, required, isTerminal(in))
+}
+
+func ensureRootfulPodmanMachineCtx(in io.Reader, out io.Writer, required, interactive bool) (bool, error) {
+	exists, err := podman.MachineExists()
+	if err != nil {
 		return false, err
 	}
-	fmt.Fprintln(out, "Starting podman machine...")
+	if !exists {
+		fmt.Fprintln(out, "Creating rootful podman WSL2 machine (this may take a few minutes)...")
+		if err := podman.InitMachine(true, machineDiskSizeGB); err != nil {
+			return false, err
+		}
+		fmt.Fprintln(out, "Starting podman machine...")
+		if err := podman.StartMachine(); err != nil {
+			return false, err
+		}
+		fmt.Fprintln(out, "Podman machine is ready.")
+		return true, nil
+	}
+	rootful, err := podman.MachineIsRootful()
+	if err != nil {
+		return false, err
+	}
+	if rootful {
+		return true, nil
+	}
+	// Rootless — we require rootful. Explain, then prompt.
+	fmt.Fprintln(out, "The default podman machine ("+podman.DefaultMachineName+") is currently rootless.")
+	fmt.Fprintln(out, "The launcher requires a rootful podman machine to work around a")
+	fmt.Fprintln(out, "podman-for-windows/pasta issue that resets long-lived TLS connections")
+	fmt.Fprintln(out, "in rootless mode.")
+	if !interactive {
+		msg := podman.DefaultMachineName + " is rootless but rootful is required. " +
+			"Re-run this command interactively to convert it, or run " +
+			"'podman machine stop && podman machine set --rootful && podman machine start' first"
+		if required {
+			return false, errors.New(msg)
+		}
+		fmt.Fprintln(out, msg)
+		return false, nil
+	}
+	ok, err := promptYesNo(in, out,
+		"Convert it to rootful now? This will stop the machine, apply the change, and start it again.",
+		true,
+	)
+	if err != nil {
+		return false, fmt.Errorf("could not read prompt response: %w", err)
+	}
+	if !ok {
+		msg := "the launcher requires a rootful podman machine; aborting"
+		if required {
+			return false, errors.New(msg)
+		}
+		fmt.Fprintln(out, "Skipping rootful conversion. You will be prompted again when you run 'windows-launcher start'.")
+		return false, nil
+	}
+	fmt.Fprintln(out, "Stopping podman machine...")
+	if err := podman.StopMachine(); err != nil {
+		return false, err
+	}
+	fmt.Fprintln(out, "Setting podman machine to rootful...")
+	if err := podman.SetMachineRootful(); err != nil {
+		return false, err
+	}
+	fmt.Fprintln(out, "Restarting podman machine...")
 	if err := podman.StartMachine(); err != nil {
 		return false, err
 	}
-	fmt.Fprintln(out, "Podman is ready.")
+	fmt.Fprintln(out, "Podman machine is now rootful.")
 	return true, nil
 }
 
@@ -377,8 +478,18 @@ func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
 	// failure, etc.) is reported to stderr but does not fail the init
 	// contract — resources/ has already been produced, so a subsequent
 	// `start` still works once the user resolves podman themselves.
-	if _, err := ensurePodmanInstalled(promptIn, promptOut, false); err != nil {
+	installed, err := ensurePodmanInstalled(promptIn, promptOut, false)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: podman prerequisite check failed: %v\n", err)
+		return nil
+	}
+	if installed {
+		// required=false: the plan's rootless→rootful conversion prompt is
+		// offered here on init, but declining is fine — the user will be
+		// prompted again on the next `start`.
+		if _, err := ensureRootfulPodmanMachine(promptIn, promptOut, false); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: podman machine check failed: %v\n", err)
+		}
 	}
 	return nil
 }
@@ -440,6 +551,13 @@ func startCmd(
 	// because start cannot proceed without it — a declined prompt or a
 	// non-interactive session both surface as an error.
 	if _, err := ensurePodmanInstalled(promptIn, promptOut, true); err != nil {
+		return err
+	}
+	// Same required=true policy for the rootful-machine invariant: start
+	// against a rootless machine hits the pasta TLS-reset bug, so the
+	// plan requires we either use an existing rootful machine or convert
+	// with the user's consent.
+	if _, err := ensureRootfulPodmanMachine(promptIn, promptOut, true); err != nil {
 		return err
 	}
 	if err := podman.MachineRunning(); err != nil {
@@ -1080,6 +1198,14 @@ func stopCmd() error {
 		fmt.Println("podman-for-windows is not installed; nothing to stop.")
 		return removeVMState()
 	}
+	// Note: stopCmd deliberately does NOT call ensureRootfulPodmanMachine.
+	// The plan (plan.md § "Ensure --rootful podman machine") lists stop
+	// among the commands that run the decision tree, but doing so here
+	// would either force a machine-conversion teardown that kills the
+	// very container the user is trying to stop cleanly, or (if declined)
+	// annoy them with a prompt during an unattended cleanup. `podman
+	// stop` and `podman rm` work fine against a rootless machine; the
+	// user gets the rootful prompt on the next `start` instead.
 
 	// podman.Stop uses --ignore, so an absent or already-stopped container
 	// is a no-op with a clean exit.
