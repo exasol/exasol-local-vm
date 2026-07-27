@@ -5,18 +5,119 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestEnsureDataDiskCreatesPrivateSparseDisk(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "runtime.img")
+	if err := ensureDataDisk(path, 1); err != nil {
+		t.Fatalf("ensureDataDisk() error = %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("runtime disk mode = %o, want 600", got)
+	}
+	if got, want := info.Size(), int64(1024*1024*1024); got != want {
+		t.Fatalf("runtime disk size = %d, want %d", got, want)
+	}
+}
+
+func TestEnsureDataDiskPreservesExistingCallerDisk(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "runtime.img")
+	content := []byte("caller-owned-runtime")
+	if err := os.WriteFile(path, content, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureDataDisk(path, 100); err != nil {
+		t.Fatalf("ensureDataDisk() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("existing runtime disk changed: got %q, want %q", got, content)
+	}
+}
+
+func TestEnsureDataDiskRejectsSymlink(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := filepath.Join(root, "target.img")
+	if err := os.WriteFile(target, []byte("caller-owned-runtime"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "runtime.img")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ensureDataDisk(link, 100)
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("expected symlink rejection, got %v", err)
+	}
+}
+
+func TestStartTCPForwarderAllocatesDynamicPort(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	forwarder, err := startTCPForwarder(ctx, "dynamic", "127.0.0.1", 0, "127.0.0.1", 22)
+	if err != nil {
+		t.Fatalf("startTCPForwarder() error = %v", err)
+	}
+	cancel()
+	if forwarder.port() == 0 {
+		t.Fatal("dynamic forward did not allocate a host port")
+	}
+	if err := forwarder.close(); err != nil {
+		t.Fatalf("close() error = %v", err)
+	}
+}
+
+func TestStartTCPForwarderRejectsBusyExplicitPort(t *testing.T) {
+	t.Parallel()
+
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	port := busy.Addr().(*net.TCPAddr).Port
+
+	_, err = startTCPForwarder(
+		context.Background(),
+		"explicit",
+		"127.0.0.1",
+		port,
+		"127.0.0.1",
+		22,
+	)
+	if err == nil {
+		t.Fatalf("expected explicit port %d to be rejected while busy", port)
+	}
+}
 
 func TestGenerateSSHKeyPairWritesMatchingKeys(t *testing.T) {
 	t.Parallel()

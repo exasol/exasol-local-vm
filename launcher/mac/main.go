@@ -102,11 +102,10 @@ func generateSSHKeyPair(privateKeyPath, publicKeyPath string) error {
 	return nil
 }
 
-// createSparseDataDisk creates a sparse raw disk image for VM data storage
-// The VM will format it on first boot if needed
+// createSparseDataDisk creates a private sparse raw disk image for VM runtime
+// storage. The VM formats it on first boot if needed.
 func createSparseDataDisk(path string, sizeGB int) error {
-	// Create sparse file (allocates inode, not blocks)
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create disk file: %w", err)
 	}
@@ -511,16 +510,14 @@ func initCmd() error {
 	return nil
 }
 
-// ensureDataDisk creates the data disk at requestedSizeGB if missing,
-// leaves it untouched if it already matches that size, grows it if smaller,
-// and returns an error if the existing disk is larger (shrinking unsupported).
-func ensureDataDisk(path string, requestedSizeGB int) error {
-	requestedBytes := int64(requestedSizeGB) * 1024 * 1024 * 1024
-
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		fmt.Printf("Creating %dGB sparse data disk: %s\n", requestedSizeGB, path)
-		if err := createSparseDataDisk(path, requestedSizeGB); err != nil {
+// ensureDataDisk creates a disk at initialSizeGB when it is absent. An existing
+// regular disk is caller state and is never resized: initialSizeGiB is a
+// creation setting, not a reconciliation target.
+func ensureDataDisk(path string, initialSizeGB int) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Printf("Creating %dGB sparse data disk: %s\n", initialSizeGB, path)
+		if err := createSparseDataDisk(path, initialSizeGB); err != nil {
 			return fmt.Errorf("failed to create data disk: %w", err)
 		}
 		fmt.Println("Data disk created (sparse). It will be formatted as ext4 by VM on first boot.")
@@ -529,29 +526,11 @@ func ensureDataDisk(path string, requestedSizeGB int) error {
 	if err != nil {
 		return fmt.Errorf("failed to stat data disk: %w", err)
 	}
-
-	currentBytes := info.Size()
-	switch {
-	case currentBytes == requestedBytes:
-		fmt.Printf("Data disk already at requested size (%dGB): %s\n", requestedSizeGB, path)
-		return nil
-	case currentBytes < requestedBytes:
-		currentSizeGB := currentBytes / (1024 * 1024 * 1024)
-		fmt.Printf("Growing data disk from %dGB to %dGB: %s\n", currentSizeGB, requestedSizeGB, path)
-		f, err := os.OpenFile(path, os.O_WRONLY, 0644)
-		if err != nil {
-			return fmt.Errorf("failed to open data disk: %w", err)
-		}
-		defer f.Close()
-		if err := f.Truncate(requestedBytes); err != nil {
-			return fmt.Errorf("failed to grow data disk: %w", err)
-		}
-		fmt.Println("Data disk grown. The VM will expand the filesystem on next boot.")
-		return nil
-	default:
-		currentSizeGB := currentBytes / (1024 * 1024 * 1024)
-		return fmt.Errorf("existing data disk is %dGB, larger than requested %dGB; shrinking data disks is not supported", currentSizeGB, requestedSizeGB)
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("existing data disk is not a regular file: %s", path)
 	}
+	fmt.Printf("Using existing data disk unchanged (%d bytes): %s\n", info.Size(), path)
+	return nil
 }
 
 // shutdownVM asks the VM to stop and waits (briefly) for it to actually do
@@ -605,13 +584,11 @@ func pollUntil(deadline time.Time, interval time.Duration, check func() bool) bo
 	return false
 }
 
-func startCmd(cpuCountStr, ramSizeStr string) error {
-	sharedDir := sharedDirName
+func startCmd(config *VMConfig, configPath string) error {
 	fmt.Printf(
-		"Starting generic VM with cpu_count=%s, ram_size=%s, shared_dir=%s\n",
-		cpuCountStr,
-		ramSizeStr,
-		sharedDir,
+		"Starting generic VM with cpu_count=%d, ram_size=%d\n",
+		config.Resources.CPUs,
+		config.Resources.MemoryMiB,
 	)
 
 	// Check if VM has been initialized
@@ -666,14 +643,14 @@ func startCmd(cpuCountStr, ramSizeStr string) error {
 		},
 	}
 
-	if activeStartConfigPath == "" {
+	if configPath == "" {
 		return errors.New("internal error: start config path is missing")
 	}
 	stateDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("failed to resolve state directory: %w", err)
 	}
-	args := []string{executable, "__daemon__", stateDir, activeStartConfigPath}
+	args := []string{executable, "__daemon__", stateDir, configPath}
 
 	process, err := os.StartProcess(executable, args, attr)
 	if err != nil {
@@ -792,7 +769,6 @@ func startCmd(cpuCountStr, ramSizeStr string) error {
 		process.Release()
 
 		fmt.Println("VM started successfully in background")
-		fmt.Printf("Shared folder: %s/ -> /mnt/host (inside VM)\n", sharedDir)
 		fmt.Println("Check vm.log for VM output")
 		fmt.Println("Use 'local-vm stop --state-dir <path>' to stop the VM")
 		return nil
@@ -816,28 +792,21 @@ func runVMDaemonConfig(config *VMConfig) error {
 	sharedDir := sharedDirName
 	sshPrivateKeyPath := defaultSSHPrivateKeyPath
 
-	cpuCountStr := strconv.Itoa(config.Resources.CPUs)
-	ramSizeStr := strconv.Itoa(config.Resources.MemoryMiB)
-
 	if err := startStatusListener(); err != nil {
 		return fmt.Errorf("failed to start status listener: %w", err)
 	}
 
 	fmt.Printf("[%s] VM daemon started\n", time.Now().Format("15:04:05"))
-	fmt.Printf("[%s] Parsing configuration: CPU=%s, RAM=%s MB\n", time.Now().Format("15:04:05"), cpuCountStr, ramSizeStr)
+	fmt.Printf(
+		"[%s] Configuration: CPU=%d, RAM=%d MB\n",
+		time.Now().Format("15:04:05"),
+		config.Resources.CPUs,
+		config.Resources.MemoryMiB,
+	)
 	fmt.Printf("[%s] Using SSH private key: %s\n", time.Now().Format("15:04:05"), sshPrivateKeyPath)
 
-	cpuCount, err := strconv.Atoi(cpuCountStr)
-	if err != nil {
-		return fmt.Errorf("invalid cpu_count: %w", err)
-	}
-
-	ramSize, err := strconv.ParseUint(ramSizeStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid ram_size: %w", err)
-	}
-
-	fmt.Printf("[%s] Configuration parsed: %d CPUs, %d MB RAM\n", time.Now().Format("15:04:05"), cpuCount, ramSize)
+	cpuCount := config.Resources.CPUs
+	ramSize := uint64(config.Resources.MemoryMiB)
 
 	// Use files from vm/ directory
 	vmDir := "vm"

@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -210,19 +209,15 @@ func canonicalConfigPath(path string) (string, error) {
 }
 
 func startConfigCmd(config *VMConfig, configPath string) error {
-	activeStartConfigPath = configPath
 	if isVMRunning() {
-		// A failed or cancelled hook intentionally leaves the VM running.
+		// A failed hook intentionally leaves the VM running.
 		// Re-running start reconciles that hook without replacing the VM.
 		return runBootHook(config)
 	}
 	if err := prepareRuntimeDisk(config); err != nil {
 		return err
 	}
-	if err := startCmd(
-		strconv.Itoa(config.Resources.CPUs),
-		strconv.Itoa(config.Resources.MemoryMiB),
-	); err != nil {
+	if err := startCmd(config, configPath); err != nil {
 		return err
 	}
 	return runBootHook(config)

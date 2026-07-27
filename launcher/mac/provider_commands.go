@@ -11,11 +11,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -24,8 +22,6 @@ const (
 	providerContractFileName = "vm-contract.json"
 	hookLogFileName          = "hook.log"
 )
-
-var activeStartConfigPath string
 
 type vmContractIdentity struct {
 	SchemaVersion int          `json:"schemaVersion"`
@@ -142,6 +138,11 @@ func healthCheckConfigCmd(output io.Writer) error {
 	}
 	if healthErr != nil {
 		state.Phase = VMPhaseDegraded
+		state.Message = fmt.Sprintf("failed to query provider health: %v", healthErr)
+	} else if state.Hook.Phase == HookPhaseNone ||
+		state.Hook.Phase == HookPhaseSucceeded {
+		state.Phase = VMPhaseRunning
+		state.Message = ""
 	}
 	state.UpdatedAt = time.Now().UTC()
 	return json.NewEncoder(output).Encode(state)
@@ -308,24 +309,7 @@ func runBootHook(config *VMConfig) error {
 	command := exec.Command("ssh", args...)
 	command.Stdout = io.MultiWriter(os.Stdout, logFile)
 	command.Stderr = io.MultiWriter(os.Stderr, logFile)
-	if err := command.Start(); err != nil {
-		return finishHook(state, HookPhaseFailed, nil, err)
-	}
-	wait := make(chan error, 1)
-	go func() { wait <- command.Wait() }()
-
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(signals)
-
-	var runErr error
-	select {
-	case runErr = <-wait:
-	case <-signals:
-		_ = command.Process.Signal(syscall.SIGTERM)
-		runErr = <-wait
-		return finishHook(state, HookPhaseCancelled, exitCode(runErr), errors.New("boot hook cancelled"))
-	}
+	runErr := command.Run()
 	if runErr != nil {
 		return finishHook(state, HookPhaseFailed, exitCode(runErr), runErr)
 	}

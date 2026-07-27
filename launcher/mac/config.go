@@ -84,7 +84,6 @@ const (
 	HookPhaseRunning   HookPhase = "running"
 	HookPhaseSucceeded HookPhase = "succeeded"
 	HookPhaseFailed    HookPhase = "failed"
-	HookPhaseCancelled HookPhase = "cancelled"
 )
 
 type EndpointState struct {
