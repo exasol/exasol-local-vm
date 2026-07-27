@@ -39,11 +39,11 @@ func TestEnsureDataDiskCreatesPrivateSparseDisk(t *testing.T) {
 	}
 }
 
-func TestEnsureDataDiskPreservesExistingCallerDisk(t *testing.T) {
+func TestEnsureDataDiskPreservesExistingProviderDisk(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "runtime.img")
-	content := []byte("caller-owned-runtime")
+	content := []byte("provider-runtime")
 	if err := os.WriteFile(path, content, 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestEnsureDataDiskRejectsSymlink(t *testing.T) {
 
 	root := t.TempDir()
 	target := filepath.Join(root, "target.img")
-	if err := os.WriteFile(target, []byte("caller-owned-runtime"), 0o600); err != nil {
+	if err := os.WriteFile(target, []byte("provider-runtime"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "runtime.img")

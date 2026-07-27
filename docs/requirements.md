@@ -3,8 +3,10 @@
 ## Configuration
 
 The provider must accept schema-versioned JSON defining positive CPU and memory
-resources, named shares, named TCP forwards, an optional versioned boot hook,
-and an optional caller-owned runtime disk.
+resources, named shares, named TCP forwards, and an optional versioned boot
+hook. Its fixed 100 GiB sparse disk is provider-owned implementation detail for
+the guest's writable `/var`, not caller configuration or persistent workload
+storage.
 
 Host paths must be absolute and canonical. Symlink and traversal escapes must be
 rejected. Names, guest paths, and explicit host endpoints must be unique.
@@ -17,12 +19,12 @@ only on configuration.
 ## Lifecycle
 
 Initialization must be idempotent for a compatible configuration. Changes to
-shares or the caller runtime disk of an initialized VM must fail clearly rather
-than attach an unintended path.
+shares of an initialized VM must fail clearly. Initialization upgrades
+pre-contract state without replacing its existing provider disk.
 
 The provider must wait for SSH, mount shares, and establish forwarders before
-running the root boot hook. Hook output must be streamed and logged. Failure or
-cancellation must preserve the running VM and all caller-owned data.
+running the root boot hook. Hook output must be streamed and logged. Failure
+must preserve the running VM and all caller-owned data.
 
 Stop must be idempotent and allow the guest to flush writable storage. Destroy
 must remove only provider-owned state below the exact `state-dir`.

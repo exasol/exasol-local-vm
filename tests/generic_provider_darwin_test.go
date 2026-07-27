@@ -92,20 +92,16 @@ func TestDestroyPreservesCallerOwnedPaths(t *testing.T) {
 	if data, err := os.ReadFile(callerMarker); err != nil || string(data) != "preserve" {
 		t.Fatalf("caller share was not preserved: %q, %v", data, err)
 	}
-	if _, err := os.Stat(fixture.runtimeDisk); err != nil {
-		t.Fatalf("caller runtime disk was not preserved: %v", err)
-	}
 }
 
 type providerFixture struct {
-	t           *testing.T
-	root        string
-	binary      string
-	stateDir    string
-	controlDir  string
-	configPath  string
-	runtimeDisk string
-	running     bool
+	t          *testing.T
+	root       string
+	binary     string
+	stateDir   string
+	controlDir string
+	configPath string
+	running    bool
 }
 
 func newProviderFixture(t *testing.T) *providerFixture {
@@ -138,13 +134,12 @@ while true; do nc -l -p 9000 -e /bin/cat; done >/mnt/control/echo.log 2>&1 &
 		t.Fatal(err)
 	}
 	fixture := &providerFixture{
-		t:           t,
-		root:        root,
-		binary:      filepath.Join(root, "local-vm"),
-		stateDir:    filepath.Join(root, "provider-state"),
-		controlDir:  control,
-		configPath:  filepath.Join(root, "config.json"),
-		runtimeDisk: filepath.Join(root, "caller-runtime.img"),
+		t:          t,
+		root:       root,
+		binary:     filepath.Join(root, "local-vm"),
+		stateDir:   filepath.Join(root, "provider-state"),
+		controlDir: control,
+		configPath: filepath.Join(root, "config.json"),
 	}
 	config := map[string]any{
 		"schemaVersion": 1,
@@ -162,8 +157,7 @@ while true; do nc -l -p 9000 -e /bin/cat; done >/mnt/control/echo.log 2>&1 &
 				"hostPort": 0, "guestPort": 9000,
 			},
 		},
-		"bootHook":    map[string]any{"apiVersion": 1, "share": "control", "path": "hooks/start"},
-		"runtimeDisk": map[string]any{"hostPath": fixture.runtimeDisk, "initialSizeGiB": 4},
+		"bootHook": map[string]any{"apiVersion": 1, "share": "control", "path": "hooks/start"},
 	}
 	data, err := json.Marshal(config)
 	if err != nil {

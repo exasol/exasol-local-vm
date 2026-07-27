@@ -456,7 +456,7 @@ func extractTarXZ(data []byte, outputDir string, pathTransform func(string) stri
 	return nil
 }
 
-func initCmd() error {
+func initCmd(preserveProviderDisk bool) error {
 	fmt.Println("Initializing VM...")
 
 	privateKeyPath := defaultSSHPrivateKeyPath
@@ -474,6 +474,9 @@ func initCmd() error {
 		parts := strings.SplitN(path, "/", 2)
 		if len(parts) < 2 {
 			return "" // Skip the top-level directory entry
+		}
+		if preserveProviderDisk && parts[1] == "data.img" {
+			return ""
 		}
 		return parts[1]
 	}); err != nil {
@@ -511,8 +514,8 @@ func initCmd() error {
 }
 
 // ensureDataDisk creates a disk at initialSizeGB when it is absent. An existing
-// regular disk is caller state and is never resized: initialSizeGiB is a
-// creation setting, not a reconciliation target.
+// regular provider disk is never resized: initialSizeGiB is a creation setting,
+// not a reconciliation target.
 func ensureDataDisk(path string, initialSizeGB int) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -885,9 +888,6 @@ func runVMDaemonConfig(config *VMConfig) error {
 
 	// Check for separate data disk first (attach as first device if exists)
 	dataDiskPath := filepath.Join(vmDir, "data.img")
-	if config.RuntimeDisk != nil {
-		dataDiskPath = config.RuntimeDisk.HostPath
-	}
 	if absDataDiskPath, err := filepath.Abs(dataDiskPath); err == nil {
 		if _, err := os.Stat(absDataDiskPath); err == nil {
 			fmt.Printf("[%s] Attaching data disk: %s...\n", time.Now().Format("15:04:05"), dataDiskPath)

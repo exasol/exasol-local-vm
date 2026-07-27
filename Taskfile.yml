@@ -134,13 +134,14 @@ tasks:
       - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
 
   build-mac-development-provider:
-    desc: Build an unsigned local-vm artifact for Personal LOCAL_VM_BINARY testing
+    desc: Build an unsigned local-vm artifact for Personal RUNNER_PATH testing
     requires:
       vars:
         - name: IMG_ARCH
           enum: [aarch64]
     env:
       ALLOW_UNSIGNED_LOCAL_VM: "1"
+      PROVIDER_VERSION: "dev"
     cmds:
       - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
 

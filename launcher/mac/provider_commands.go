@@ -24,18 +24,32 @@ const (
 )
 
 type vmContractIdentity struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	Shares        []Share      `json:"shares"`
-	RuntimeDisk   *RuntimeDisk `json:"runtimeDisk,omitempty"`
+	SchemaVersion int     `json:"schemaVersion"`
+	Shares        []Share `json:"shares"`
 }
 
 func initConfigCmd(config *VMConfig) error {
+	return initConfigWith(config, initCmd)
+}
+
+func initConfigWith(config *VMConfig, initialize func(bool) error) error {
 	if _, err := os.Stat("vm"); err == nil {
-		return validateExistingVMContract(config)
+		if _, contractErr := os.Stat(providerContractFileName); contractErr == nil {
+			return validateExistingVMContract(config)
+		} else if !errors.Is(contractErr, os.ErrNotExist) {
+			return fmt.Errorf("failed to inspect VM ownership contract: %w", contractErr)
+		}
+		if isVMRunning() {
+			return errors.New("cannot upgrade pre-contract VM state while its VM is running")
+		}
+		if err := initialize(true); err != nil {
+			return fmt.Errorf("failed to refresh pre-contract VM assets: %w", err)
+		}
+		return writeVMContract(config)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("failed to inspect VM state: %w", err)
 	}
-	if err := initCmd(); err != nil {
+	if err := initialize(false); err != nil {
 		return err
 	}
 	return writeVMContract(config)
@@ -56,13 +70,12 @@ func validateExistingVMContract(config *VMConfig) error {
 	candidate := vmContractIdentity{
 		SchemaVersion: config.SchemaVersion,
 		Shares:        config.Shares,
-		RuntimeDisk:   config.RuntimeDisk,
 	}
 	existingJSON, _ := json.Marshal(existing)
 	candidateJSON, _ := json.Marshal(candidate)
 	if !bytes.Equal(existingJSON, candidateJSON) {
 		return errors.New(
-			"configured shares or runtime disk are incompatible with the initialized VM; " +
+			"configured shares are incompatible with the initialized VM; " +
 				"destroy and recreate VM-owned state without deleting caller data",
 		)
 	}
@@ -73,7 +86,6 @@ func writeVMContract(config *VMConfig) error {
 	identity := vmContractIdentity{
 		SchemaVersion: config.SchemaVersion,
 		Shares:        config.Shares,
-		RuntimeDisk:   config.RuntimeDisk,
 	}
 	data, err := json.MarshalIndent(identity, "", "  ")
 	if err != nil {
@@ -82,14 +94,8 @@ func writeVMContract(config *VMConfig) error {
 	return writeFileAtomic(providerContractFileName, data, 0o600)
 }
 
-func prepareRuntimeDisk(config *VMConfig) error {
-	path := filepath.Join("vm", "data.img")
-	size := defaultRuntimeGiB
-	if config.RuntimeDisk != nil {
-		path = config.RuntimeDisk.HostPath
-		size = config.RuntimeDisk.InitialSizeGiB
-	}
-	return ensureDataDisk(path, size)
+func prepareProviderDisk() error {
+	return ensureDataDisk(filepath.Join("vm", "data.img"), defaultRuntimeGiB)
 }
 
 func runConfigVMDaemon(configPath string) error {

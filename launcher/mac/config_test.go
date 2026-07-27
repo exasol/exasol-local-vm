@@ -197,6 +197,32 @@ func TestLoadVMConfigRejectsUnknownAndTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestLoadVMConfigRejectsRuntimeDiskConfiguration(t *testing.T) {
+	t.Parallel()
+
+	// Given
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	content := fmt.Sprintf(
+		`{"schemaVersion":1,"resources":{"cpus":2,"memoryMiB":8192},`+
+			`"shares":[{"name":"control","hostPath":%q,"guestPath":"/mnt/control"}],`+
+			`"forwards":[{"name":"ssh","protocol":"tcp","hostPort":0,"guestPort":22}],`+
+			`"runtimeDisk":{"initialSizeGiB":100}}`,
+		root,
+	)
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// When
+	_, err := loadVMConfig(configPath)
+
+	// Then
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected runtime disk configuration to be rejected, got %v", err)
+	}
+}
+
 func TestValidateVMConfigRejectsNonExecutableHook(t *testing.T) {
 	t.Parallel()
 
@@ -241,9 +267,5 @@ func validVMConfig(control, data string) *VMConfig {
 			},
 		},
 		BootHook: &BootHook{APIVersion: hookAPIVersion, Share: "control", Path: "start"},
-		RuntimeDisk: &RuntimeDisk{
-			HostPath:       filepath.Join(filepath.Dir(control), "runtime.img"),
-			InitialSizeGiB: defaultRuntimeGiB,
-		},
 	}
 }

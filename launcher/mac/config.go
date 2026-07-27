@@ -27,12 +27,11 @@ var resourceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
 // VMConfig is the versioned, workload-neutral input contract of local-vm.
 type VMConfig struct {
-	SchemaVersion int          `json:"schemaVersion"`
-	Resources     Resources    `json:"resources"`
-	Shares        []Share      `json:"shares,omitempty"`
-	Forwards      []Forward    `json:"forwards,omitempty"`
-	BootHook      *BootHook    `json:"bootHook,omitempty"`
-	RuntimeDisk   *RuntimeDisk `json:"runtimeDisk,omitempty"`
+	SchemaVersion int       `json:"schemaVersion"`
+	Resources     Resources `json:"resources"`
+	Shares        []Share   `json:"shares,omitempty"`
+	Forwards      []Forward `json:"forwards,omitempty"`
+	BootHook      *BootHook `json:"bootHook,omitempty"`
 }
 
 type Resources struct {
@@ -59,11 +58,6 @@ type BootHook struct {
 	APIVersion int    `json:"apiVersion"`
 	Share      string `json:"share"`
 	Path       string `json:"path"`
-}
-
-type RuntimeDisk struct {
-	HostPath       string `json:"hostPath"`
-	InitialSizeGiB int    `json:"initialSizeGiB"`
 }
 
 type VMPhase string
@@ -299,20 +293,6 @@ func validateVMConfig(config *VMConfig) error {
 		return errors.New(`a TCP forward named "ssh" targeting guest port 22 is required`)
 	}
 
-	if config.RuntimeDisk != nil {
-		canonical, err := canonicalCreatablePath(config.RuntimeDisk.HostPath)
-		if err != nil {
-			return fmt.Errorf("runtimeDisk.hostPath: %w", err)
-		}
-		config.RuntimeDisk.HostPath = canonical
-		if config.RuntimeDisk.InitialSizeGiB == 0 {
-			config.RuntimeDisk.InitialSizeGiB = defaultRuntimeGiB
-		}
-		if config.RuntimeDisk.InitialSizeGiB <= 0 {
-			return errors.New("runtimeDisk.initialSizeGiB must be greater than zero")
-		}
-	}
-
 	return nil
 }
 
@@ -332,26 +312,6 @@ func canonicalExistingPath(path string) (string, error) {
 		return "", fmt.Errorf("%q resolves through a symlink to %q", path, resolved)
 	}
 	return clean, nil
-}
-
-func canonicalCreatablePath(path string) (string, error) {
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("%q is not absolute", path)
-	}
-	clean := filepath.Clean(path)
-	if clean != path {
-		return "", fmt.Errorf("%q is not canonical", path)
-	}
-	if _, err := os.Lstat(clean); err == nil {
-		return canonicalExistingPath(clean)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("failed to inspect %q: %w", clean, err)
-	}
-	parent, err := canonicalExistingPath(filepath.Dir(clean))
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(parent, filepath.Base(clean)), nil
 }
 
 func isCanonicalAbsoluteGuestPath(path string) bool {

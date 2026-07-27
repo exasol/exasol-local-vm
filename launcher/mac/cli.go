@@ -214,7 +214,7 @@ func startConfigCmd(config *VMConfig, configPath string) error {
 		// Re-running start reconciles that hook without replacing the VM.
 		return runBootHook(config)
 	}
-	if err := prepareRuntimeDisk(config); err != nil {
+	if err := prepareProviderDisk(); err != nil {
 		return err
 	}
 	if err := startCmd(config, configPath); err != nil {

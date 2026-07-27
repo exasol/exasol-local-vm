@@ -1,0 +1,35 @@
+# Copyright 2026 Exasol AG
+# SPDX-License-Identifier: MIT
+
+name: Provider contract
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.25"
+          cache-dependency-path: launcher/mac/go.sum
+      - name: Generate minimal embedded test fixtures
+        working-directory: launcher/mac
+        run: |
+          tar -C ../assets -cf - init | xz -1 > init-assets.tar.xz
+          fixture="$(mktemp -d)"
+          trap 'rm -rf "$fixture"' EXIT
+          mkdir -p "$fixture/mac-arm64"
+          : > "$fixture/mac-arm64/data.img"
+          tar -C "$fixture" -cf - mac-arm64 | xz -1 > vm-package.tar.xz
+      - name: Test provider contract
+        working-directory: launcher/mac
+        run: go test ./...

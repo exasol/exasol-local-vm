@@ -110,6 +110,49 @@ func TestHealthCheckConfigTracksProviderHealth(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // The provider contract uses the process working directory.
+func TestInitConfigUpgradesPreContractStateWithoutReplacingProviderDisk(t *testing.T) {
+	// Given
+	stateDir := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	if err := os.Mkdir("vm", 0o750); err != nil {
+		t.Fatal(err)
+	}
+	diskPath := filepath.Join("vm", "data.img")
+	if err := os.WriteFile(diskPath, []byte("legacy-var"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := &VMConfig{SchemaVersion: configSchemaVersion}
+	var preserveProviderDisk bool
+
+	// When
+	err = initConfigWith(config, func(preserve bool) error {
+		preserveProviderDisk = preserve
+		return nil
+	})
+
+	// Then
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preserveProviderDisk {
+		t.Fatal("pre-contract initialization did not request provider-disk preservation")
+	}
+	if data, readErr := os.ReadFile(diskPath); readErr != nil || string(data) != "legacy-var" {
+		t.Fatalf("provider disk changed: data=%q err=%v", data, readErr)
+	}
+	if err := validateStateOwnership("test"); err != nil {
+		t.Fatalf("provider ownership contract was not written: %v", err)
+	}
+}
+
 func TestRunBootHookRecordsSuccessAndFailure(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -67,7 +67,7 @@ chmod +x "$PROVIDER_OUTPUT"
 echo "==> Provider binary: $PROVIDER_OUTPUT"
 
 # Release builds are signed. A manually built artifact used through Personal's
-# LOCAL_VM_BINARY development input may explicitly opt into an unsigned build.
+# RUNNER_PATH development input may explicitly opt into an unsigned build.
 if [ -z "${MACOS_SIGN_KEYCHAIN:-}" ] || [ -z "${MACOS_SIGN_IDENTITY:-}" ]; then
   if [ "${ALLOW_UNSIGNED_LOCAL_VM:-}" = "1" ]; then
     echo "==> Leaving development local-vm artifact unsigned"

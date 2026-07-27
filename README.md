@@ -24,8 +24,9 @@ Configuration, hook, and state schemas are independently versioned. See
 [requirements](docs/requirements.md) for the contract and
 [architecture](docs/architecture.md) for ownership boundaries.
 
-`destroy` removes only provider-owned files below `state-dir`. Configured shares
-and optional runtime disks are caller-owned and survive provider destruction.
+`destroy` removes provider-owned files below `state-dir`, including the fixed
+sparse disk used for the guest's writable `/var`. Configured shares remain
+caller-owned and survive provider destruction.
 
 ## Development
 
