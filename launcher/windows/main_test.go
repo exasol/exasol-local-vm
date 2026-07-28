@@ -1452,13 +1452,19 @@ func installFakeWingetInEmptyPath(t *testing.T, body string) (argvLogPath string
 	return argvLogPath
 }
 
-// stageFakePodmanInstallDir seeds a fresh temp directory with a fake
-// podman shim and points WINDOWS_LAUNCHER_TEST_PODMAN_INSTALL_DIR at it.
-// After winget.EnsurePodmanOnPath() prepends that directory to PATH,
-// subsequent podman calls invoke this shim. The shim logs argv to a
-// file so tests can assert on the install-flow's podman invocations
-// (--version, machine init, machine start).
-func stageFakePodmanInstallDir(t *testing.T, body string) (argvLogPath string) {
+// stagePreinstalledPodman seeds a fresh temp directory with a fake
+// podman shim NOW (before the caller runs ensurePodmanInstalled) and
+// points the winget package's test-only PATH-additions override env
+// var at it. Simulates the "podman-for-windows is already installed on
+// this machine (registered in the registry PATH) but not yet on this
+// launcher process's PATH" state — the exact scenario a subsequent
+// `launcher.exe start` invocation sees after `launcher.exe init` ran
+// winget install in the same PowerShell session.
+//
+// ensurePodmanInstalled's registry-refresh fallback should find the
+// shim via this override and return success without prompting or
+// running winget.
+func stagePreinstalledPodman(t *testing.T, body string) (argvLogPath string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake podman shim uses a POSIX shell script; skipping on windows")
@@ -1474,8 +1480,62 @@ func stageFakePodmanInstallDir(t *testing.T, body string) (argvLogPath string) {
 	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake podman shim in install dir: %v", err)
 	}
-	t.Setenv("WINDOWS_LAUNCHER_TEST_PODMAN_INSTALL_DIR", dir)
+	// Matches podmanPathAdditionsOverrideEnv in internal/winget. Kept
+	// as a string literal here rather than importing the const because
+	// exposing internal test-only knobs across packages is a slippery
+	// slope — the env var name is the contract.
+	t.Setenv("WINDOWS_LAUNCHER_TEST_PODMAN_PATH_ADDITIONS", dir)
 	return argvLogPath
+}
+
+// stagePendingPodmanInstall creates an empty install directory and
+// points the winget package's test-only PATH-additions override env
+// var at it, so a subsequent EnsurePodmanOnPath prepends the (still
+// empty) directory to PATH. Simulates the fresh-install scenario:
+// podman is NOT yet on PATH and NOT yet at the registry-registered
+// location.
+//
+// Returns:
+//
+//   - argvLogPath: where the fake podman shim (once created) will log
+//     its argv. Callers assert on it after ensurePodmanInstalled runs.
+//   - wingetInstallSideEffect: a shell snippet the caller must embed
+//     in the fake winget shim's body so `winget install ...` populates
+//     the install dir with an argv-logging fake podman on success —
+//     mirroring real winget dropping podman.exe into
+//     C:\Program Files\RedHat\Podman.
+//
+// After the caller-supplied fake winget runs, EnsurePodmanOnPath's
+// mergePATH prepends the (now-populated) install dir to PATH and the
+// post-install Available() check succeeds.
+func stagePendingPodmanInstall(t *testing.T, podmanBody string) (argvLogPath, wingetInstallSideEffect string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake podman shim uses a POSIX shell script; skipping on windows")
+	}
+
+	dir := t.TempDir()
+	argvLogPath = filepath.Join(dir, "podman-argv.log")
+	podmanBinPath := filepath.Join(dir, "podman")
+	t.Setenv("WINDOWS_LAUNCHER_TEST_PODMAN_PATH_ADDITIONS", dir)
+
+	// The heredoc delimiter must not appear in podmanBody. Callers use
+	// short bodies like `exit 0` so this constraint is never a concern
+	// in practice.
+	//
+	// Absolute paths for cat/chmod: the fake winget shim executes with
+	// whatever PATH the test set (typically just the winget shim's own
+	// dir), so cat/chmod are not resolvable via LookPath. Hard-code the
+	// standard Linux paths — this is dev-machine test-only code that
+	// t.Skip()s on Windows anyway.
+	wingetInstallSideEffect = "/bin/cat > '" + podmanBinPath + "' <<'STAGED_PODMAN_SHIM_EOF'\n" +
+		"#!/bin/sh\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"" + argvLogPath + "\"; done\n" +
+		"printf -- '---\\n' >> \"" + argvLogPath + "\"\n" +
+		podmanBody + "\n" +
+		"STAGED_PODMAN_SHIM_EOF\n" +
+		"/bin/chmod +x '" + podmanBinPath + "'\n"
+	return argvLogPath, wingetInstallSideEffect
 }
 
 func TestEnsurePodmanInstalled_AlreadyAvailable(t *testing.T) {
@@ -1496,6 +1556,38 @@ func TestEnsurePodmanInstalled_AlreadyAvailable(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("expected no output when podman is available, got %q", out.String())
+	}
+}
+
+func TestEnsurePodmanInstalled_FoundViaRegistryRefresh(t *testing.T) {
+	// The user ran `windows-launcher init` in an earlier PowerShell
+	// session (or launcher invocation in the same shell), which
+	// installed podman-for-windows and registered its bin dir in the
+	// machine PATH. This new launcher process inherits the stale
+	// PowerShell PATH that doesn't have podman on it, but the override
+	// env var stands in for the registry entry.
+	//
+	// ensurePodmanInstalled's fallback must refresh PATH from the
+	// registry (via the override), find podman there, and return
+	// success without prompting the user again. Regression guard for
+	// https://... the "post-install PATH stale" bug.
+	t.Setenv("PATH", t.TempDir()) // empty PATH: no podman, no winget.
+	stagePreinstalledPodman(t, `exit 0`)
+
+	var out bytes.Buffer
+	// If the fallback fails and we drop into the install prompt, this
+	// input would decline; the test would then fail on the return value.
+	in := bytes.NewBufferString("n\n")
+	installed, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	if err != nil {
+		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
+	}
+	if !installed {
+		t.Error("expected installed=true after registry refresh finds podman")
+	}
+	// No prompt should have been shown — the fallback path is silent.
+	if strings.Contains(out.String(), "podman-for-windows is not installed") {
+		t.Errorf("did not expect the install prompt to fire when registry refresh finds podman; output was %q", out.String())
 	}
 }
 
@@ -1567,16 +1659,19 @@ func TestEnsurePodmanInstalled_InteractiveDeclineRequired(t *testing.T) {
 
 func TestEnsurePodmanInstalled_InteractiveAcceptFullFlow(t *testing.T) {
 	// End-to-end happy path for the install-only side: user says Y,
-	// winget install succeeds, EnsurePodmanOnPath finds the staged
-	// install dir, and the post-install Available() sanity check passes
-	// against the fake shim.
+	// Full install-flow test: podman is NOT yet at the registry-
+	// registered location, so the ensurePodmanInstalled fallback
+	// (registry-refresh + Available retry) fails on the first pass and
+	// we drop through to the install prompt. The fake winget shim
+	// creates the podman shim on execution, mirroring real winget
+	// dropping podman.exe into C:\Program Files\RedHat\Podman.
 	//
 	// This test only covers the ensurePodmanInstalled contract — the
 	// machine init/start half of the flow has moved into
 	// ensureRootfulPodmanMachine and is covered by the dedicated tests
 	// further down.
-	wingetLog := installFakeWingetInEmptyPath(t, `exit 0`)
-	podmanLog := stageFakePodmanInstallDir(t, `exit 0`)
+	podmanLog, wingetSideEffect := stagePendingPodmanInstall(t, `exit 0`)
+	wingetLog := installFakeWingetInEmptyPath(t, wingetSideEffect)
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("Y\n")
@@ -1598,7 +1693,6 @@ func TestEnsurePodmanInstalled_InteractiveAcceptFullFlow(t *testing.T) {
 		"install",
 		"--exact", "--id", "RedHat.Podman",
 		"--source", "winget",
-		"--scope", "user",
 		"--accept-source-agreements",
 		"--accept-package-agreements",
 	}
@@ -1616,9 +1710,14 @@ func TestEnsurePodmanInstalled_InteractiveAcceptFullFlow(t *testing.T) {
 		t.Errorf("call 1 argv: want [--version], got %v", podmanCalls[0])
 	}
 
-	// User-visible progress messages should be present.
+	// User-visible progress messages should be present. The prompt must
+	// preview the exact winget command so a security-conscious user can
+	// audit before consenting.
 	for _, want := range []string{
 		"podman-for-windows is not installed",
+		"The launcher can install it now by running:",
+		"winget install --exact --id RedHat.Podman",
+		"may prompt for administrator (UAC) approval",
 		"Installing podman-for-windows via winget",
 		"Podman is installed",
 	} {
@@ -1632,8 +1731,8 @@ func TestEnsurePodmanInstalled_InteractiveAcceptDefaultOnEmptyInput(t *testing.T
 	// Empty input line (just Enter) — defaultYes=true, so the install
 	// flow runs. Same shims as the full-flow test, less-thorough argv
 	// assertion since that's covered above.
-	installFakeWingetInEmptyPath(t, `exit 0`)
-	stageFakePodmanInstallDir(t, `exit 0`)
+	_, wingetSideEffect := stagePendingPodmanInstall(t, `exit 0`)
+	installFakeWingetInEmptyPath(t, wingetSideEffect)
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("\n") // Just Enter → default = Yes.
@@ -1652,11 +1751,13 @@ func TestEnsurePodmanInstalled_InteractiveAcceptDefaultOnEmptyInput(t *testing.T
 
 func TestEnsurePodmanInstalled_InteractiveWingetFails(t *testing.T) {
 	// User says Y but winget install exits non-zero — error surfaces
-	// with winget's stderr streamed through the shared output writer.
+	// with winget's stderr streamed through the shared output writer,
+	// plus the manual-install advisory pointing users at podman.io.
 	installFakeWingetInEmptyPath(t, `echo "package not found" >&2; exit 1`)
-	// Also stage a podman install dir even though we won't reach it —
-	// keeps the env consistent.
-	stageFakePodmanInstallDir(t, `exit 0`)
+	// Also stage a pending podman install dir even though we won't
+	// reach it — keeps the env consistent and ensures the registry-
+	// refresh fallback returns empty on the first Available() check.
+	stagePendingPodmanInstall(t, `exit 0`)
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("y\n")
@@ -1669,6 +1770,18 @@ func TestEnsurePodmanInstalled_InteractiveWingetFails(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "package not found") {
 		t.Errorf("expected winget stderr streamed to output, got %q", out.String())
+	}
+	// The manual-install advisory must appear so the user knows how to
+	// proceed when winget can't handle the install (locked-down machine,
+	// no admin, missing installer variant, ...).
+	for _, want := range []string{
+		"Winget was unable to install podman-for-windows",
+		"https://podman.io/",
+		"https://github.com/podman-container-tools/podman/releases",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("expected %q in output, got %q", want, out.String())
+		}
 	}
 }
 

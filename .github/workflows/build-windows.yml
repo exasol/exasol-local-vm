@@ -89,9 +89,14 @@ jobs:
         # was pre-staged by build-disk-images on ubuntu.
         #
         # CI installs at machine scope (winget's default when running
-        # as admin, which the launcher does). The launcher's own runtime
-        # install (Phase 14, ensurePodmanInstalled in main.go) uses
-        # --scope user for the non-admin end-user case.
+        # as admin, which the CI runner does). The launcher's own runtime
+        # install (Phase 14, ensurePodmanInstalled in main.go) also uses
+        # the default (machine) scope: the RedHat.Podman manifest in
+        # winget-pkgs only publishes a machine-scope installer, so
+        # passing --scope user aborts with 0x8A150010 ("no applicable
+        # installer found") before winget downloads anything. End users
+        # get a UAC prompt on install; that's unavoidable until podman
+        # publishes a user-scope MSI upstream.
         shell: pwsh
         run: |
           # Install podman via winget with two hardening measures against

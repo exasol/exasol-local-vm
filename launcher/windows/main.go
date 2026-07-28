@@ -221,6 +221,27 @@ func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive
 	if err := podman.Available(); err == nil {
 		return true, nil
 	}
+	// First check failed. Two possibilities:
+	//   1. podman-for-windows genuinely is not installed.
+	//   2. It IS installed (e.g. a previous `windows-launcher init` ran
+	//      winget install in this same shell, or the user installed it
+	//      manually) but this process's PATH is stale — Windows never
+	//      refreshes an already-running process's PATH when installers
+	//      register new entries in the registry.
+	//
+	// Try the cheap registry-refresh path before falling through to the
+	// full winget-install prompt. If podman becomes findable after the
+	// refresh, we skip prompting entirely: the user has already done
+	// the install; they just haven't opened a new shell.
+	//
+	// Errors from EnsurePodmanOnPath are treated as "no additional PATH
+	// entries available" — we drop through to the install prompt rather
+	// than surfacing an obscure PowerShell registry-read failure.
+	if err := winget.EnsurePodmanOnPath(); err == nil {
+		if err := podman.Available(); err == nil {
+			return true, nil
+		}
+	}
 	if !interactive {
 		if required {
 			return false, errors.New(
@@ -232,8 +253,11 @@ func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive
 		return false, nil
 	}
 	fmt.Fprintln(out, "podman-for-windows is not installed on this system.")
+	fmt.Fprintln(out, "The launcher can install it now by running:")
+	fmt.Fprintln(out, "  "+winget.PodmanInstallCommand())
+	fmt.Fprintln(out, "This may prompt for administrator (UAC) approval and take a few minutes.")
 	ok, err := promptYesNo(in, out,
-		"Install podman-for-windows via winget now (~2-5 minutes)?",
+		"Run this now?",
 		true,
 	)
 	if err != nil {
@@ -248,6 +272,11 @@ func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive
 	}
 	fmt.Fprintln(out, "Installing podman-for-windows via winget...")
 	if err := winget.InstallPodman(out); err != nil {
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "Winget was unable to install podman-for-windows automatically.")
+		fmt.Fprintln(out, "Please install podman-for-windows manually from https://podman.io/")
+		fmt.Fprintln(out, "(or from https://github.com/podman-container-tools/podman/releases),")
+		fmt.Fprintln(out, "then re-run this command.")
 		return false, err
 	}
 	if err := winget.EnsurePodmanOnPath(); err != nil {

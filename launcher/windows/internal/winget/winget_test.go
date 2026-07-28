@@ -90,12 +90,23 @@ func TestInstallPodman_Success(t *testing.T) {
 		"install",
 		"--exact", "--id", "RedHat.Podman",
 		"--source", "winget",
-		"--scope", "user",
 		"--accept-source-agreements",
 		"--accept-package-agreements",
 	}
 	if !slicesEqual(calls[0], want) {
 		t.Errorf("winget argv:\n  want: %v\n  got:  %v", want, calls[0])
+	}
+}
+
+func TestPodmanInstallCommand(t *testing.T) {
+	// The exact command string shown to the user before the launcher's
+	// Y/n prompt. Kept in the same package as InstallPodman so any drift
+	// between what we advertise and what we actually exec is caught here.
+	got := PodmanInstallCommand()
+	want := "winget install --exact --id RedHat.Podman --source winget " +
+		"--accept-source-agreements --accept-package-agreements"
+	if got != want {
+		t.Errorf("PodmanInstallCommand() =\n  %q\nwant\n  %q", got, want)
 	}
 }
 
@@ -124,14 +135,14 @@ func TestInstallPodman_WingetExitsNonZero(t *testing.T) {
 }
 
 func TestEnsurePodmanOnPath_Success(t *testing.T) {
+	// Simulate the post-install state: the registry-refresh returns a
+	// PATH-additions string containing a directory that already holds
+	// the fake podman shim.
 	installDir := t.TempDir()
-	// Simulate the installed layout: podman.exe (empty content is fine —
-	// we only Stat the directory, not the binary).
 	if err := os.WriteFile(filepath.Join(installDir, "podman.exe"), []byte(""), 0o644); err != nil {
 		t.Fatalf("seed fake install: %v", err)
 	}
-	t.Setenv(podmanInstallDirOverrideEnv, installDir)
-	origPath := os.Getenv("PATH")
+	t.Setenv(podmanPathAdditionsOverrideEnv, installDir)
 	t.Setenv("PATH", "/some/existing/path")
 
 	if err := EnsurePodmanOnPath(); err != nil {
@@ -146,18 +157,48 @@ func TestEnsurePodmanOnPath_Success(t *testing.T) {
 	if !strings.Contains(got, "/some/existing/path") {
 		t.Errorf("PATH did not preserve existing entries: %q", got)
 	}
-	_ = origPath // t.Setenv restores automatically on cleanup.
 }
 
-func TestEnsurePodmanOnPath_InstallDirMissing(t *testing.T) {
-	// Point override at a directory that doesn't exist.
-	t.Setenv(podmanInstallDirOverrideEnv, filepath.Join(t.TempDir(), "missing"))
-	err := EnsurePodmanOnPath()
-	if err == nil {
-		t.Fatal("expected error when install dir does not exist")
+func TestEnsurePodmanOnPath_MultipleAdditions(t *testing.T) {
+	// Registry PATH may contain many entries (machine + user scopes
+	// concatenated). All new-to-us entries land on PATH; duplicates
+	// are dropped.
+	sep := string(os.PathListSeparator)
+	installDir := t.TempDir()
+	otherDir := t.TempDir()
+	t.Setenv("PATH", "/pre-existing"+sep+otherDir)
+	t.Setenv(podmanPathAdditionsOverrideEnv,
+		installDir+sep+otherDir+sep+"/system32")
+
+	if err := EnsurePodmanOnPath(); err != nil {
+		t.Fatalf("EnsurePodmanOnPath() unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "podman install directory not found") {
-		t.Errorf("error should describe missing install dir: %v", err)
+	got := os.Getenv("PATH")
+	// installDir and /system32 are new; otherDir is a duplicate and
+	// must NOT appear a second time.
+	if !strings.Contains(got, installDir) {
+		t.Errorf("expected new install dir in PATH: %q", got)
+	}
+	if !strings.Contains(got, "/system32") {
+		t.Errorf("expected new /system32 in PATH: %q", got)
+	}
+	if strings.Count(got, otherDir) != 1 {
+		t.Errorf("otherDir %q should appear exactly once, got PATH=%q", otherDir, got)
+	}
+	if !strings.Contains(got, "/pre-existing") {
+		t.Errorf("PATH should preserve pre-existing entries: %q", got)
+	}
+}
+
+func TestEnsurePodmanOnPath_EmptyAdditionsIsNoOp(t *testing.T) {
+	before := "/before"
+	t.Setenv("PATH", before)
+	t.Setenv(podmanPathAdditionsOverrideEnv, "")
+	if err := EnsurePodmanOnPath(); err != nil {
+		t.Fatalf("EnsurePodmanOnPath() unexpected error: %v", err)
+	}
+	if got := os.Getenv("PATH"); got != before {
+		t.Errorf("empty additions should leave PATH unchanged: got %q, want %q", got, before)
 	}
 }
 
@@ -165,13 +206,52 @@ func TestEnsurePodmanOnPath_NonWindowsRequiresOverride(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test asserts the non-windows fallback error; not applicable on windows")
 	}
-	// Unset any override so we exercise the fallback branch.
-	t.Setenv(podmanInstallDirOverrideEnv, "")
+	// Unset any override so we exercise the fallback branch. Using
+	// Unsetenv (not Setenv with "") because LookupEnv distinguishes
+	// unset from empty, and the "" case is now a valid no-op input.
+	os.Unsetenv(podmanPathAdditionsOverrideEnv)
+	t.Cleanup(func() { os.Unsetenv(podmanPathAdditionsOverrideEnv) })
 	err := EnsurePodmanOnPath()
 	if err == nil {
 		t.Fatal("expected error on non-windows without override")
 	}
 	if !strings.Contains(err.Error(), "non-windows platform requires") {
 		t.Errorf("error should call out the test-only override: %v", err)
+	}
+}
+
+func TestMergePATHPrependsNewEntries(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	got := mergePATH("/a"+sep+"/b", "/new")
+	want := "/new" + sep + "/a" + sep + "/b"
+	if got != want {
+		t.Errorf("mergePATH(existing, /new) = %q, want %q", got, want)
+	}
+}
+
+func TestMergePATHDropsDuplicatesCaseInsensitive(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	// /a already exists (in a different case on Windows-style
+	// comparison); /new is genuinely new.
+	got := mergePATH("/A"+sep+"/b", "/a"+sep+"/new")
+	want := "/new" + sep + "/A" + sep + "/b"
+	if got != want {
+		t.Errorf("mergePATH dedup: got %q, want %q", got, want)
+	}
+}
+
+func TestMergePATHEmptyCurrent(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	got := mergePATH("", "/a"+sep+"/b")
+	want := "/a" + sep + "/b"
+	if got != want {
+		t.Errorf("mergePATH empty current: got %q, want %q", got, want)
+	}
+}
+
+func TestMergePATHEmptyAdditional(t *testing.T) {
+	got := mergePATH("/a", "")
+	if got != "/a" {
+		t.Errorf("mergePATH empty additional: got %q, want %q", got, "/a")
 	}
 }
