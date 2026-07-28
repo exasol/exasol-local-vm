@@ -83,7 +83,7 @@ func buildTestTarXZ(t *testing.T, files map[string][]byte) []byte {
 func TestInitCmdRejectsSSHKey(t *testing.T) {
 	t.Parallel()
 
-	err := initCmdWithAssets("/path/to/some/key", nil)
+	err := initCmdWithAssets("/path/to/some/key", nil, false)
 	if err == nil {
 		t.Fatal("expected error rejecting --ssh-key, got nil")
 	}
@@ -114,7 +114,7 @@ func TestInitCmdExtractsAssetsAndWritesConfig(t *testing.T) {
 
 	t.Chdir(t.TempDir())
 
-	if err := initCmdWithAssets("", assets); err != nil {
+	if err := initCmdWithAssets("", assets, false); err != nil {
 		t.Fatalf("initCmdWithAssets: %v", err)
 	}
 
@@ -165,10 +165,10 @@ func TestInitCmdIsIdempotent(t *testing.T) {
 
 	t.Chdir(t.TempDir())
 
-	if err := initCmdWithAssets("", assets); err != nil {
+	if err := initCmdWithAssets("", assets, false); err != nil {
 		t.Fatalf("first init: %v", err)
 	}
-	if err := initCmdWithAssets("", assets); err != nil {
+	if err := initCmdWithAssets("", assets, false); err != nil {
 		t.Fatalf("second init: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(resourcesDir, "config.json"))
@@ -379,7 +379,7 @@ func TestInitCmdWritesContainerID(t *testing.T) {
 	})
 	t.Chdir(t.TempDir())
 
-	if err := initCmdWithAssets("", assets); err != nil {
+	if err := initCmdWithAssets("", assets, false); err != nil {
 		t.Fatalf("initCmdWithAssets: %v", err)
 	}
 	id, err := readContainerID()
@@ -403,14 +403,14 @@ func TestInitCmdPreservesExistingContainerID(t *testing.T) {
 	})
 	t.Chdir(t.TempDir())
 
-	if err := initCmdWithAssets("", assets); err != nil {
+	if err := initCmdWithAssets("", assets, false); err != nil {
 		t.Fatalf("first init: %v", err)
 	}
 	first, err := readContainerID()
 	if err != nil {
 		t.Fatalf("readContainerID after first init: %v", err)
 	}
-	if err := initCmdWithAssets("", assets); err != nil {
+	if err := initCmdWithAssets("", assets, false); err != nil {
 		t.Fatalf("second init: %v", err)
 	}
 	second, err := readContainerID()
@@ -1547,7 +1547,7 @@ func TestEnsurePodmanInstalled_AlreadyAvailable(t *testing.T) {
 	var out bytes.Buffer
 	in := bytes.NewBufferString("this should never be read\n")
 
-	installed, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	installed, err := ensurePodmanInstalledCtx(in, &out, true, true, false)
 	if err != nil {
 		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
 	}
@@ -1578,7 +1578,7 @@ func TestEnsurePodmanInstalled_FoundViaRegistryRefresh(t *testing.T) {
 	// If the fallback fails and we drop into the install prompt, this
 	// input would decline; the test would then fail on the return value.
 	in := bytes.NewBufferString("n\n")
-	installed, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	installed, err := ensurePodmanInstalledCtx(in, &out, true, true, false)
 	if err != nil {
 		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
 	}
@@ -1596,7 +1596,7 @@ func TestEnsurePodmanInstalled_NonInteractiveRequired(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
 	var out bytes.Buffer
-	_, err := ensurePodmanInstalledCtx(&bytes.Buffer{}, &out, true, false)
+	_, err := ensurePodmanInstalledCtx(&bytes.Buffer{}, &out, true, false, false)
 	if err == nil {
 		t.Fatal("expected error when podman missing + required + non-interactive")
 	}
@@ -1611,7 +1611,7 @@ func TestEnsurePodmanInstalled_NonInteractiveOptional(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
 	var out bytes.Buffer
-	installed, err := ensurePodmanInstalledCtx(&bytes.Buffer{}, &out, false, false)
+	installed, err := ensurePodmanInstalledCtx(&bytes.Buffer{}, &out, false, false, false)
 	if err != nil {
 		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
 	}
@@ -1630,7 +1630,7 @@ func TestEnsurePodmanInstalled_InteractiveDeclineOptional(t *testing.T) {
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("n\n")
-	installed, err := ensurePodmanInstalledCtx(in, &out, false, true)
+	installed, err := ensurePodmanInstalledCtx(in, &out, false, true, false)
 	if err != nil {
 		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
 	}
@@ -1648,7 +1648,7 @@ func TestEnsurePodmanInstalled_InteractiveDeclineRequired(t *testing.T) {
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("n\n")
-	_, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	_, err := ensurePodmanInstalledCtx(in, &out, true, true, false)
 	if err == nil {
 		t.Fatal("expected error when required + user declines")
 	}
@@ -1676,7 +1676,7 @@ func TestEnsurePodmanInstalled_InteractiveAcceptFullFlow(t *testing.T) {
 	var out bytes.Buffer
 	in := bytes.NewBufferString("Y\n")
 
-	installed, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	installed, err := ensurePodmanInstalledCtx(in, &out, true, true, false)
 	if err != nil {
 		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
 	}
@@ -1737,7 +1737,7 @@ func TestEnsurePodmanInstalled_InteractiveAcceptDefaultOnEmptyInput(t *testing.T
 	var out bytes.Buffer
 	in := bytes.NewBufferString("\n") // Just Enter → default = Yes.
 
-	installed, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	installed, err := ensurePodmanInstalledCtx(in, &out, true, true, false)
 	if err != nil {
 		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
 	}
@@ -1746,6 +1746,47 @@ func TestEnsurePodmanInstalled_InteractiveAcceptDefaultOnEmptyInput(t *testing.T
 	}
 	if !strings.Contains(out.String(), "Podman is installed") {
 		t.Errorf("expected 'Podman is installed' in output, got %q", out.String())
+	}
+}
+
+func TestEnsurePodmanInstalled_AssumeYes_NonInteractive_Installs(t *testing.T) {
+	// assumeYes=true + non-interactive stdin: mirrors what a scripted
+	// `windows-launcher init --yes` invocation looks like, and what
+	// the CI smoke test needs. The prompt must be bypassed and the
+	// install must run without touching stdin.
+	podmanLog, wingetSideEffect := stagePendingPodmanInstall(t, `exit 0`)
+	wingetLog := installFakeWingetInEmptyPath(t, wingetSideEffect)
+
+	var out bytes.Buffer
+	// stdin deliberately empty — if the prompt fires we'd hang or get
+	// an unexpected read error; either would fail the test.
+	installed, err := ensurePodmanInstalledCtx(&bytes.Buffer{}, &out, true, false, true)
+	if err != nil {
+		t.Fatalf("ensurePodmanInstalledCtx: %v", err)
+	}
+	if !installed {
+		t.Error("expected installed=true with assumeYes")
+	}
+	// The auto-install progress lines should be visible so a user
+	// running --yes still gets feedback.
+	for _, want := range []string{
+		"Auto-installing (--yes)",
+		"Installing podman-for-windows via winget",
+		"Podman is installed",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("expected %q in output, got %q", want, out.String())
+		}
+	}
+	// Winget must have run.
+	wingetCalls := readArgvCalls(t, wingetLog)
+	if len(wingetCalls) != 1 {
+		t.Fatalf("expected 1 winget call, got %d: %v", len(wingetCalls), wingetCalls)
+	}
+	// Post-install podman --version sanity check must have run.
+	podmanCalls := readArgvCalls(t, podmanLog)
+	if len(podmanCalls) != 1 || !stringsEqual(podmanCalls[0], []string{"--version"}) {
+		t.Errorf("expected exactly one podman [--version] call, got %v", podmanCalls)
 	}
 }
 
@@ -1761,7 +1802,7 @@ func TestEnsurePodmanInstalled_InteractiveWingetFails(t *testing.T) {
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("y\n")
-	_, err := ensurePodmanInstalledCtx(in, &out, true, true)
+	_, err := ensurePodmanInstalledCtx(in, &out, true, true, false)
 	if err == nil {
 		t.Fatal("expected error when winget install fails")
 	}
@@ -1821,7 +1862,7 @@ func TestEnsureRootfulPodmanMachine_NoMachine_CreatesRootful(t *testing.T) {
 	logPath := installFakePodman(t, fakePodmanMachineScript("", "", ""))
 
 	var out bytes.Buffer
-	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true)
+	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true, false)
 	if err != nil {
 		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
 	}
@@ -1857,7 +1898,7 @@ func TestEnsureRootfulPodmanMachine_ExistingRootfulAndRunning_NoOp(t *testing.T)
 		"podman-machine-default\n", "true\n", "Running\n"))
 
 	var out bytes.Buffer
-	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true)
+	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true, false)
 	if err != nil {
 		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
 	}
@@ -1885,7 +1926,7 @@ func TestEnsureRootfulPodmanMachine_ExistingRootfulButStopped_StartsIt(t *testin
 		"podman-machine-default\n", "true\n", "Stopped\n"))
 
 	var out bytes.Buffer
-	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true)
+	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, true, false)
 	if err != nil {
 		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
 	}
@@ -1912,7 +1953,7 @@ func TestEnsureRootfulPodmanMachine_Rootless_AcceptConverts(t *testing.T) {
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("Y\n")
-	ok, err := ensureRootfulPodmanMachineCtx(in, &out, true, true)
+	ok, err := ensureRootfulPodmanMachineCtx(in, &out, true, true, false)
 	if err != nil {
 		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
 	}
@@ -1947,13 +1988,43 @@ func TestEnsureRootfulPodmanMachine_Rootless_AcceptConverts(t *testing.T) {
 	}
 }
 
+func TestEnsureRootfulPodmanMachine_Rootless_AssumeYesConvertsWithoutPrompt(t *testing.T) {
+	// Rootless machine + assumeYes=true + non-interactive stdin ⇒
+	// convert without prompting. Mirrors what `init --yes` needs so a
+	// pre-existing rootless machine on a user's box (or later CI
+	// scenario) can be auto-converted.
+	logPath := installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
+
+	var out bytes.Buffer
+	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, false, true)
+	if err != nil {
+		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true after successful assumeYes conversion")
+	}
+	calls := readArgvCalls(t, logPath)
+	if len(calls) != 5 {
+		t.Fatalf("expected 5 podman calls (list, inspect, stop, set, start), got %d: %v",
+			len(calls), calls)
+	}
+	// The auto-convert announcement should be visible, and the
+	// interactive-only prompt string should NOT appear.
+	if !strings.Contains(out.String(), "Auto-converting to rootful") {
+		t.Errorf("expected 'Auto-converting to rootful' in output, got %q", out.String())
+	}
+	if strings.Contains(out.String(), "Convert it to rootful now?") {
+		t.Errorf("did not expect the interactive prompt with assumeYes, got %q", out.String())
+	}
+}
+
 func TestEnsureRootfulPodmanMachine_Rootless_DeclineRequired(t *testing.T) {
 	// Rootless machine + interactive N + required=true ⇒ error.
 	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("n\n")
-	_, err := ensureRootfulPodmanMachineCtx(in, &out, true, true)
+	_, err := ensureRootfulPodmanMachineCtx(in, &out, true, true, false)
 	if err == nil {
 		t.Fatal("expected error when required + user declines conversion")
 	}
@@ -1969,7 +2040,7 @@ func TestEnsureRootfulPodmanMachine_Rootless_DeclineOptional(t *testing.T) {
 
 	var out bytes.Buffer
 	in := bytes.NewBufferString("n\n")
-	ok, err := ensureRootfulPodmanMachineCtx(in, &out, false, true)
+	ok, err := ensureRootfulPodmanMachineCtx(in, &out, false, true, false)
 	if err != nil {
 		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
 	}
@@ -1987,7 +2058,7 @@ func TestEnsureRootfulPodmanMachine_Rootless_NonInteractiveRequired(t *testing.T
 	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
 
 	var out bytes.Buffer
-	_, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, false)
+	_, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, true, false, false)
 	if err == nil {
 		t.Fatal("expected error in non-interactive required path")
 	}
@@ -2002,7 +2073,7 @@ func TestEnsureRootfulPodmanMachine_Rootless_NonInteractiveOptional(t *testing.T
 	installFakePodman(t, fakePodmanMachineScript("podman-machine-default\n", "false\n", ""))
 
 	var out bytes.Buffer
-	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, false, false)
+	ok, err := ensureRootfulPodmanMachineCtx(&bytes.Buffer{}, &out, false, false, false)
 	if err != nil {
 		t.Fatalf("ensureRootfulPodmanMachineCtx: %v", err)
 	}
@@ -2066,7 +2137,7 @@ func TestInitCmdSucceedsWhenPodmanCheckSoftFails(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("PATH", t.TempDir()) // No podman anywhere.
 
-	if err := initCmdWithAssets("", assets); err != nil {
+	if err := initCmdWithAssets("", assets, false); err != nil {
 		t.Fatalf("initCmdWithAssets should succeed even without podman: %v", err)
 	}
 	// Resources must still exist.

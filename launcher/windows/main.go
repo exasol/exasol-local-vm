@@ -210,14 +210,18 @@ func promptYesNo(in io.Reader, out io.Writer, prompt string, defaultYes bool) (b
 // — either because it already was, or because winget install + machine
 // init + machine start all succeeded within this call.
 //
+// assumeYes lets callers skip the interactive prompt and proceed as if
+// the user had said "yes" — used by scripted callers (CI smoke tests,
+// unattended installs invoked via `windows-launcher init --yes`).
+//
 // Two-stage split (public wrapper + Ctx impl) so tests can drive the
 // full flow with interactive=true against a bytes.Buffer stdin (which
 // isTerminal would otherwise treat as non-interactive).
-func ensurePodmanInstalled(in io.Reader, out io.Writer, required bool) (bool, error) {
-	return ensurePodmanInstalledCtx(in, out, required, isTerminal(in))
+func ensurePodmanInstalled(in io.Reader, out io.Writer, required, assumeYes bool) (bool, error) {
+	return ensurePodmanInstalledCtx(in, out, required, isTerminal(in), assumeYes)
 }
 
-func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive bool) (bool, error) {
+func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive, assumeYes bool) (bool, error) {
 	if err := podman.Available(); err == nil {
 		return true, nil
 	}
@@ -242,33 +246,42 @@ func ensurePodmanInstalledCtx(in io.Reader, out io.Writer, required, interactive
 			return true, nil
 		}
 	}
-	if !interactive {
+	// Below: podman is genuinely not installed. Decide whether we have
+	// consent to install it.
+	if !interactive && !assumeYes {
 		if required {
 			return false, errors.New(
 				"podman-for-windows is not installed. Re-run this command interactively " +
-					"to install it via winget, or run 'winget install --exact --id RedHat.Podman' " +
-					"and 'podman machine init --rootful && podman machine start' first",
+					"(or pass --yes) to install it via winget, or run " +
+					"'winget install --exact --id RedHat.Podman' and " +
+					"'podman machine init --rootful && podman machine start' first",
 			)
 		}
 		return false, nil
 	}
-	fmt.Fprintln(out, "podman-for-windows is not installed on this system.")
-	fmt.Fprintln(out, "The launcher can install it now by running:")
-	fmt.Fprintln(out, "  "+winget.PodmanInstallCommand())
-	fmt.Fprintln(out, "This may prompt for administrator (UAC) approval and take a few minutes.")
-	ok, err := promptYesNo(in, out,
-		"Run this now?",
-		true,
-	)
-	if err != nil {
-		return false, fmt.Errorf("could not read prompt response: %w", err)
-	}
-	if !ok {
-		if required {
-			return false, errors.New("cannot proceed without podman-for-windows")
+	if !assumeYes {
+		fmt.Fprintln(out, "podman-for-windows is not installed on this system.")
+		fmt.Fprintln(out, "The launcher can install it now by running:")
+		fmt.Fprintln(out, "  "+winget.PodmanInstallCommand())
+		fmt.Fprintln(out, "This may prompt for administrator (UAC) approval and take a few minutes.")
+		ok, err := promptYesNo(in, out,
+			"Run this now?",
+			true,
+		)
+		if err != nil {
+			return false, fmt.Errorf("could not read prompt response: %w", err)
 		}
-		fmt.Fprintln(out, "Skipping podman install. You will be prompted again when you run 'windows-launcher start'.")
-		return false, nil
+		if !ok {
+			if required {
+				return false, errors.New("cannot proceed without podman-for-windows")
+			}
+			fmt.Fprintln(out, "Skipping podman install. You will be prompted again when you run 'windows-launcher start'.")
+			return false, nil
+		}
+	} else {
+		fmt.Fprintln(out, "podman-for-windows is not installed on this system.")
+		fmt.Fprintln(out, "Auto-installing (--yes) via:")
+		fmt.Fprintln(out, "  "+winget.PodmanInstallCommand())
 	}
 	fmt.Fprintln(out, "Installing podman-for-windows via winget...")
 	if err := winget.InstallPodman(out); err != nil {
@@ -324,11 +337,15 @@ const machineDiskSizeGB = 40
 //
 // Returns (ok, err). ok is true iff a rootful default machine is ready
 // after this call.
-func ensureRootfulPodmanMachine(in io.Reader, out io.Writer, required bool) (bool, error) {
-	return ensureRootfulPodmanMachineCtx(in, out, required, isTerminal(in))
+//
+// assumeYes lets callers skip the rootless→rootful conversion prompt
+// (case 3) and proceed as if the user had said "yes". Used by scripted
+// callers such as `windows-launcher init --yes`.
+func ensureRootfulPodmanMachine(in io.Reader, out io.Writer, required, assumeYes bool) (bool, error) {
+	return ensureRootfulPodmanMachineCtx(in, out, required, isTerminal(in), assumeYes)
 }
 
-func ensureRootfulPodmanMachineCtx(in io.Reader, out io.Writer, required, interactive bool) (bool, error) {
+func ensureRootfulPodmanMachineCtx(in io.Reader, out io.Writer, required, interactive, assumeYes bool) (bool, error) {
 	exists, err := podman.MachineExists()
 	if err != nil {
 		return false, err
@@ -373,9 +390,9 @@ func ensureRootfulPodmanMachineCtx(in io.Reader, out io.Writer, required, intera
 	fmt.Fprintln(out, "The launcher requires a rootful podman machine to work around a")
 	fmt.Fprintln(out, "podman-for-windows/pasta issue that resets long-lived TLS connections")
 	fmt.Fprintln(out, "in rootless mode.")
-	if !interactive {
+	if !interactive && !assumeYes {
 		msg := podman.DefaultMachineName + " is rootless but rootful is required. " +
-			"Re-run this command interactively to convert it, or run " +
+			"Re-run this command interactively (or pass --yes) to convert it, or run " +
 			"'podman machine stop && podman machine set --rootful && podman machine start' first"
 		if required {
 			return false, errors.New(msg)
@@ -383,20 +400,24 @@ func ensureRootfulPodmanMachineCtx(in io.Reader, out io.Writer, required, intera
 		fmt.Fprintln(out, msg)
 		return false, nil
 	}
-	ok, err := promptYesNo(in, out,
-		"Convert it to rootful now? This will stop the machine, apply the change, and start it again.",
-		true,
-	)
-	if err != nil {
-		return false, fmt.Errorf("could not read prompt response: %w", err)
-	}
-	if !ok {
-		msg := "the launcher requires a rootful podman machine; aborting"
-		if required {
-			return false, errors.New(msg)
+	if !assumeYes {
+		ok, err := promptYesNo(in, out,
+			"Convert it to rootful now? This will stop the machine, apply the change, and start it again.",
+			true,
+		)
+		if err != nil {
+			return false, fmt.Errorf("could not read prompt response: %w", err)
 		}
-		fmt.Fprintln(out, "Skipping rootful conversion. You will be prompted again when you run 'windows-launcher start'.")
-		return false, nil
+		if !ok {
+			msg := "the launcher requires a rootful podman machine; aborting"
+			if required {
+				return false, errors.New(msg)
+			}
+			fmt.Fprintln(out, "Skipping rootful conversion. You will be prompted again when you run 'windows-launcher start'.")
+			return false, nil
+		}
+	} else {
+		fmt.Fprintln(out, "Auto-converting to rootful (--yes): stop, set --rootful, start.")
 	}
 	fmt.Fprintln(out, "Stopping podman machine...")
 	if err := podman.StopMachine(); err != nil {
@@ -581,8 +602,13 @@ func extractTarXZ(data []byte, outputDir string, pathTransform func(string) stri
 // initCmd is the public entry point invoked by main(). It uses the
 // //go:embed'd initAssets blob so production builds always have the
 // canonical assets available.
-func initCmd(sshKeyPath string) error {
-	return initCmdWithAssets(sshKeyPath, initAssets)
+//
+// assumeYes (from the `--yes` flag) drives ensurePodmanInstalled and
+// ensureRootfulPodmanMachine's prompts: when true they skip prompting
+// and act as though the user consented. Intended for scripted /
+// unattended installs (CI smoke tests, provisioning scripts, ...).
+func initCmd(sshKeyPath string, assumeYes bool) error {
+	return initCmdWithAssets(sshKeyPath, initAssets, assumeYes)
 }
 
 // initCmdWithAssets is the implementation split out so unit tests can
@@ -592,7 +618,7 @@ func initCmd(sshKeyPath string) error {
 // by build-windows-launcher.sh: 'tar -C launcher/assets/windows -cf - init').
 // The init/ prefix is stripped during extraction, so init/config.json ends
 // up at resources/config.json.
-func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
+func initCmdWithAssets(sshKeyPath string, assetsData []byte, assumeYes bool) error {
 	if sshKeyPath != "" {
 		return newExitError(2, "--ssh-key is not supported on windows: there is no guest VM to SSH into")
 	}
@@ -645,7 +671,7 @@ func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
 	// failure, etc.) is reported to stderr but does not fail the init
 	// contract — resources/ has already been produced, so a subsequent
 	// `start` still works once the user resolves podman themselves.
-	installed, err := ensurePodmanInstalled(promptIn, promptOut, false)
+	installed, err := ensurePodmanInstalled(promptIn, promptOut, false, assumeYes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: podman prerequisite check failed: %v\n", err)
 		return nil
@@ -653,8 +679,9 @@ func initCmdWithAssets(sshKeyPath string, assetsData []byte) error {
 	if installed {
 		// required=false: the plan's rootless→rootful conversion prompt is
 		// offered here on init, but declining is fine — the user will be
-		// prompted again on the next `start`.
-		if _, err := ensureRootfulPodmanMachine(promptIn, promptOut, false); err != nil {
+		// prompted again on the next `start`. assumeYes is passed through
+		// so `init --yes` accepts the conversion too.
+		if _, err := ensureRootfulPodmanMachine(promptIn, promptOut, false, assumeYes); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: podman machine check failed: %v\n", err)
 		}
 	}
@@ -730,7 +757,7 @@ func startCmd(
 	// Offer to install podman-for-windows if missing. required=true
 	// because start cannot proceed without it — a declined prompt or a
 	// non-interactive session both surface as an error.
-	if _, err := ensurePodmanInstalled(promptIn, promptOut, true); err != nil {
+	if _, err := ensurePodmanInstalled(promptIn, promptOut, true, false); err != nil {
 		return err
 	}
 	// Same required=true policy for the rootful-machine invariant: start
@@ -739,7 +766,7 @@ func startCmd(
 	// with the user's consent. ensureRootfulPodmanMachine also verifies
 	// the machine is actually running (and starts it if not), so we do
 	// not need a separate podman.MachineRunning() check here.
-	if _, err := ensureRootfulPodmanMachine(promptIn, promptOut, true); err != nil {
+	if _, err := ensureRootfulPodmanMachine(promptIn, promptOut, true, false); err != nil {
 		return err
 	}
 
@@ -1385,7 +1412,7 @@ func stopCmd() error {
 	// safely no-op when podman is absent so a declined prompt
 	// or non-interactive session both take the soft path: clean up local
 	// vm-state.json and exit 0.
-	installed, err := ensurePodmanInstalled(promptIn, promptOut, false)
+	installed, err := ensurePodmanInstalled(promptIn, promptOut, false, false)
 	if err != nil {
 		return err
 	}
@@ -1598,8 +1625,9 @@ func main() {
 		initFlags := flag.NewFlagSet("init", flag.ContinueOnError)
 		initFlags.SetOutput(os.Stderr)
 		sshKeyPath := initFlags.String("ssh-key", "", "Use an existing SSH private key instead of generating one")
+		assumeYes := initFlags.Bool("yes", false, "Skip prompts (podman install, rootless→rootful conversion) and assume 'yes'")
 		initFlags.Usage = func() {
-			fmt.Fprintln(os.Stderr, "Usage: windows-launcher init [--ssh-key <private-key>]")
+			fmt.Fprintln(os.Stderr, "Usage: windows-launcher init [--ssh-key <private-key>] [--yes]")
 			initFlags.PrintDefaults()
 		}
 		if parseErr := initFlags.Parse(os.Args[2:]); parseErr != nil {
@@ -1610,7 +1638,7 @@ func main() {
 			initFlags.Usage()
 			os.Exit(2)
 		}
-		err = initCmd(*sshKeyPath)
+		err = initCmd(*sshKeyPath, *assumeYes)
 	case "start":
 		startFlags := flag.NewFlagSet("start", flag.ContinueOnError)
 		startFlags.SetOutput(os.Stderr)
