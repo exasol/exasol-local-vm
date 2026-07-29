@@ -17,5 +17,5 @@
 #
 # tty1 is nice to have for some graphical vm interfaces
 # hvc0 is virtio_console, which all hypervisors should support
-tty1::respawn:/sbin/agetty --noclear --autologin exasol tty1
-hvc0::respawn:/sbin/agetty --noclear --autologin exasol hvc0
+tty1::respawn:/sbin/agetty --noclear --autologin root tty1
+hvc0::respawn:/sbin/agetty --noclear --autologin root hvc0

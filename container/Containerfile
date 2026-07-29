@@ -31,7 +31,7 @@ RUN printf 'PermitRootLogin yes\nPasswordAuthentication no\nPubkeyAuthentication
 #
 # I don't really understand exactly how the serial console stuff works. We might
 # have to add some different ones here at some point.
-RUN printf '# defaults\n\n::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\n\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n\n# tty1 is nice to have for some graphical vm interfaces\n# hvc0 is virtio_console, which all hypervisors should support\ntty1::respawn:/sbin/agetty --noclear --autologin root tty1\nhvc0::respawn:/sbin/agetty --noclear --autologin root hvc0\n' > /etc/inittab
+COPY inittab /etc/inittab
 
 ### VM startup scripts
 
