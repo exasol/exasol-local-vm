@@ -97,14 +97,6 @@ jobs:
       - name: Build mac package
         run: task package-mac IMG_ARCH=aarch64
       
-      - name: Download container tarball
-        run: |
-          # Download container image for the Mac launcher to embed
-          # We do this on Linux because Mac CI launchers don't support virtualization
-          task download-db-container IMG_ARCH=aarch64
-          echo "✓ Container tarball downloaded to release/"
-          ls -lh release/exasol-nano-db-aarch64.tar.gz
-
       - name: Verify release artifacts
         run: |
           if [ ! -d release ]; then
@@ -113,10 +105,6 @@ jobs:
           fi
           if [ ! -f release/mac-arm64.tar.xz ]; then
             echo "ERROR: release/mac-arm64.tar.xz not created!" >&2
-            exit 1
-          fi
-          if [ ! -f release/exasol-nano-db-aarch64.tar.gz ]; then
-            echo "ERROR: release/exasol-nano-db-aarch64.tar.gz not created!" >&2
             exit 1
           fi
           echo "✓ Release artifacts verified"
@@ -180,16 +168,6 @@ jobs:
             mkdir -p release
             mv mac-arm64.tar.xz release/
           fi
-          if [ -f exasol-nano-db-aarch64.tar.gz ]; then
-            echo "Found exasol-nano-db-aarch64.tar.gz in root, moving to release/"
-            mkdir -p release
-            mv exasol-nano-db-aarch64.tar.gz release/
-          fi
-          if [ -f exasol-nano-db-aarch64.tar.gz.metadata ]; then
-            echo "Found exasol-nano-db-aarch64.tar.gz.metadata in root, moving to release/"
-            mkdir -p release
-            mv exasol-nano-db-aarch64.tar.gz.metadata release/
-          fi
           if [ -d release ]; then
             echo "✓ Release directory exists"
             ls -lh release/
@@ -204,18 +182,6 @@ jobs:
             echo "✓ Found: release/mac-arm64.tar.xz ($(du -h release/mac-arm64.tar.xz | cut -f1))"
           else
             echo "✗ Missing: release/mac-arm64.tar.xz" >&2
-            exit 1
-          fi
-          if [ -f release/exasol-nano-db-aarch64.tar.gz ]; then
-            echo "✓ Found: release/exasol-nano-db-aarch64.tar.gz ($(du -h release/exasol-nano-db-aarch64.tar.gz | cut -f1))"
-          else
-            echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz" >&2
-            exit 1
-          fi
-          if [ -f release/exasol-nano-db-aarch64.tar.gz.metadata ]; then
-            echo "✓ Found: release/exasol-nano-db-aarch64.tar.gz.metadata"
-          else
-            echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz.metadata" >&2
             exit 1
           fi
 
@@ -271,16 +237,6 @@ jobs:
             mkdir -p release
             mv mac-arm64.tar.xz release/
           fi
-          if [ -f exasol-nano-db-aarch64.tar.gz ]; then
-            echo "Found exasol-nano-db-aarch64.tar.gz in root, moving to release/"
-            mkdir -p release
-            mv exasol-nano-db-aarch64.tar.gz release/
-          fi
-          if [ -f exasol-nano-db-aarch64.tar.gz.metadata ]; then
-            echo "Found exasol-nano-db-aarch64.tar.gz.metadata in root, moving to release/"
-            mkdir -p release
-            mv exasol-nano-db-aarch64.tar.gz.metadata release/
-          fi
           if [ -d release ]; then
             echo "✓ Release directory exists"
             ls -lh release/
@@ -297,37 +253,10 @@ jobs:
             echo "✗ Missing: release/mac-arm64.tar.xz" >&2
             exit 1
           fi
-          if [ -f release/exasol-nano-db-aarch64.tar.gz ]; then
-            echo "✓ Found: release/exasol-nano-db-aarch64.tar.gz ($(du -h release/exasol-nano-db-aarch64.tar.gz | cut -f1))"
-          else
-            echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz" >&2
-            exit 1
-          fi
-          if [ -f release/exasol-nano-db-aarch64.tar.gz.metadata ]; then
-            echo "✓ Found: release/exasol-nano-db-aarch64.tar.gz.metadata"
-          else
-            echo "✗ Missing: release/exasol-nano-db-aarch64.tar.gz.metadata" >&2
-            exit 1
-          fi
 
       - name: Install Task
         run: |
           brew install go-task
-      
-      - name: Stage container tarball for launcher build
-        run: |
-          # Copy the container tarball to release/ so stage-init-assets can find it
-          # The tarball is architecture-specific in release/ but generic in launcher/assets/init/
-          mkdir -p release
-          if [ -f release/exasol-nano-db-aarch64.tar.gz ]; then
-            echo "✓ Container tarball ready in release/"
-            ls -lh release/exasol-nano-db-aarch64.tar.gz
-          else
-            echo "ERROR: Container tarball not found in artifacts!" >&2
-            echo "Expected: release/exasol-nano-db-aarch64.tar.gz" >&2
-            ls -lh release/ || true
-            exit 1
-          fi
       
       - name: Setup macOS signing certificate
         id: macos-signing

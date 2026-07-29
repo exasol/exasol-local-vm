@@ -51,51 +51,13 @@ type RuntimeConfig struct {
 	SSHPrivateKey string `json:"ssh_private_key"`
 }
 
-type VersionCheckRuntimeConfig struct {
-	Enabled         bool   `json:"enabled"`
-	IntervalSeconds int    `json:"interval_seconds"`
-	Identity        string `json:"identity"`
-	URL             string `json:"url"`
-	OperatingSystem string `json:"operating_system"`
-}
-
-type VersionCheckOptions struct {
-	Enabled         bool
-	IntervalSeconds int
-	Identity        string
-	URL             string
-}
-
-// SlcMount describes one script language container image mount: the source image
-// reference and the destination directory inside the database container (under /exa/slc).
-// Package names a rootfs tarball staged under the shared directory. Entries carrying one are
-// imported by init-db.sh instead of pulled, which is the only way a user-supplied container
-// can reach the guest image store.
-type SlcMount struct {
-	Image   string `json:"image"`
-	Target  string `json:"target"`
-	Package string `json:"package,omitempty"`
-}
-
-// SlcRuntimeConfig is written to the shared directory as slc.json and consumed by
-// init-db.sh to add `--mount type=image` arguments to the database container.
-type SlcRuntimeConfig struct {
-	Slc []SlcMount `json:"slc"`
-}
-
 const (
 	defaultSSHPrivateKeyPath           = "vm-ssh-key"
 	runtimeConfigPath                  = "vm-config.json"
 	sharedDirName                      = "vm-shared"
 	authorizedKeysName                 = "authorized_keys"
-	versionCheckRuntimeConfigName      = "version-check.json"
-	slcRuntimeConfigName               = "slc.json"
-	defaultVersionCheckIntervalSeconds = 86400
-	defaultVersionCheckIdentity        = "NONE"
 	vmSocketPath                       = "vm.sock"
 )
-
-var defaultVersionCheckURL = "https://metrics-test.exasol.com/v1/version-check"
 
 // launcherVersion is set at build time with -ldflags. Local development builds
 // intentionally report "dev".
@@ -238,170 +200,6 @@ func loadRuntimeConfig() (RuntimeConfig, error) {
 		config.SSHPrivateKey = defaultSSHPrivateKeyPath
 	}
 	return config, nil
-}
-
-func defaultVersionCheckOptions() VersionCheckOptions {
-	return VersionCheckOptions{
-		Enabled:         true,
-		IntervalSeconds: defaultVersionCheckIntervalSeconds,
-		Identity:        defaultVersionCheckIdentity,
-		URL:             defaultVersionCheckURL,
-	}
-}
-
-func versionCheckOperatingSystem(goos string) string {
-	switch goos {
-	case "darwin":
-		return "MacOS"
-	case "linux":
-		return "Linux"
-	case "windows":
-		return "Windows"
-	case "":
-		return "unknown"
-	default:
-		return goos
-	}
-}
-
-func versionCheckRuntimeConfigFromOptions(options VersionCheckOptions) VersionCheckRuntimeConfig {
-	url := strings.TrimSpace(options.URL)
-	if url == "" {
-		url = defaultVersionCheckURL
-	}
-
-	identity := strings.TrimSpace(options.Identity)
-	if identity == "" {
-		identity = defaultVersionCheckIdentity
-	}
-
-	intervalSeconds := options.IntervalSeconds
-	if intervalSeconds <= 0 {
-		intervalSeconds = defaultVersionCheckIntervalSeconds
-	}
-
-	return VersionCheckRuntimeConfig{
-		Enabled:         options.Enabled,
-		IntervalSeconds: intervalSeconds,
-		Identity:        identity,
-		URL:             url,
-		OperatingSystem: versionCheckOperatingSystem(runtime.GOOS),
-	}
-}
-
-func writeVersionCheckRuntimeConfig(sharedDir string, config VersionCheckRuntimeConfig) error {
-	if err := os.MkdirAll(sharedDir, 0755); err != nil {
-		return fmt.Errorf("failed to create shared directory for version-check config: %w", err)
-	}
-
-	configPath := filepath.Join(sharedDir, versionCheckRuntimeConfigName)
-	configData, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal version-check runtime config: %w", err)
-	}
-	if err := os.WriteFile(configPath, configData, 0644); err != nil {
-		return fmt.Errorf("failed to write %s: %w", configPath, err)
-	}
-	return nil
-}
-
-func writeVersionCheckRuntimeConfigFromOptions(sharedDir string, options VersionCheckOptions) {
-	config := versionCheckRuntimeConfigFromOptions(options)
-	if err := writeVersionCheckRuntimeConfig(sharedDir, config); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to write version-check runtime config: %v\n", err)
-	}
-}
-
-// slcMountList collects repeated `--slc <image>=<target>` start flags.
-type slcMountList []SlcMount
-
-func (l *slcMountList) String() string {
-	parts := make([]string, 0, len(*l))
-	for _, m := range *l {
-		parts = append(parts, m.Image+"="+m.Target)
-	}
-	return strings.Join(parts, ",")
-}
-
-func (l *slcMountList) Set(value string) error {
-	parts := strings.SplitN(value, "=", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid --slc value %q: expected <image>=<target>", value)
-	}
-	image := strings.TrimSpace(parts[0])
-	target := strings.TrimSpace(parts[1])
-	if image == "" || target == "" {
-		return fmt.Errorf("invalid --slc value %q: image and target must both be non-empty", value)
-	}
-	*l = append(*l, SlcMount{Image: image, Target: target})
-	return nil
-}
-
-type slcPackageList map[string]string
-
-func (l *slcPackageList) String() string {
-	parts := make([]string, 0, len(*l))
-	for image, file := range *l {
-		parts = append(parts, image+"="+file)
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, ",")
-}
-
-func (l *slcPackageList) Set(value string) error {
-	image, file, found := strings.Cut(value, "=")
-	image = strings.TrimSpace(image)
-	file = strings.TrimSpace(file)
-	if !found || image == "" || file == "" {
-		return fmt.Errorf("invalid --slc-package value %q: expected <image>=<package-file>", value)
-	}
-	if file != filepath.Base(file) {
-		return fmt.Errorf("invalid --slc-package value %q: package must be a file name", value)
-	}
-	if *l == nil {
-		*l = slcPackageList{}
-	}
-	(*l)[image] = file
-	return nil
-}
-
-// A package naming no mount is rejected rather than dropped, so a mismatched pair cannot
-// silently produce an SLC the guest is unable to materialize.
-func attachSlcPackages(mounts []SlcMount, packages slcPackageList) ([]SlcMount, error) {
-	for image := range packages {
-		matched := false
-		for i := range mounts {
-			if mounts[i].Image == image {
-				mounts[i].Package = packages[image]
-				matched = true
-			}
-		}
-		if !matched {
-			return nil, fmt.Errorf("--slc-package %q has no matching --slc mount", image)
-		}
-	}
-	return mounts, nil
-}
-
-// writeSlcRuntimeConfig writes slc.json into the shared directory. It is written on every
-// start (with an empty list when no SLCs are requested) so a previous run's mounts never
-// linger after an uninstall.
-func writeSlcRuntimeConfig(sharedDir string, mounts []SlcMount) error {
-	if err := os.MkdirAll(sharedDir, 0755); err != nil {
-		return fmt.Errorf("failed to create shared directory for slc config: %w", err)
-	}
-	if mounts == nil {
-		mounts = []SlcMount{}
-	}
-	configPath := filepath.Join(sharedDir, slcRuntimeConfigName)
-	configData, err := json.MarshalIndent(SlcRuntimeConfig{Slc: mounts}, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal slc runtime config: %w", err)
-	}
-	if err := os.WriteFile(configPath, configData, 0644); err != nil {
-		return fmt.Errorf("failed to write %s: %w", configPath, err)
-	}
-	return nil
 }
 
 func displayPath(path string) string {
@@ -715,10 +513,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  init [--ssh-key <private-key>]    Initialize VM")
-		fmt.Fprintln(os.Stderr, "  start [--ports <svc>:<port>,...] <cpu> <ram> <data_size_gb>")
+		fmt.Fprintln(os.Stderr, "  start [--ports <guest-port>:<host-port>,...] <cpu> <ram> <data_size_gb>")
 		fmt.Fprintln(os.Stderr, "                                    Start VM with CPU count, RAM size (MB),")
 		fmt.Fprintln(os.Stderr, "                                    and data disk size in GB.")
-		fmt.Fprintln(os.Stderr, "                                    --ports overrides which host port is bound")
+		fmt.Fprintln(os.Stderr, "                                    --ports specifies ports to forward from the host.")
 		fmt.Fprintln(os.Stderr, "                                    for a named service (e.g. --ports db:9090,ssh:2222).")
 		fmt.Fprintln(os.Stderr, "                                    Unspecified services use the same port as the VM,")
 		fmt.Fprintln(os.Stderr, "                                    falling back to a random port if unavailable.")
@@ -760,15 +558,6 @@ func main() {
 		startFlags := flag.NewFlagSet("start", flag.ContinueOnError)
 		startFlags.SetOutput(os.Stderr)
 		portsFlag := startFlags.String("ports", "", "Host port overrides: <service>:<port>[,<service>:<port>...]")
-		versionCheckOptions := defaultVersionCheckOptions()
-		startFlags.BoolVar(&versionCheckOptions.Enabled, "version-check-enabled", versionCheckOptions.Enabled, "Enable scheduled local database version checks")
-		startFlags.IntVar(&versionCheckOptions.IntervalSeconds, "version-check-interval-seconds", versionCheckOptions.IntervalSeconds, "Interval in seconds for scheduled local database version checks")
-		startFlags.StringVar(&versionCheckOptions.Identity, "version-check-identity", versionCheckOptions.Identity, "Identity string for scheduled local database version checks")
-		startFlags.StringVar(&versionCheckOptions.URL, "version-check-url", versionCheckOptions.URL, "Version-check URL override for scheduled local database version checks")
-		var slcMounts slcMountList
-		startFlags.Var(&slcMounts, "slc", "Script language container mount as <image>=<target> (repeatable)")
-		var slcPackages slcPackageList
-		startFlags.Var(&slcPackages, "slc-package", "Staged rootfs tarball for an SLC image as <image>=<package-file> (repeatable)")
 		startFlags.Usage = func() {
 			fmt.Fprintln(os.Stderr, "Usage: mac-launcher start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
 			startFlags.PrintDefaults()
@@ -790,12 +579,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: data_size_gb must be a positive integer")
 			os.Exit(1)
 		}
-		mounts, mountsErr := attachSlcPackages(slcMounts, slcPackages)
-		if mountsErr != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", mountsErr)
-			os.Exit(2)
-		}
-		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag, versionCheckOptions, mounts)
+		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag)
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
@@ -888,24 +672,6 @@ func extractTarXZ(data []byte, outputDir string, pathTransform func(string) stri
 			}
 			fmt.Printf("Extracted: %s\n", outputPath)
 		}
-	}
-	return nil
-}
-
-// refreshInitDBScript updates the database initializer on every start without
-// re-running init. This lets a newer launcher migrate existing deployments
-// while preserving the VM image, data disk, SSH credentials, and other shared
-// runtime files created by the original launcher.
-func refreshInitDBScript(sharedDir string) error {
-	const initDBScriptArchivePath = "init/init-db.sh"
-
-	if err := extractTarXZ(initAssets, sharedDir, func(path string) string {
-		if path == initDBScriptArchivePath {
-			return path
-		}
-		return ""
-	}); err != nil {
-		return fmt.Errorf("failed to refresh database init script: %w", err)
 	}
 	return nil
 }
@@ -1031,8 +797,8 @@ func ensureDataDisk(path string, requestedSizeGB int) error {
 }
 
 // parsePortOverrides parses a comma-separated list of "service:port" pairs into a map.
-func parsePortOverrides(s string) (map[string]int, error) {
-	overrides := make(map[string]int)
+func parsePortOverrides(s string) (map[int]int, error) {
+	overrides := make(map[int]int)
 	if strings.TrimSpace(s) == "" {
 		return overrides, nil
 	}
@@ -1045,16 +811,20 @@ func parsePortOverrides(s string) (map[string]int, error) {
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("invalid port override %q: expected <service>:<port>", entry)
 		}
-		service := strings.TrimSpace(parts[0])
-		portStr := strings.TrimSpace(parts[1])
-		if service == "" {
+		guestportStr := strings.TrimSpace(parts[0])
+		hostportStr := strings.TrimSpace(parts[1])
+		if guestport == "" {
 			return nil, fmt.Errorf("empty service name in port override %q", entry)
 		}
-		port, err := strconv.Atoi(portStr)
-		if err != nil || port < 1 || port > 65535 {
+		guestport, err := strconv.Atoi(guestportStr)
+		if err != nil || guestport < 1 || guestport > 65535 {
 			return nil, fmt.Errorf("invalid port in override %q: must be an integer 1-65535", entry)
 		}
-		overrides[service] = port
+		hostport, err := strconv.Atoi(hostportStr)
+		if err != nil || hostport < 1 || hostport > 65535 {
+			return nil, fmt.Errorf("invalid port in override %q: must be an integer 1-65535", entry)
+		}
+		overrides[guestport] = hostport
 	}
 	return overrides, nil
 }
@@ -1115,8 +885,6 @@ func startCmd(
 	ramSizeStr string,
 	dataSizeGB int,
 	portsOverride string,
-	versionCheckOptions VersionCheckOptions,
-	slcMounts []SlcMount,
 ) error {
 	sharedDir := sharedDirName
 	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, data_size=%dGB, shared_dir=%s\n", cpuCountStr, ramSizeStr, dataSizeGB, sharedDir)
@@ -1125,6 +893,11 @@ func startCmd(
 	vmDir := "vm"
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
 		return fmt.Errorf("VM not initialized. Run 'mac-launcher init' first")
+	}
+	// Ensure the data disk exists at the requested size (create / grow / error).
+	dataDiskPath := filepath.Join(vmDir, "data.img")
+	if err := ensureDataDisk(dataDiskPath, dataSizeGB); err != nil {
+		return err
 	}
 
 	// Check if VM is already running by probing the status socket.
@@ -1140,22 +913,6 @@ func startCmd(
 		if resp.Status == "running" {
 			return fmt.Errorf("VM is already running")
 		}
-	}
-
-	if err := refreshInitDBScript(sharedDir); err != nil {
-		return err
-	}
-
-	// Ensure the data disk exists at the requested size (create / grow / error).
-	dataDiskPath := filepath.Join(vmDir, "data.img")
-	if err := ensureDataDisk(dataDiskPath, dataSizeGB); err != nil {
-		return err
-	}
-
-	writeVersionCheckRuntimeConfigFromOptions(sharedDir, versionCheckOptions)
-
-	if err := writeSlcRuntimeConfig(sharedDir, slcMounts); err != nil {
-		return err
 	}
 
 	// Get the current executable path
@@ -1690,20 +1447,6 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	target := fmt.Sprintf("%s:%d", vmIP, guestSSHPort)
 	sshTarget.Store(&target)
 
-	// Validate that all port overrides reference services reported by the VM.
-	for serviceName := range portOverrides {
-		if _, ok := initOutput.Ports[serviceName]; !ok {
-			knownNames := make([]string, 0, len(initOutput.Ports))
-			for n := range initOutput.Ports {
-				knownNames = append(knownNames, n)
-			}
-			sort.Strings(knownNames)
-			shutdownVM(vm)
-			return fmt.Errorf("--ports references unknown service %q; known services: %s",
-				serviceName, strings.Join(knownNames, ", "))
-		}
-	}
-
 	// Start port forwarders dynamically for all ports in init output, before
 	// waiting on SSH readiness below. This way a blocked host-to-VM network
 	// path (e.g. macOS Local Network permission denied to the invoking app)
@@ -1711,41 +1454,24 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	// never passes, instead of leaving no evidence behind at all.
 	ctx := context.Background()
 	forwarders := make(map[string]*LoopbackForwarder)
-	hostPorts := make(map[string]int)
+	hostPorts := make(map[int]int)
 
-	for portName, guestPort := range initOutput.Ports {
-		if guestPort == 0 {
-			fmt.Fprintf(os.Stderr, "Warning: Skipping port forwarding for %s (port is 0)\n", portName)
-			continue
-		}
-
+	for guestPort, hostPort := range portOverrides {
 		var forwarder *LoopbackForwarder
-		if overridePort, hasOverride := portOverrides[portName]; hasOverride {
-			// User specified an exact host port — hard failure if it cannot be bound.
-			forwarder, err = StartLoopbackForwarder(ctx, portName, overridePort, vmIP, guestPort)
-			if err != nil {
-				for _, f := range forwarders {
-					f.Close()
-				}
-				shutdownVM(vm)
-				return fmt.Errorf("cannot bind host port %d for service %q (requested via --ports): %w", overridePort, portName, err)
-			}
-		} else {
-			// Default: try same port as the VM, fall back to OS-assigned.
-			forwarder, err = StartLoopbackForwarder(ctx, portName, guestPort, vmIP, guestPort)
-			if err != nil {
-				forwarder, err = StartLoopbackForwarder(ctx, portName, 0, vmIP, guestPort)
-			}
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
-				continue
-			}
+		// Default: try user-specified port, fall back to OS-assigned.
+		forwarder, err = StartLoopbackForwarder(ctx, portName, hostPort, vmIP, guestPort)
+		if err != nil {
+			forwarder, err = StartLoopbackForwarder(ctx, portName, 0, vmIP, guestPort)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
+			continue
 		}
 
 		forwarders[portName] = forwarder
 		registerForwarder(portName, forwarder)
 		hostPort := forwarder.Port()
-		hostPorts[portName] = hostPort
+		hostPorts[guestPort] = hostPort
 		fmt.Printf("%s forwarding: 127.0.0.1:%d -> %s:%d\n", portName, hostPort, vmIP, guestPort)
 	}
 
@@ -1799,7 +1525,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 // information once SSH readiness has been confirmed.
 func writeHealthyStartArtifacts(
 	vmIP, cpuCountStr, ramSizeStr, sharedDir, sshPrivateKeyPath string,
-	hostPorts map[string]int,
+	hostPorts map[int]int,
 ) error {
 	vmState := map[string]interface{}{
 		"vm_name":   "exasol-local-vm",
@@ -1833,9 +1559,6 @@ func writeHealthyStartArtifacts(
 	fmt.Println("\n=== VM Access Information ===")
 	if sshPort, ok := hostPorts["ssh"]; ok && sshPort > 0 {
 		fmt.Printf("SSH:      ssh -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1\n", displayPath(sshPrivateKeyPath), sshPort)
-	}
-	if dbPort, ok := hostPorts["db"]; ok && dbPort > 0 {
-		fmt.Printf("Database: 127.0.0.1:%d\n", dbPort)
 	}
 
 	return nil
@@ -1879,7 +1602,7 @@ var (
 )
 
 // registerForwarder makes a forwarder visible to health-check requests on
-// the status socket, keyed by its service name (e.g. "ssh", "db", "ui").
+// the status socket, keyed by its service name (e.g. "ssh").
 func registerForwarder(name string, forwarder *LoopbackForwarder) {
 	forwarderRegistryMu.Lock()
 	defer forwarderRegistryMu.Unlock()
