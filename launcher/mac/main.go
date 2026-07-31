@@ -68,9 +68,13 @@ type VersionCheckOptions struct {
 
 // SlcMount describes one script language container image mount: the source image
 // reference and the destination directory inside the database container (under /exa/slc).
+// Package names a rootfs tarball staged under the shared directory. Entries carrying one are
+// imported by init-db.sh instead of pulled, which is the only way a user-supplied container
+// can reach the guest image store.
 type SlcMount struct {
-	Image  string `json:"image"`
-	Target string `json:"target"`
+	Image   string `json:"image"`
+	Target  string `json:"target"`
+	Package string `json:"package,omitempty"`
 }
 
 // SlcRuntimeConfig is written to the shared directory as slc.json and consumed by
@@ -331,6 +335,52 @@ func (l *slcMountList) Set(value string) error {
 	}
 	*l = append(*l, SlcMount{Image: image, Target: target})
 	return nil
+}
+
+type slcPackageList map[string]string
+
+func (l *slcPackageList) String() string {
+	parts := make([]string, 0, len(*l))
+	for image, file := range *l {
+		parts = append(parts, image+"="+file)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+func (l *slcPackageList) Set(value string) error {
+	image, file, found := strings.Cut(value, "=")
+	image = strings.TrimSpace(image)
+	file = strings.TrimSpace(file)
+	if !found || image == "" || file == "" {
+		return fmt.Errorf("invalid --slc-package value %q: expected <image>=<package-file>", value)
+	}
+	if file != filepath.Base(file) {
+		return fmt.Errorf("invalid --slc-package value %q: package must be a file name", value)
+	}
+	if *l == nil {
+		*l = slcPackageList{}
+	}
+	(*l)[image] = file
+	return nil
+}
+
+// A package naming no mount is rejected rather than dropped, so a mismatched pair cannot
+// silently produce an SLC the guest is unable to materialize.
+func attachSlcPackages(mounts []SlcMount, packages slcPackageList) ([]SlcMount, error) {
+	for image := range packages {
+		matched := false
+		for i := range mounts {
+			if mounts[i].Image == image {
+				mounts[i].Package = packages[image]
+				matched = true
+			}
+		}
+		if !matched {
+			return nil, fmt.Errorf("--slc-package %q has no matching --slc mount", image)
+		}
+	}
+	return mounts, nil
 }
 
 // writeSlcRuntimeConfig writes slc.json into the shared directory. It is written on every
@@ -717,6 +767,8 @@ func main() {
 		startFlags.StringVar(&versionCheckOptions.URL, "version-check-url", versionCheckOptions.URL, "Version-check URL override for scheduled local database version checks")
 		var slcMounts slcMountList
 		startFlags.Var(&slcMounts, "slc", "Script language container mount as <image>=<target> (repeatable)")
+		var slcPackages slcPackageList
+		startFlags.Var(&slcPackages, "slc-package", "Staged rootfs tarball for an SLC image as <image>=<package-file> (repeatable)")
 		startFlags.Usage = func() {
 			fmt.Fprintln(os.Stderr, "Usage: mac-launcher start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
 			startFlags.PrintDefaults()
@@ -738,7 +790,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: data_size_gb must be a positive integer")
 			os.Exit(1)
 		}
-		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag, versionCheckOptions, slcMounts)
+		mounts, mountsErr := attachSlcPackages(slcMounts, slcPackages)
+		if mountsErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", mountsErr)
+			os.Exit(2)
+		}
+		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag, versionCheckOptions, mounts)
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
@@ -1069,21 +1126,6 @@ func startCmd(
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
 		return fmt.Errorf("VM not initialized. Run 'mac-launcher init' first")
 	}
-	if err := refreshInitDBScript(sharedDir); err != nil {
-		return err
-	}
-
-	// Ensure the data disk exists at the requested size (create / grow / error).
-	dataDiskPath := filepath.Join(vmDir, "data.img")
-	if err := ensureDataDisk(dataDiskPath, dataSizeGB); err != nil {
-		return err
-	}
-
-	writeVersionCheckRuntimeConfigFromOptions(sharedDir, versionCheckOptions)
-
-	if err := writeSlcRuntimeConfig(sharedDir, slcMounts); err != nil {
-		return err
-	}
 
 	// Check if VM is already running by probing the status socket.
 	if conn, err := net.DialTimeout("unix", vmSocketPath, 2*time.Second); err == nil {
@@ -1098,6 +1140,22 @@ func startCmd(
 		if resp.Status == "running" {
 			return fmt.Errorf("VM is already running")
 		}
+	}
+
+	if err := refreshInitDBScript(sharedDir); err != nil {
+		return err
+	}
+
+	// Ensure the data disk exists at the requested size (create / grow / error).
+	dataDiskPath := filepath.Join(vmDir, "data.img")
+	if err := ensureDataDisk(dataDiskPath, dataSizeGB); err != nil {
+		return err
+	}
+
+	writeVersionCheckRuntimeConfigFromOptions(sharedDir, versionCheckOptions)
+
+	if err := writeSlcRuntimeConfig(sharedDir, slcMounts); err != nil {
+		return err
 	}
 
 	// Get the current executable path
