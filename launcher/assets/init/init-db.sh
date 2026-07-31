@@ -56,9 +56,11 @@ DB_PARAMS=$(jq -r '.db.params // [] | join(" ")' "$CONFIG_FILE")
 
 # Rewritten every start (empty when none) so old mounts never linger; validate to fail fast.
 SLC_CONFIG_FILE="$EXASOL_VM_HOST_SHARED_DIR/slc.json"
+SLC_PACKAGE_DIR="$EXASOL_VM_HOST_SHARED_DIR/slc-packages"
+SLC_STATUS_FILE="$EXASOL_VM_HOST_SHARED_DIR/slc-status.json"
 if [ -f "$SLC_CONFIG_FILE" ]; then
-  if ! jq -e '(.slc // []) | type == "array" and all(.[]; (.image | type == "string" and length > 0) and (.target | type == "string" and length > 0))' "$SLC_CONFIG_FILE" >/dev/null 2>&1; then
-    echo "Error: invalid $SLC_CONFIG_FILE; expected {\"slc\":[{\"image\":...,\"target\":...}]} with non-empty fields" >&2
+  if ! jq -e '(.slc // []) | type == "array" and all(.[]; (.image | type == "string" and length > 0) and (.target | type == "string" and length > 0) and ((.package | type == "string" and length > 0) or (has("package") | not)))' "$SLC_CONFIG_FILE" >/dev/null 2>&1; then
+    echo "Error: invalid $SLC_CONFIG_FILE; expected {\"slc\":[{\"image\":...,\"target\":...,\"package\":...}]} with non-empty fields" >&2
     exit 1
   fi
 fi
@@ -486,6 +488,85 @@ log_msg "Using image: $IMAGE_NAME"
 # Scopes pruning to SLC images only; the DB and unrelated images are never touched.
 SLC_IMAGE_REPO="exasol/script-language-container"
 
+# Imported containers carry no registry name to scope pruning by, so they are labelled here
+# and reclaimed by that label instead.
+SLC_IMPORT_LABEL="com.exasol.slc.imported=true"
+
+SLC_STATUS_ENTRIES=""
+
+record_slc_status() {
+  slc_status_entry="{\"image\":\"$1\",\"state\":\"$2\"}"
+  if [ -n "$SLC_STATUS_ENTRIES" ]; then
+    SLC_STATUS_ENTRIES="$SLC_STATUS_ENTRIES,$slc_status_entry"
+  else
+    SLC_STATUS_ENTRIES="$slc_status_entry"
+  fi
+}
+
+# The guest is the only place that knows whether a container was materialized, so it reports
+# back for the launcher to surface; rewritten every start so a stale entry is never read.
+write_slc_status() {
+  if [ ! -f "$SLC_CONFIG_FILE" ]; then
+    rm -f "$SLC_STATUS_FILE"
+    return 0
+  fi
+  printf '{"slc":[%s]}\n' "$SLC_STATUS_ENTRIES" > "$SLC_STATUS_FILE"
+}
+
+# An entry with a package is import-delivered and must never be pulled; one without is
+# registry-delivered and keeps the original pull-or-fail behavior.
+materialize_slc_image() {
+  slc_image="$1"
+  slc_package="$2"
+
+  if podman image exists "$slc_image"; then
+    log_msg "SLC image already present: $slc_image"
+    record_slc_status "$slc_image" "present"
+    return 0
+  fi
+
+  if [ -n "$slc_package" ]; then
+    slc_package_path="$SLC_PACKAGE_DIR/$slc_package"
+    if [ ! -f "$slc_package_path" ]; then
+      log_msg "Warning: SLC package $slc_package_path is missing; skipping $slc_image"
+      record_slc_status "$slc_image" "package-missing"
+      return 1
+    fi
+    log_msg "Importing SLC image from $slc_package_path: $slc_image"
+    if ! podman import --change "LABEL $SLC_IMPORT_LABEL" "$slc_package_path" "$slc_image"; then
+      log_msg "Warning: failed to import SLC image $slc_image; skipping it"
+      record_slc_status "$slc_image" "import-failed"
+      return 1
+    fi
+    record_slc_status "$slc_image" "imported"
+    return 0
+  fi
+
+  log_msg "Pulling SLC image: $slc_image"
+  if ! podman pull "$slc_image"; then
+    log_msg "Error: failed to pull SLC image $slc_image"
+    log_diagnostics
+    exit 1
+  fi
+  record_slc_status "$slc_image" "pulled"
+}
+
+# `podman import` of an unqualified name stores it under a localhost/ prefix and a pull stores
+# a docker.io/ one bare, so names only compare equal with both default prefixes removed.
+strip_slc_registry_prefix() {
+  printf '%s' "$1" | sed -e 's|^docker\.io/||' -e 's|^localhost/||'
+}
+
+# podman also stores a tagless reference as :latest, so a desired ref without a tag would never
+# match what the store reports and its image would be pruned right after being imported.
+normalize_slc_image_ref() {
+  slc_stripped="$(strip_slc_registry_prefix "$1")"
+  case "${slc_stripped##*/}" in
+    *:*) printf '%s' "$slc_stripped" ;;
+    *) printf '%s:latest' "$slc_stripped" ;;
+  esac
+}
+
 # Drops SLC images no longer in slc.json, or the store grows unbounded. Runs after pulls
 # and the container force-remove so outgoing images unreference cleanly; never fatal.
 prune_unreferenced_slc_images() {
@@ -493,15 +574,29 @@ prune_unreferenced_slc_images() {
   # the last SLC was uninstalled, so every SLC image is now unreferenced and reclaimed here.
   [ -f "$SLC_CONFIG_FILE" ] || return 0
 
-  # Strip "docker.io/" so refs compare equal to how `podman images` reports them.
-  slc_desired_images=$(jq -r '.slc // [] | .[] | .image' "$SLC_CONFIG_FILE" | sed 's|^docker\.io/||')
+  slc_desired_images=$(jq -r '.slc // [] | .[] | .image' "$SLC_CONFIG_FILE" \
+    | while IFS= read -r slc_desired_ref; do
+        printf '%s\n' "$(normalize_slc_image_ref "$slc_desired_ref")"
+      done)
 
-  # No pipefail is configured, so a `grep` with no matches ends the loop cleanly.
-  podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
-    | grep -F "$SLC_IMAGE_REPO" \
+  # The repository is compared whole: a substring match would also claim unrelated images
+  # whose name merely contains the SLC repository, and this loop deletes what it matches.
+  {
+    podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+      | while IFS= read -r slc_candidate_ref; do
+          [ -n "$slc_candidate_ref" ] || continue
+          slc_candidate_repo="${slc_candidate_ref%:*}"
+          [ "$(strip_slc_registry_prefix "$slc_candidate_repo")" = "$SLC_IMAGE_REPO" ] \
+            || continue
+          printf '%s\n' "$slc_candidate_ref"
+        done
+    podman images --filter "label=$SLC_IMPORT_LABEL" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null
+  } \
     | while IFS= read -r slc_existing_image; do
         [ -n "$slc_existing_image" ] || continue
-        slc_normalized=$(printf '%s' "$slc_existing_image" | sed 's|^docker\.io/||')
+        # An untagged image cannot be removed by reference; leave it to podman's own pruning.
+        case "$slc_existing_image" in *:'<none>') continue ;; esac
+        slc_normalized=$(normalize_slc_image_ref "$slc_existing_image")
         if printf '%s\n' "$slc_desired_images" | grep -Fxq "$slc_normalized"; then
           continue
         fi
@@ -513,26 +608,19 @@ prune_unreferenced_slc_images() {
 }
 
 run_db_container() {
-  # `podman run --mount type=image` does not pull on demand, so pull any missing SLC first.
+  # `podman run --mount type=image` does not pull on demand, so every SLC image has to be in
+  # the store before the container is created.
   if [ -f "$SLC_CONFIG_FILE" ]; then
-    while IFS= read -r slc_image; do
+    while IFS="$(printf '\t')" read -r slc_image slc_package; do
       [ -n "$slc_image" ] || continue
-      if podman image exists "$slc_image"; then
-        log_msg "SLC image already present: $slc_image"
-      else
-        log_msg "Pulling SLC image: $slc_image"
-        if ! podman pull "$slc_image"; then
-          log_msg "Error: failed to pull SLC image $slc_image"
-          log_diagnostics
-          exit 1
-        fi
-      fi
-    done <<SLC_PULL
-$(jq -r '.slc // [] | .[] | .image' "$SLC_CONFIG_FILE")
-SLC_PULL
+      materialize_slc_image "$slc_image" "$slc_package" || true
+    done <<SLC_MATERIALIZE
+$(jq -r '.slc // [] | .[] | [.image, .package // ""] | @tsv' "$SLC_CONFIG_FILE")
+SLC_MATERIALIZE
   fi
-
   prune_unreferenced_slc_images || true
+
+  write_slc_status
 
   if [ "$NANO_VERSION_CHECK_ENABLED" = "1" ]; then
     log_msg "Starting DB container with Nano version checks enabled in exasol.conf"
@@ -544,14 +632,19 @@ SLC_PULL
     log_msg "Starting DB container with Nano version checks disabled in exasol.conf"
     set -- "$IMAGE_NAME" "$@"
   fi
-  # Read whole lines so each --mount stays paired with its full spec.
+  # Skipping an image that could not be materialized keeps the database startable: the
+  # language is unavailable, but the deployment still comes up.
   if [ -f "$SLC_CONFIG_FILE" ]; then
-    while IFS= read -r slc_mount_spec; do
-      [ -n "$slc_mount_spec" ] || continue
-      log_msg "Mounting SLC: $slc_mount_spec"
-      set -- "--mount" "$slc_mount_spec" "$@"
+    while IFS="$(printf '\t')" read -r slc_image slc_target; do
+      [ -n "$slc_image" ] || continue
+      if ! podman image exists "$slc_image"; then
+        log_msg "Skipping SLC mount for unavailable image: $slc_image"
+        continue
+      fi
+      log_msg "Mounting SLC: $slc_image -> $slc_target"
+      set -- "--mount" "type=image,source=$slc_image,destination=$slc_target" "$@"
     done <<SLC_MOUNTS
-$(jq -r '.slc // [] | .[] | "type=image,source=\(.image),destination=\(.target)"' "$SLC_CONFIG_FILE")
+$(jq -r '.slc // [] | .[] | [.image, .target] | @tsv' "$SLC_CONFIG_FILE")
 SLC_MOUNTS
   fi
   # --replace guards against a name-conflict race with the force-removal above.

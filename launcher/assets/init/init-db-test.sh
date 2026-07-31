@@ -45,6 +45,25 @@ printf '\n' >> "$PODMAN_CALLS"
 marker_dir="${PODMAN_STATE_DIR:-}"
 marker_for() { printf '%s/%s.exists' "$marker_dir" "$1"; }
 image_marker() { printf '%s/img-%s.exists' "$marker_dir" "$(printf '%s' "$1" | tr '/:.' '___')"; }
+# podman stores an unqualified name under a localhost/ prefix and normalizes lookups the same
+# way; the mock has to do it too, or a prefix-sensitive bug passes here and fails on a real VM.
+normalize_ref() {
+    local ref="$1"
+    case "$ref" in
+        */*)
+            case "${ref%%/*}" in
+                *.*|*:*|localhost) ;;
+                *) ref="localhost/$ref" ;;
+            esac
+            ;;
+        *) ref="localhost/$ref" ;;
+    esac
+    # podman stores a tagless reference as :latest.
+    case "${ref##*/}" in
+        *:*) printf '%s' "$ref" ;;
+        *) printf '%s:latest' "$ref" ;;
+    esac
+}
 
 case "$command" in
     ps)
@@ -104,7 +123,7 @@ case "$command" in
     image)
         # podman image exists <ref> (0 = present, 1 = absent)
         if [ "${1:-}" = "exists" ]; then
-            if [ -n "$marker_dir" ] && [ -f "$(image_marker "${2:-}")" ]; then
+            if [ -n "$marker_dir" ] && [ -f "$(image_marker "$(normalize_ref "${2:-}")")" ]; then
                 exit 0
             fi
             exit 1
@@ -117,12 +136,60 @@ case "$command" in
             printf '%s\n' "$1" > "$(image_marker "$1")"
         fi
         ;;
+    import)
+        # podman import [--change LABEL k=v] <package> <ref>: the package must exist, and a
+        # PODMAN_MOCK_IMPORT_FAILS ref simulates an archive podman cannot read. Imported refs
+        # carry a label file so label-filtered `images` can report them.
+        import_label=""
+        import_args=()
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --change)
+                    import_label="${2#LABEL }"
+                    shift 2
+                    ;;
+                *)
+                    import_args+=("$1")
+                    shift
+                    ;;
+            esac
+        done
+        package="${import_args[0]:-}"
+        ref="${import_args[1]:-}"
+        if [ ! -f "$package" ]; then
+            echo "package not found: $package" >&2
+            exit 1
+        fi
+        if [[ -n "${PODMAN_MOCK_IMPORT_FAILS:-}" && "$ref" == "$PODMAN_MOCK_IMPORT_FAILS" ]]; then
+            echo "simulated import failure for $ref" >&2
+            exit 1
+        fi
+        if [ -n "$marker_dir" ] && [ -n "$ref" ]; then
+            stored_ref="$(normalize_ref "$ref")"
+            printf '%s\n' "$stored_ref" > "$(image_marker "$stored_ref")"
+            [ -n "$import_label" ] \
+                && printf '%s\n' "$import_label" > "$(image_marker "$stored_ref").label"
+        fi
+        ;;
     images)
         # podman images --format '{{.Repository}}:{{.Tag}}': list stored image refs. Each
-        # image marker holds its full reference (written on pull or pre-seeded by a test).
+        # image marker holds its full reference (written on pull/import or pre-seeded by a
+        # test). With --filter label=k=v, only refs carrying that label are reported.
+        label_filter=""
+        prev=""
+        for arg in "$@"; do
+            if [ "$prev" = "--filter" ]; then
+                label_filter="${arg#label=}"
+            fi
+            prev="$arg"
+        done
         if [ -n "$marker_dir" ]; then
             for f in "$marker_dir"/img-*.exists; do
                 [ -e "$f" ] || continue
+                if [ -n "$label_filter" ]; then
+                    [ -f "$f.label" ] || continue
+                    grep -Fxq "$label_filter" "$f.label" || continue
+                fi
                 cat "$f"
             done
         fi
@@ -132,7 +199,12 @@ case "$command" in
         for arg in "$@"; do
             case "$arg" in
                 -*) ;;
-                *) [ -n "$marker_dir" ] && rm -f "$(image_marker "$arg")" 2>/dev/null || true ;;
+                *)
+                    if [ -n "$marker_dir" ]; then
+                        rm -f "$(image_marker "$arg")" "$(image_marker "$arg").label" 2>/dev/null \
+                            || true
+                    fi
+                    ;;
             esac
         done
         ;;
@@ -463,6 +535,154 @@ test_invalid_slc_config_fails() {
     fi
 }
 
+test_slc_imports_packaged_image() {
+    local case_dir="$1/slc-import"
+    prepare_case "$case_dir"
+    mkdir -p "$case_dir/shared/slc-packages"
+    : > "$case_dir/shared/slc-packages/custom-mypy3-abc.tar.gz"
+    cat > "$case_dir/shared/slc.json" <<'JSON'
+{"slc":[{"image":"exasol-personal/custom-slc:mypy3-abc","target":"/exa/slc/custom-mypy3","package":"custom-mypy3-abc.tar.gz"}]}
+JSON
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    local calls
+    calls="$(cat "$case_dir/podman-calls.log")"
+    assert_contains "$calls" "import --change LABEL com.exasol.slc.imported=true"
+    assert_not_contains "$calls" "pull exasol-personal/custom-slc:mypy3-abc"
+    assert_contains "$run_line" \
+        "type=image,source=exasol-personal/custom-slc:mypy3-abc,destination=/exa/slc/custom-mypy3"
+    assert_contains "$(cat "$case_dir/shared/slc-status.json")" '"state":"imported"'
+}
+
+test_slc_skips_import_when_image_present() {
+    local case_dir="$1/slc-import-cached"
+    prepare_case "$case_dir"
+    mkdir -p "$case_dir/shared/slc-packages"
+    : > "$case_dir/shared/slc-packages/custom-mypy3-abc.tar.gz"
+    cat > "$case_dir/shared/slc.json" <<'JSON'
+{"slc":[{"image":"exasol-personal/custom-slc:mypy3-abc","target":"/exa/slc/custom-mypy3","package":"custom-mypy3-abc.tar.gz"}]}
+JSON
+    printf '%s\n' "localhost/exasol-personal/custom-slc:mypy3-abc" \
+        > "$case_dir/podman-state/img-localhost_exasol-personal_custom-slc_mypy3-abc.exists"
+    printf '%s\n' "com.exasol.slc.imported=true" \
+        > "$case_dir/podman-state/img-localhost_exasol-personal_custom-slc_mypy3-abc.exists.label"
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    assert_not_contains "$(cat "$case_dir/podman-calls.log")" "import --change"
+    assert_contains "$run_line" "destination=/exa/slc/custom-mypy3"
+    assert_contains "$(cat "$case_dir/shared/slc-status.json")" '"state":"present"'
+}
+
+# A container the guest cannot materialize must cost the language, never the database.
+test_slc_missing_package_keeps_database_startable() {
+    local case_dir="$1/slc-package-missing"
+    prepare_case "$case_dir"
+    cat > "$case_dir/shared/slc.json" <<'JSON'
+{"slc":[{"image":"exasol-personal/custom-slc:mypy3-abc","target":"/exa/slc/custom-mypy3","package":"absent.tar.gz"}]}
+JSON
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    assert_contains "$run_line" "localhost/exasol-local-db:latest init"
+    assert_not_contains "$run_line" "destination=/exa/slc/custom-mypy3"
+    assert_contains "$(cat "$case_dir/shared/slc-status.json")" '"state":"package-missing"'
+}
+
+test_slc_failed_import_keeps_database_startable() {
+    local case_dir="$1/slc-import-failed"
+    prepare_case "$case_dir"
+    mkdir -p "$case_dir/shared/slc-packages"
+    : > "$case_dir/shared/slc-packages/custom-mypy3-abc.tar.gz"
+    cat > "$case_dir/shared/slc.json" <<'JSON'
+{"slc":[{"image":"exasol-personal/custom-slc:mypy3-abc","target":"/exa/slc/custom-mypy3","package":"custom-mypy3-abc.tar.gz"}]}
+JSON
+
+    local run_line
+    run_line="$(PODMAN_MOCK_IMPORT_FAILS="exasol-personal/custom-slc:mypy3-abc" \
+        run_init_db_case "$case_dir")"
+
+    assert_contains "$run_line" "localhost/exasol-local-db:latest init"
+    assert_not_contains "$run_line" "destination=/exa/slc/custom-mypy3"
+    assert_contains "$(cat "$case_dir/shared/slc-status.json")" '"state":"import-failed"'
+}
+
+test_prunes_unreferenced_imported_slc_images() {
+    local case_dir="$1/slc-prune-imported"
+    prepare_case "$case_dir"
+    printf '{"slc":[]}' > "$case_dir/shared/slc.json"
+    # An imported container carries no registry name, so only its label marks it prunable.
+    printf '%s\n' "localhost/exasol-personal/custom-slc:stale-abc" \
+        > "$case_dir/podman-state/img-localhost_exasol-personal_custom-slc_stale-abc.exists"
+    printf '%s\n' "com.exasol.slc.imported=true" \
+        > "$case_dir/podman-state/img-localhost_exasol-personal_custom-slc_stale-abc.exists.label"
+
+    run_init_db_case "$case_dir" >/dev/null
+
+    assert_contains "$(cat "$case_dir/podman-calls.log")" \
+        "rmi localhost/exasol-personal/custom-slc:stale-abc"
+}
+
+# The bug this covers: podman stores an unqualified imported ref under localhost/, so a prune
+# comparing raw refs deleted the image it had just imported, and the mount was then skipped.
+test_keeps_referenced_imported_slc_image() {
+    local case_dir="$1/slc-keep-imported"
+    prepare_case "$case_dir"
+    mkdir -p "$case_dir/shared/slc-packages"
+    : > "$case_dir/shared/slc-packages/custom-mypy3-abc.tar.gz"
+    cat > "$case_dir/shared/slc.json" <<'JSON'
+{"slc":[{"image":"exasol-personal/custom-slc:mypy3-abc","target":"/exa/slc/custom-mypy3","package":"custom-mypy3-abc.tar.gz"}]}
+JSON
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    assert_not_contains "$(cat "$case_dir/podman-calls.log")" \
+        "rmi localhost/exasol-personal/custom-slc:mypy3-abc"
+    assert_contains "$run_line" "destination=/exa/slc/custom-mypy3"
+}
+
+# A packaged reference without a tag is stored as :latest, so the desired ref has to be
+# normalized the same way or the prune deletes the image straight after importing it.
+test_keeps_referenced_imported_slc_image_without_a_tag() {
+    local case_dir="$1/slc-implicit-latest"
+    prepare_case "$case_dir"
+    mkdir -p "$case_dir/shared/slc-packages"
+    : > "$case_dir/shared/slc-packages/custom-mypy3.tar.gz"
+    cat > "$case_dir/shared/slc.json" <<'JSON'
+{"slc":[{"image":"exasol-personal/custom-slc","target":"/exa/slc/custom-mypy3","package":"custom-mypy3.tar.gz"}]}
+JSON
+
+    local run_line
+    run_line="$(run_init_db_case "$case_dir")"
+
+    assert_not_contains "$(cat "$case_dir/podman-calls.log")" \
+        "rmi localhost/exasol-personal/custom-slc:latest"
+    assert_contains "$run_line" "destination=/exa/slc/custom-mypy3"
+}
+
+# A repository whose name merely contains the SLC repository is somebody else's image.
+test_leaves_lookalike_repository_images_untouched() {
+    local case_dir="$1/slc-lookalike"
+    prepare_case "$case_dir"
+    printf '{"slc":[]}' > "$case_dir/shared/slc.json"
+    printf '%s\n' "docker.io/exasol/script-language-container-fork:v1" \
+        > "$case_dir/podman-state/img-docker_io_exasol_script-language-container-fork_v1.exists"
+    printf '%s\n' "docker.io/acme/exasol/script-language-container:v1" \
+        > "$case_dir/podman-state/img-docker_io_acme_exasol_script-language-container_v1.exists"
+
+    run_init_db_case "$case_dir" >/dev/null
+
+    local calls
+    calls="$(cat "$case_dir/podman-calls.log")"
+    assert_not_contains "$calls" "rmi docker.io/exasol/script-language-container-fork:v1"
+    assert_not_contains "$calls" "rmi docker.io/acme/exasol/script-language-container:v1"
+}
+
 test_removes_stale_container_before_recreate() {
     local case_dir="$1/stale-container"
     prepare_case "$case_dir"
@@ -618,6 +838,14 @@ main() {
     test_invalid_slc_config_fails "$tmp_dir"
     test_removes_stale_container_before_recreate "$tmp_dir"
     test_prunes_unreferenced_slc_images "$tmp_dir"
+    test_slc_imports_packaged_image "$tmp_dir"
+    test_slc_skips_import_when_image_present "$tmp_dir"
+    test_slc_missing_package_keeps_database_startable "$tmp_dir"
+    test_slc_failed_import_keeps_database_startable "$tmp_dir"
+    test_prunes_unreferenced_imported_slc_images "$tmp_dir"
+    test_keeps_referenced_imported_slc_image "$tmp_dir"
+    test_keeps_referenced_imported_slc_image_without_a_tag "$tmp_dir"
+    test_leaves_lookalike_repository_images_untouched "$tmp_dir"
     test_no_slc_config_leaves_images_untouched "$tmp_dir"
     test_empty_slc_config_mounts_nothing_and_prunes_all "$tmp_dir"
     test_migrates_overlay_exa_before_container_removal "$tmp_dir"
