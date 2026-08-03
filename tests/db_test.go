@@ -29,6 +29,7 @@ func TestDBConnection(t *testing.T) {
 
 	f.Init()
 	f.StartVM(2, 4096, 10)
+	f.StartDBInVM()
 
 	dbPort := readDBPortFromVMState(t, f)
 	db := waitForDB(t, dbPort, 5*time.Minute)

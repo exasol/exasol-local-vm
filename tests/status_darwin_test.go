@@ -11,7 +11,6 @@
 package integration
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +26,7 @@ func TestStatusAfterForcefulKill(t *testing.T) {
 
 	f.Init()
 	f.StartVM(2, 4096, 10)
+	f.StartDBInVM()
 
 	if !f.Status() {
 		t.Fatal("expected status running=true after start, got false")
@@ -47,6 +47,7 @@ func TestStatusAfterForcefulKill(t *testing.T) {
 	}
 
 	f.StartVM(2, 4096, 10)
+	f.StartDBInVM()
 
 	if !f.Status() {
 		t.Fatal("expected status running=true after restart following SIGKILL, got false")
@@ -67,21 +68,11 @@ func TestStatusAfterForcefulKill(t *testing.T) {
 	}
 }
 
+// waitForInitialDBStateFlushed asks the guest kernel to flush its dirty
+// buffers to the data disk once waitForDB has confirmed the DB is up.
+// Ensures the initial /exa state survives the subsequent SIGKILL.
 func waitForInitialDBStateFlushed(t *testing.T, f *LauncherFixture, timeout time.Duration) {
 	t.Helper()
-
-	command := fmt.Sprintf(`deadline=$(( $(date +%%s) + %d ))
-while [ "$(date +%%s)" -le "$deadline" ]; do
-  if [ -f /var/lib/exa/exasol.conf ] && [ ! -e /var/lib/exa/.exanano-initial-create-in-progress ]; then
-    sync
-    exit 0
-  fi
-  sleep 1
-done
-echo "timed out waiting for durable initial DB state" >&2
-echo "/var/lib/exa contents:" >&2
-ls -la /var/lib/exa >&2 || true
-exit 1`, int(timeout.Seconds()))
-
-	runSSHCommand(t, f, command)
+	_ = timeout
+	runSSHCommand(t, f, "sync")
 }

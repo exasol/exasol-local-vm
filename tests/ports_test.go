@@ -1,7 +1,13 @@
 // Copyright 2026 Exasol AG
 // SPDX-License-Identifier: MIT
 
-//go:build darwin || windows
+//go:build windows
+
+// The mac launcher no longer supports `--ports` (host-port override); the
+// forwarders it sets up are declared with `--forward-ports svc:guestPort`
+// which is a strictly declarative, non-overrideable model. The windows
+// launcher still speaks the historic override syntax, so we keep these
+// tests but limit them to windows.
 
 package integration
 

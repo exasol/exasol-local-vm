@@ -238,3 +238,50 @@ func shellQuote(s string) string {
 	}
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
+
+// nanoImageRef pins the Exasol Nano DB image the fixture starts inside the VM.
+// Kept in sync with the reference launcher's NANO_BASE_TAG.
+const nanoImageRef = "docker.io/exasol/nano:2026.2.0-nano.2"
+
+// StartDBInVM SSHes into the running guest and starts an Exasol Nano DB
+// container using the rootful podman socket the guest's init-podman.sh
+// enables at boot. Uses --replace so a rerun after a VM restart is
+// idempotent, and mounts a named volume so /exa survives container
+// recreation. Requires the VM to be running with ssh forwarded (StartVM
+// already forwards ssh:22 and db:8563).
+func (f *LauncherFixture) StartDBInVM() {
+	f.t.Helper()
+	pullCmd := "podman pull " + shellQuote(nanoImageRef)
+	runCmd := strings.Join([]string{
+		"podman run -d --replace",
+		"--name exasol-local-db-test",
+		"--shm-size 512mb",
+		"--pids-limit -1",
+		"--security-opt unmask=ALL",
+		"--restart no",
+		"-p 8563:8563",
+		"-v exasol-test-data:/exa",
+		shellQuote(nanoImageRef),
+		"init VERSION_CHECK_ENABLED=0",
+	}, " ")
+	runSSHCommand(f.t, f, pullCmd+" && "+runCmd)
+}
+
+// StartVM runs `launcher start --cpu N --ram XM --data-size-gb Y \
+// --forward-ports ssh:22,db:8563` and waits for it to return. Marks the
+// launcher as running so Cleanup will call Stop.
+//
+// The mac launcher has no host-port override: the forwarders it sets up are
+// declared with --forward-ports svc:guestPort, and the host port is picked
+// by the OS. Tests that need to know the assigned host port read it from
+// vm-state.json after start returns.
+func (f *LauncherFixture) StartVM(cpu, ramMB, dataSizeGB int) {
+	f.t.Helper()
+	f.run("start",
+		"--cpu", fmt.Sprintf("%d", cpu),
+		"--ram", fmt.Sprintf("%d", ramMB),
+		"--data-size-gb", fmt.Sprintf("%d", dataSizeGB),
+		"--forward-ports", "ssh:22,db:8563",
+	)
+	f.vmRunning = true
+}

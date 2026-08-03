@@ -71,7 +71,7 @@ OVERALL_SUCCESS=true
 
 # Run initialization scripts in order
 run_init_script "init-ssh.sh" "SSH key initialization"
-run_init_script "init-db.sh" "database initialization"
+run_init_script "init-podman.sh" "rootful podman socket enablement"
 run_init_script "init-ip.sh" "IP initialization"
 
 # Print the init output file for the launcher to read

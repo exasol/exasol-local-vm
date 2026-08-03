@@ -29,7 +29,9 @@ fi
 
 log_msg "VM IP address: $VM_IP"
 
-# Update init output file with IP address
-jq --arg ip "$VM_IP" '.ip = $ip' "$INIT_OUTPUT_FILE" > "${INIT_OUTPUT_FILE}.tmp" && mv "${INIT_OUTPUT_FILE}.tmp" "$INIT_OUTPUT_FILE"
+# Update init output file with IP address plus the well-known SSH port so the
+# launcher's forwarder loop always covers SSH out of the box, without users
+# needing --forward-ports ssh:22 explicitly.
+jq --arg ip "$VM_IP" '.ip = $ip | .ports.ssh = 22' "$INIT_OUTPUT_FILE" > "${INIT_OUTPUT_FILE}.tmp" && mv "${INIT_OUTPUT_FILE}.tmp" "$INIT_OUTPUT_FILE"
 
-log_msg "Updated init output file with IP address"
+log_msg "Updated init output file with IP address and ssh port"

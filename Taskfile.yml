@@ -196,9 +196,9 @@ tasks:
         - name: IMG_ARCH
           enum: [aarch64, x86_64]
     cmds:
-      - task: stage-init-assets
-        vars:
-          IMG_ARCH: "{{.IMG_ARCH}}"
+      # No stage-init-assets dep: the launcher no longer embeds the Nano DB
+      # tarball, only the small init-scripts directory. build-mac-launcher.sh
+      # tars launcher/assets/init/ itself.
       - ./host/package/build-mac-launcher.sh "{{.IMG_ARCH}}"
 
   build-windows-launcher:
