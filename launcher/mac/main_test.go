@@ -13,7 +13,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -63,6 +65,94 @@ func TestAuthorizedKeyFromPrivateKeyMatchesGeneratedPublicKey(t *testing.T) {
 	}
 	if string(importedAuthorizedKey) != string(generatedAuthorizedKey) {
 		t.Fatalf("imported authorized key does not match generated public key")
+	}
+}
+
+func TestRemoteCommandGivenArgumentsWithShellCharacters(t *testing.T) {
+	// Given
+	command := []string{"printf", "%s\\n", "two words", "it's", ""}
+
+	// When
+	got := remoteCommand(command)
+
+	// Then
+	want := `'printf' '%s\n' 'two words' 'it'"'"'s' ''`
+	if got != want {
+		t.Fatalf("remoteCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestSSHArgsGivenInteractiveShell(t *testing.T) {
+	// Given
+	state := VMRuntimeState{IP: "192.0.2.10"}
+	config := RuntimeConfig{SSHPrivateKey: "/tmp/test-key"}
+
+	// When
+	got := sshArgs(state, config, nil, true)
+
+	// Then
+	want := []string{
+		"-i", "/tmp/test-key",
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "BatchMode=yes",
+		"-o", "LogLevel=ERROR",
+		"-t",
+		"root@192.0.2.10",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sshArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunCmdGivenRemoteCommandFailure(t *testing.T) {
+	// Given
+	tempDir := t.TempDir()
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to change working directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(originalDir) })
+
+	state := []byte(`{"vm_ip":"192.0.2.10"}`)
+	if err := os.WriteFile(vmRuntimeStatePath, state, 0600); err != nil {
+		t.Fatalf("failed to write VM state: %v", err)
+	}
+	if err := writeRuntimeConfig(RuntimeConfig{SSHPrivateKey: "/tmp/test-key"}); err != nil {
+		t.Fatalf("failed to write runtime config: %v", err)
+	}
+	binDir := filepath.Join(tempDir, "bin")
+	if err := os.Mkdir(binDir, 0755); err != nil {
+		t.Fatalf("failed to create bin directory: %v", err)
+	}
+	fakeSSH := []byte("#!/bin/sh\ncat\nprintf '|stdout'\nprintf '|stderr' >&2\nexit 23\n")
+	if err := os.WriteFile(filepath.Join(binDir, "ssh"), fakeSSH, 0755); err != nil {
+		t.Fatalf("failed to write fake ssh: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	// When
+	err = runCmd([]string{"ignored"}, false, bytes.NewBufferString("stdin"), &stdout, &stderr)
+
+	// Then
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) {
+		t.Fatalf("runCmd() error = %v, want exec.ExitError", err)
+	}
+	if exitError.ExitCode() != 23 {
+		t.Fatalf("remote exit code = %d, want 23", exitError.ExitCode())
+	}
+	if got, want := stdout.String(), "stdin|stdout"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+	if got, want := stderr.String(), "|stderr"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
 
