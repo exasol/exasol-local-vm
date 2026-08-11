@@ -31,6 +31,7 @@ import (
 	"github.com/Code-Hex/vz/v3"
 	"github.com/ulikunitz/xz"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 )
 
 //go:embed vm-package.tar.xz
@@ -46,6 +47,10 @@ type InitOutput struct {
 
 type RuntimeConfig struct {
 	SSHPrivateKey string `json:"ssh_private_key"`
+}
+
+type VMRuntimeState struct {
+	IP string `json:"vm_ip"`
 }
 
 type ForwardSpec struct {
@@ -89,6 +94,7 @@ func (list *forwardSpecList) Set(value string) error {
 const (
 	defaultSSHPrivateKeyPath = "vm-ssh-key"
 	runtimeConfigPath        = "vm-config.json"
+	vmRuntimeStatePath       = "vm-runtime.json"
 	sharedDirName            = "vm-shared"
 	authorizedKeysName       = "authorized_keys"
 	vmSocketPath             = "vm.sock"
@@ -237,11 +243,79 @@ func loadRuntimeConfig() (RuntimeConfig, error) {
 	return config, nil
 }
 
-func displayPath(path string) string {
-	if filepath.IsAbs(path) || strings.HasPrefix(path, ".") {
-		return path
+func loadVMRuntimeState() (VMRuntimeState, error) {
+	stateData, err := os.ReadFile(vmRuntimeStatePath)
+	if err != nil {
+		return VMRuntimeState{}, fmt.Errorf("failed to read VM runtime state; start the VM first: %w", err)
 	}
-	return "./" + path
+
+	var state VMRuntimeState
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		return VMRuntimeState{}, fmt.Errorf("failed to parse %s: %w", vmRuntimeStatePath, err)
+	}
+	if net.ParseIP(state.IP) == nil {
+		return VMRuntimeState{}, fmt.Errorf("%s contains invalid VM IP address %q", vmRuntimeStatePath, state.IP)
+	}
+
+	return state, nil
+}
+
+func isTerminal(file *os.File) bool {
+	_, err := unix.IoctlGetTermios(int(file.Fd()), unix.TIOCGETA)
+	return err == nil
+}
+
+func quoteShellArgument(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func remoteCommand(command []string) string {
+	quoted := make([]string, 0, len(command))
+	for _, argument := range command {
+		quoted = append(quoted, quoteShellArgument(argument))
+	}
+
+	return strings.Join(quoted, " ")
+}
+
+func sshArgs(state VMRuntimeState, config RuntimeConfig, command []string, allocateTTY bool) []string {
+	args := []string{
+		"-i", config.SSHPrivateKey,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "BatchMode=yes",
+		"-o", "LogLevel=ERROR",
+	}
+	if allocateTTY {
+		args = append(args, "-t")
+	}
+	args = append(args, "root@"+state.IP)
+	if len(command) > 0 {
+		args = append(args, remoteCommand(command))
+	}
+
+	return args
+}
+
+func runCmd(command []string, allocateTTY bool, stdin io.Reader, stdout, stderr io.Writer) error {
+	state, err := loadVMRuntimeState()
+	if err != nil {
+		return err
+	}
+	config, err := loadRuntimeConfig()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command("ssh", sshArgs(state, config, command, allocateTTY)...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("command execution in VM failed: %w", err)
+	}
+
+	return nil
 }
 
 // createSparseDataDisk creates a sparse raw disk image for VM data storage
@@ -561,6 +635,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "                                      - rejected (error) if larger; shrinking")
 		fmt.Fprintln(os.Stderr, "                                        is not supported.")
 		fmt.Fprintln(os.Stderr, "  stop                              Stop running VM")
+		fmt.Fprintln(os.Stderr, "  run [--tty] [--] [command ...]   Run a command inside the VM")
+		fmt.Fprintln(os.Stderr, "                                    With no command, open a shell when stdin is a TTY.")
 		fmt.Fprintln(os.Stderr, "  status                            Print JSON {\"running\": bool}")
 		fmt.Fprintln(os.Stderr, "  health-check                      Print JSON {\"ports\": {\"<name>\": {\"state\": ...}}}")
 		fmt.Fprintln(os.Stderr, "                                    after freshly probing every forwarded port")
@@ -632,6 +708,27 @@ func main() {
 		err = runVMDaemon(os.Args[2], os.Args[3], encodedForwards)
 	case "stop":
 		err = stopCmd()
+	case "run":
+		runFlags := flag.NewFlagSet("run", flag.ContinueOnError)
+		runFlags.SetOutput(os.Stderr)
+		var allocateTTY bool
+		runFlags.BoolVar(&allocateTTY, "tty", false, "Allocate a terminal inside the VM")
+		runFlags.BoolVar(&allocateTTY, "t", false, "Allocate a terminal inside the VM")
+		runFlags.Usage = func() {
+			fmt.Fprintln(os.Stderr, "Usage: mac-launcher run [--tty] [--] [command ...]")
+			runFlags.PrintDefaults()
+		}
+		if parseErr := runFlags.Parse(os.Args[2:]); parseErr != nil {
+			os.Exit(2)
+		}
+		command := runFlags.Args()
+		stdinIsTerminal := isTerminal(os.Stdin)
+		if len(command) == 0 && !stdinIsTerminal {
+			fmt.Fprintln(os.Stderr, "Error: run requires a command when stdin is not a terminal")
+			runFlags.Usage()
+			os.Exit(2)
+		}
+		err = runCmd(command, allocateTTY || len(command) == 0, os.Stdin, os.Stdout, os.Stderr)
 	case "status":
 		err = statusCmd()
 	case "health-check":
@@ -646,11 +743,15 @@ func main() {
 		versionCmd(os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop, status, resize-data, version")
+		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop, run, status, health-check, resize-data, version")
 		os.Exit(1)
 	}
 
 	if err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			os.Exit(exitError.ExitCode())
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -1025,6 +1126,9 @@ func startCmd(
 	if err := os.Remove("vm-state.json"); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove stale vm-state.json: %w", err)
 	}
+	if err := os.Remove(vmRuntimeStatePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove stale %s: %w", vmRuntimeStatePath, err)
+	}
 	if err := os.Remove(daemonDegradedMarkerFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove stale degraded-state marker: %w", err)
 	}
@@ -1179,6 +1283,8 @@ func startCmd(
 
 func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 	// This function runs as a background daemon
+	defer os.Remove(vmRuntimeStatePath)
+
 	sharedDir := sharedDirName
 	runtimeConfig, err := loadRuntimeConfig()
 	if err != nil {
@@ -1624,9 +1730,16 @@ func writeHealthyStartArtifacts(
 	vmIP, cpuCountStr, ramSizeStr, sharedDir string,
 	forwards map[string]ForwardState,
 ) error {
+	runtimeStateData, err := json.MarshalIndent(VMRuntimeState{IP: vmIP}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal VM runtime state: %w", err)
+	}
+	if err := os.WriteFile(vmRuntimeStatePath, runtimeStateData, 0600); err != nil {
+		return fmt.Errorf("failed to write %s: %w", vmRuntimeStatePath, err)
+	}
+
 	vmState := map[string]interface{}{
 		"vm_name":   "exasol-local-vm",
-		"vm_ip":     vmIP,
 		"cpu_count": cpuCountStr,
 		"ram_size":  ramSizeStr,
 		"pid":       fmt.Sprintf("%d", os.Getpid()),
