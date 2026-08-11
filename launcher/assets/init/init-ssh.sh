@@ -81,10 +81,4 @@ setup_user_keys() {
 # Set up SSH keys for root user
 setup_user_keys "/root"
 
-# Update init output file with SSH port
-if [ -n "${INIT_OUTPUT_FILE:-}" ]; then
-  jq '.ports.ssh = 22' "$INIT_OUTPUT_FILE" > "${INIT_OUTPUT_FILE}.tmp" && mv "${INIT_OUTPUT_FILE}.tmp" "$INIT_OUTPUT_FILE"
-  log_msg "Updated init output file with SSH port"
-fi
-
 log_msg "SSH keys imported successfully"

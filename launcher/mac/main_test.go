@@ -4,6 +4,7 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,10 +14,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ulikunitz/xz"
 )
 
 func TestVersionCommandOutput(t *testing.T) {
@@ -64,98 +66,62 @@ func TestAuthorizedKeyFromPrivateKeyMatchesGeneratedPublicKey(t *testing.T) {
 	}
 }
 
-func TestVersionCheckRuntimeConfigFromOptionsUsesLauncherContract(t *testing.T) {
-	config := versionCheckRuntimeConfigFromOptions(VersionCheckOptions{
-		Enabled:         false,
-		IntervalSeconds: 42,
-		Identity:        "exasol-personal;deployment;small;default",
-		URL:             "https://metrics.example.test/v1/version-check",
-	})
+func TestParseForwardSpecGivenValidSpecification(t *testing.T) {
+	// Given
+	const value = "database:8563:0"
 
-	if config.Enabled {
-		t.Fatal("expected version checks to be disabled")
-	}
-	if config.IntervalSeconds != 42 {
-		t.Fatalf("expected interval 42, got %d", config.IntervalSeconds)
-	}
-	if config.Identity != "exasol-personal;deployment;small;default" {
-		t.Fatalf("unexpected identity: %q", config.Identity)
-	}
-	if config.URL != "https://metrics.example.test/v1/version-check" {
-		t.Fatalf("unexpected URL: %q", config.URL)
-	}
-	if config.OperatingSystem != versionCheckOperatingSystem(runtime.GOOS) {
-		t.Fatalf("unexpected operating system: %q", config.OperatingSystem)
-	}
-}
+	// When
+	got, err := parseForwardSpec(value)
 
-func TestVersionCheckRuntimeConfigFromOptionsDefaults(t *testing.T) {
-	config := versionCheckRuntimeConfigFromOptions(VersionCheckOptions{
-		Enabled: true,
-	})
-
-	if !config.Enabled {
-		t.Fatal("expected version checks to be enabled")
-	}
-	if config.IntervalSeconds != defaultVersionCheckIntervalSeconds {
-		t.Fatalf("expected default interval %d, got %d", defaultVersionCheckIntervalSeconds, config.IntervalSeconds)
-	}
-	if config.Identity != defaultVersionCheckIdentity {
-		t.Fatalf("expected default identity %q, got %q", defaultVersionCheckIdentity, config.Identity)
-	}
-	if config.URL != defaultVersionCheckURL {
-		t.Fatalf("expected default URL %q, got %q", defaultVersionCheckURL, config.URL)
-	}
-	if config.OperatingSystem != versionCheckOperatingSystem(runtime.GOOS) {
-		t.Fatalf("unexpected operating system: %q", config.OperatingSystem)
-	}
-}
-
-func TestVersionCheckOperatingSystem(t *testing.T) {
-	tests := map[string]string{
-		"darwin":  "MacOS",
-		"linux":   "Linux",
-		"windows": "Windows",
-		"":        "unknown",
-		"freebsd": "freebsd",
-	}
-
-	for goos, want := range tests {
-		if got := versionCheckOperatingSystem(goos); got != want {
-			t.Fatalf("versionCheckOperatingSystem(%q) = %q, want %q", goos, got, want)
-		}
-	}
-}
-
-func TestWriteVersionCheckRuntimeConfig(t *testing.T) {
-	tempDir := t.TempDir()
-	config := VersionCheckRuntimeConfig{
-		Enabled:         true,
-		IntervalSeconds: 7,
-		Identity:        "exasol-personal;deployment;small;default",
-		URL:             "https://metrics.example.test/v1/version-check",
-		OperatingSystem: "MacOS",
-	}
-
-	if err := writeVersionCheckRuntimeConfig(tempDir, config); err != nil {
-		t.Fatalf("writeVersionCheckRuntimeConfig() error = %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(tempDir, versionCheckRuntimeConfigName))
+	// Then
 	if err != nil {
-		t.Fatalf("failed to read version-check runtime config: %v", err)
+		t.Fatalf("parseForwardSpec() error = %v", err)
 	}
-
-	var decoded VersionCheckRuntimeConfig
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("failed to parse version-check runtime config: %v", err)
-	}
-	if decoded != config {
-		t.Fatalf("decoded config mismatch: got %+v, want %+v", decoded, config)
+	want := ForwardSpec{Name: "database", GuestPort: 8563, HostPort: 0}
+	if got != want {
+		t.Fatalf("parseForwardSpec() = %+v, want %+v", got, want)
 	}
 }
 
-func TestRefreshInitDBScriptUpdatesOnlyDatabaseInitializer(t *testing.T) {
+func TestParseForwardSpecGivenInvalidSpecification(t *testing.T) {
+	tests := []string{
+		"database:8563",
+		":8563:0",
+		"data base:8563:0",
+		"database:0:0",
+		"database:65536:0",
+		"database:8563:-1",
+		"database:8563:65536",
+	}
+
+	for _, value := range tests {
+		t.Run(value, func(t *testing.T) {
+			// Given an invalid specification, when it is parsed, then it is rejected.
+			if _, err := parseForwardSpec(value); err == nil {
+				t.Fatalf("parseForwardSpec(%q) did not return an error", value)
+			}
+		})
+	}
+}
+
+func TestForwardSpecListGivenDuplicateName(t *testing.T) {
+	// Given
+	var specs forwardSpecList
+	if err := specs.Set("database:8563:0"); err != nil {
+		t.Fatalf("first Set() error = %v", err)
+	}
+
+	// When
+	err := specs.Set("database:2580:0")
+
+	// Then
+	if err == nil {
+		t.Fatal("duplicate forward name was accepted")
+	}
+}
+
+func TestRefreshInitAssetsGivenLegacyDatabaseAssets(t *testing.T) {
+	// Given
 	sharedDir := t.TempDir()
 	initDir := filepath.Join(sharedDir, "init")
 	if err := os.MkdirAll(initDir, 0755); err != nil {
@@ -163,25 +129,54 @@ func TestRefreshInitDBScriptUpdatesOnlyDatabaseInitializer(t *testing.T) {
 	}
 
 	initDBPath := filepath.Join(initDir, "init-db.sh")
-	if err := os.WriteFile(initDBPath, []byte("old initializer"), 0644); err != nil {
+	if err := os.WriteFile(initDBPath, []byte("legacy initializer"), 0644); err != nil {
 		t.Fatalf("failed to seed old init-db.sh: %v", err)
+	}
+	for _, name := range []string{"config.json", "exasol-nano-db.tar.gz", "exasol-nano-db.tar.gz.metadata"} {
+		if err := os.WriteFile(filepath.Join(initDir, name), []byte("legacy"), 0644); err != nil {
+			t.Fatalf("failed to seed %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"version-check.json", "slc.json"} {
+		if err := os.WriteFile(filepath.Join(sharedDir, name), []byte("legacy"), 0644); err != nil {
+			t.Fatalf("failed to seed %s: %v", name, err)
+		}
 	}
 	sshKeyPath := filepath.Join(sharedDir, "authorized_keys")
 	const sshKey = "preserve this SSH key\n"
 	if err := os.WriteFile(sshKeyPath, []byte(sshKey), 0600); err != nil {
 		t.Fatalf("failed to seed authorized_keys: %v", err)
 	}
+	previousInitAssets := initAssets
+	initAssets = createTestTarXZ(t, map[string]string{
+		"init/init.sh": "new VM initializer\n",
+	})
+	t.Cleanup(func() { initAssets = previousInitAssets })
 
-	if err := refreshInitDBScript(sharedDir); err != nil {
-		t.Fatalf("refreshInitDBScript() error = %v", err)
+	// When
+	if err := refreshInitAssets(sharedDir); err != nil {
+		t.Fatalf("refreshInitAssets() error = %v", err)
 	}
 
-	updatedScript, err := os.ReadFile(initDBPath)
+	// Then
+	updatedScript, err := os.ReadFile(filepath.Join(initDir, "init.sh"))
 	if err != nil {
-		t.Fatalf("failed to read refreshed init-db.sh: %v", err)
+		t.Fatalf("failed to read refreshed init.sh: %v", err)
 	}
-	if string(updatedScript) == "old initializer" || len(updatedScript) == 0 {
-		t.Fatalf("init-db.sh was not refreshed")
+	if string(updatedScript) != "new VM initializer\n" {
+		t.Fatalf("init.sh was not refreshed: got %q", updatedScript)
+	}
+	for _, path := range []string{
+		initDBPath,
+		filepath.Join(initDir, "config.json"),
+		filepath.Join(initDir, "exasol-nano-db.tar.gz"),
+		filepath.Join(initDir, "exasol-nano-db.tar.gz.metadata"),
+		filepath.Join(sharedDir, "version-check.json"),
+		filepath.Join(sharedDir, "slc.json"),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy asset %s still exists", path)
+		}
 	}
 	preservedKey, err := os.ReadFile(sshKeyPath)
 	if err != nil {
@@ -190,6 +185,38 @@ func TestRefreshInitDBScriptUpdatesOnlyDatabaseInitializer(t *testing.T) {
 	if string(preservedKey) != sshKey {
 		t.Fatalf("authorized_keys changed during init-db.sh refresh: got %q", preservedKey)
 	}
+}
+
+func createTestTarXZ(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+
+	var archive bytes.Buffer
+	xzWriter, err := xz.NewWriter(&archive)
+	if err != nil {
+		t.Fatalf("failed to create xz writer: %v", err)
+	}
+	tarWriter := tar.NewWriter(xzWriter)
+	for name, content := range files {
+		header := &tar.Header{
+			Name: name,
+			Mode: 0755,
+			Size: int64(len(content)),
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			t.Fatalf("failed to write tar header: %v", err)
+		}
+		if _, err := tarWriter.Write([]byte(content)); err != nil {
+			t.Fatalf("failed to write tar content: %v", err)
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("failed to close tar writer: %v", err)
+	}
+	if err := xzWriter.Close(); err != nil {
+		t.Fatalf("failed to close xz writer: %v", err)
+	}
+
+	return archive.Bytes()
 }
 
 func TestWaitForSSHServiceAcceptsSSHBanner(t *testing.T) {
