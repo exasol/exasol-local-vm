@@ -21,8 +21,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,20 +41,57 @@ var initAssets []byte
 
 // InitOutput represents the JSON output from the VM init scripts
 type InitOutput struct {
-	IP    string         `json:"ip"`
-	Ports map[string]int `json:"ports"`
+	IP string `json:"ip"`
 }
 
 type RuntimeConfig struct {
 	SSHPrivateKey string `json:"ssh_private_key"`
 }
 
+type ForwardSpec struct {
+	Name      string
+	GuestPort int
+	HostPort  int
+}
+
+// ForwardState is the public forwarding result stored in vm-state.json.
+type ForwardState struct {
+	GuestPort int `json:"guest_port"`
+	HostPort  int `json:"host_port"`
+}
+
+type forwardSpecList []ForwardSpec
+
+func (list forwardSpecList) String() string {
+	parts := make([]string, 0, len(list))
+	for _, spec := range list {
+		parts = append(parts, encodeForwardSpec(spec))
+	}
+
+	return strings.Join(parts, ",")
+}
+
+func (list *forwardSpecList) Set(value string) error {
+	spec, err := parseForwardSpec(value)
+	if err != nil {
+		return err
+	}
+	for _, existing := range *list {
+		if existing.Name == spec.Name {
+			return fmt.Errorf("forward name %q is configured more than once", spec.Name)
+		}
+	}
+	*list = append(*list, spec)
+
+	return nil
+}
+
 const (
-	defaultSSHPrivateKeyPath           = "vm-ssh-key"
-	runtimeConfigPath                  = "vm-config.json"
-	sharedDirName                      = "vm-shared"
-	authorizedKeysName                 = "authorized_keys"
-	vmSocketPath                       = "vm.sock"
+	defaultSSHPrivateKeyPath = "vm-ssh-key"
+	runtimeConfigPath        = "vm-config.json"
+	sharedDirName            = "vm-shared"
+	authorizedKeysName       = "authorized_keys"
+	vmSocketPath             = "vm.sock"
 )
 
 // launcherVersion is set at build time with -ldflags. Local development builds
@@ -513,13 +548,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Commands:")
 		fmt.Fprintln(os.Stderr, "  init [--ssh-key <private-key>]    Initialize VM")
-		fmt.Fprintln(os.Stderr, "  start [--ports <guest-port>:<host-port>,...] <cpu> <ram> <data_size_gb>")
+		fmt.Fprintln(os.Stderr, "  start [--forward <name>:<guest-port>:<host-port>]... <cpu> <ram> <data_size_gb>")
 		fmt.Fprintln(os.Stderr, "                                    Start VM with CPU count, RAM size (MB),")
 		fmt.Fprintln(os.Stderr, "                                    and data disk size in GB.")
-		fmt.Fprintln(os.Stderr, "                                    --ports specifies ports to forward from the host.")
-		fmt.Fprintln(os.Stderr, "                                    for a named service (e.g. --ports db:9090,ssh:2222).")
-		fmt.Fprintln(os.Stderr, "                                    Unspecified services use the same port as the VM,")
-		fmt.Fprintln(os.Stderr, "                                    falling back to a random port if unavailable.")
+		fmt.Fprintln(os.Stderr, "                                    --forward publishes a guest port on loopback.")
+		fmt.Fprintln(os.Stderr, "                                    Repeat it for multiple named forwards; host port 0")
+		fmt.Fprintln(os.Stderr, "                                    requests an OS-assigned port.")
 		fmt.Fprintln(os.Stderr, "                                    The data disk will be:")
 		fmt.Fprintln(os.Stderr, "                                      - created sparsely if it does not exist")
 		fmt.Fprintln(os.Stderr, "                                      - reused as-is if its size matches")
@@ -557,9 +591,14 @@ func main() {
 	case "start":
 		startFlags := flag.NewFlagSet("start", flag.ContinueOnError)
 		startFlags.SetOutput(os.Stderr)
-		portsFlag := startFlags.String("ports", "", "Host port overrides: <service>:<port>[,<service>:<port>...]")
+		var forwards forwardSpecList
+		startFlags.Var(
+			&forwards,
+			"forward",
+			"Named TCP forward: <name>:<guest-port>:<host-port> (repeatable)",
+		)
 		startFlags.Usage = func() {
-			fmt.Fprintln(os.Stderr, "Usage: mac-launcher start [--ports <service>:<port>,...] <cpu_count> <ram_size> <data_size_gb>")
+			fmt.Fprintln(os.Stderr, "Usage: mac-launcher start [--forward <name>:<guest-port>:<host-port>]... <cpu_count> <ram_size> <data_size_gb>")
 			startFlags.PrintDefaults()
 		}
 		if parseErr := startFlags.Parse(os.Args[2:]); parseErr != nil {
@@ -579,18 +618,18 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: data_size_gb must be a positive integer")
 			os.Exit(1)
 		}
-		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, *portsFlag)
+		err = startCmd(startFlags.Arg(0), startFlags.Arg(1), dataSizeGB, forwards)
 	case "__daemon__":
 		// Internal daemon mode - run VM in background
 		if len(os.Args) < 4 {
 			fmt.Fprintln(os.Stderr, "Invalid daemon arguments")
 			os.Exit(1)
 		}
-		daemonPorts := ""
+		encodedForwards := ""
 		if len(os.Args) >= 5 {
-			daemonPorts = os.Args[4]
+			encodedForwards = os.Args[4]
 		}
-		err = runVMDaemon(os.Args[2], os.Args[3], daemonPorts)
+		err = runVMDaemon(os.Args[2], os.Args[3], encodedForwards)
 	case "stop":
 		err = stopCmd()
 	case "status":
@@ -673,6 +712,28 @@ func extractTarXZ(data []byte, outputDir string, pathTransform func(string) stri
 			fmt.Printf("Extracted: %s\n", outputPath)
 		}
 	}
+	return nil
+}
+
+func refreshInitAssets(sharedDir string) error {
+	if err := extractTarXZ(initAssets, sharedDir, nil); err != nil {
+		return fmt.Errorf("failed to refresh VM initialization assets: %w", err)
+	}
+
+	legacyPaths := []string{
+		filepath.Join(sharedDir, "init", "init-db.sh"),
+		filepath.Join(sharedDir, "init", "config.json"),
+		filepath.Join(sharedDir, "init", "exasol-nano-db.tar.gz"),
+		filepath.Join(sharedDir, "init", "exasol-nano-db.tar.gz.metadata"),
+		filepath.Join(sharedDir, "version-check.json"),
+		filepath.Join(sharedDir, "slc.json"),
+	}
+	for _, path := range legacyPaths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("failed to remove legacy database asset %s: %w", path, err)
+		}
+	}
+
 	return nil
 }
 
@@ -796,37 +857,64 @@ func ensureDataDisk(path string, requestedSizeGB int) error {
 	}
 }
 
-// parsePortOverrides parses a comma-separated list of "service:port" pairs into a map.
-func parsePortOverrides(s string) (map[int]int, error) {
-	overrides := make(map[int]int)
-	if strings.TrimSpace(s) == "" {
-		return overrides, nil
+func parseForwardSpec(value string) (ForwardSpec, error) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 3 {
+		return ForwardSpec{}, fmt.Errorf(
+			"invalid forward %q: expected <name>:<guest-port>:<host-port>", value,
+		)
 	}
-	for _, entry := range strings.Split(s, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
+
+	name := strings.TrimSpace(parts[0])
+	if name == "" {
+		return ForwardSpec{}, fmt.Errorf("invalid forward %q: name must not be empty", value)
+	}
+	for _, character := range name {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '-' || character == '_' || character == '.' {
 			continue
 		}
-		parts := strings.SplitN(entry, ":", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid port override %q: expected <service>:<port>", entry)
-		}
-		guestportStr := strings.TrimSpace(parts[0])
-		hostportStr := strings.TrimSpace(parts[1])
-		if guestport == "" {
-			return nil, fmt.Errorf("empty service name in port override %q", entry)
-		}
-		guestport, err := strconv.Atoi(guestportStr)
-		if err != nil || guestport < 1 || guestport > 65535 {
-			return nil, fmt.Errorf("invalid port in override %q: must be an integer 1-65535", entry)
-		}
-		hostport, err := strconv.Atoi(hostportStr)
-		if err != nil || hostport < 1 || hostport > 65535 {
-			return nil, fmt.Errorf("invalid port in override %q: must be an integer 1-65535", entry)
-		}
-		overrides[guestport] = hostport
+
+		return ForwardSpec{}, fmt.Errorf(
+			"invalid forward %q: name may contain only letters, digits, '.', '_' and '-'", value,
+		)
 	}
-	return overrides, nil
+
+	guestPort, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || guestPort < 1 || guestPort > 65535 {
+		return ForwardSpec{}, fmt.Errorf(
+			"invalid forward %q: guest port must be an integer from 1 to 65535", value,
+		)
+	}
+	hostPort, err := strconv.Atoi(strings.TrimSpace(parts[2]))
+	if err != nil || hostPort < 0 || hostPort > 65535 {
+		return ForwardSpec{}, fmt.Errorf(
+			"invalid forward %q: host port must be an integer from 0 to 65535", value,
+		)
+	}
+
+	return ForwardSpec{Name: name, GuestPort: guestPort, HostPort: hostPort}, nil
+}
+
+func encodeForwardSpec(spec ForwardSpec) string {
+	return fmt.Sprintf("%s:%d:%d", spec.Name, spec.GuestPort, spec.HostPort)
+}
+
+func parseForwardSpecs(value string) ([]ForwardSpec, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+
+	var specs forwardSpecList
+	for _, entry := range strings.Split(value, ",") {
+		if err := specs.Set(entry); err != nil {
+			return nil, err
+		}
+	}
+
+	return specs, nil
 }
 
 // shutdownVM asks the VM to stop and waits (briefly) for it to actually do
@@ -884,7 +972,7 @@ func startCmd(
 	cpuCountStr string,
 	ramSizeStr string,
 	dataSizeGB int,
-	portsOverride string,
+	forwards []ForwardSpec,
 ) error {
 	sharedDir := sharedDirName
 	fmt.Printf("Starting VM with cpu_count=%s, ram_size=%s, data_size=%dGB, shared_dir=%s\n", cpuCountStr, ramSizeStr, dataSizeGB, sharedDir)
@@ -893,6 +981,9 @@ func startCmd(
 	vmDir := "vm"
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
 		return fmt.Errorf("VM not initialized. Run 'mac-launcher init' first")
+	}
+	if err := refreshInitAssets(sharedDir); err != nil {
+		return err
 	}
 	// Ensure the data disk exists at the requested size (create / grow / error).
 	dataDiskPath := filepath.Join(vmDir, "data.img")
@@ -947,7 +1038,8 @@ func startCmd(
 		},
 	}
 
-	args := []string{executable, "__daemon__", cpuCountStr, ramSizeStr, portsOverride}
+	encodedForwards := forwardSpecList(forwards).String()
+	args := []string{executable, "__daemon__", cpuCountStr, ramSizeStr, encodedForwards}
 
 	process, err := os.StartProcess(executable, args, attr)
 	if err != nil {
@@ -1085,7 +1177,7 @@ func startCmd(
 	}
 }
 
-func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
+func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 	// This function runs as a background daemon
 	sharedDir := sharedDirName
 	runtimeConfig, err := loadRuntimeConfig()
@@ -1094,9 +1186,9 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	}
 	sshPrivateKeyPath := runtimeConfig.SSHPrivateKey
 
-	portOverrides, err := parsePortOverrides(portsOverride)
+	forwardSpecs, err := parseForwardSpecs(encodedForwards)
 	if err != nil {
-		return fmt.Errorf("invalid --ports argument: %w", err)
+		return fmt.Errorf("invalid forwarding configuration: %w", err)
 	}
 
 	if err := startStatusListener(); err != nil {
@@ -1434,45 +1526,50 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	}
 
 	fmt.Printf("VM IP address: %s\n", initOutput.IP)
-	fmt.Printf("VM ports: %+v\n", initOutput.Ports)
 
 	vmIP := initOutput.IP
 
 	// Make the SSH target visible to the shutdown signal handler. We use the
 	// guest IP directly (the host can reach it) and the in-guest SSH port.
-	guestSSHPort := initOutput.Ports["ssh"]
-	if guestSSHPort == 0 {
-		guestSSHPort = 22
-	}
+	const guestSSHPort = 22
 	target := fmt.Sprintf("%s:%d", vmIP, guestSSHPort)
 	sshTarget.Store(&target)
 
-	// Start port forwarders dynamically for all ports in init output, before
+	// Start requested port forwarders before
 	// waiting on SSH readiness below. This way a blocked host-to-VM network
 	// path (e.g. macOS Local Network permission denied to the invoking app)
 	// is still visible via `health-check` even when the SSH-readiness gate
 	// never passes, instead of leaving no evidence behind at all.
 	ctx := context.Background()
 	forwarders := make(map[string]*LoopbackForwarder)
-	hostPorts := make(map[int]int)
+	forwardStates := make(map[string]ForwardState)
 
-	for guestPort, hostPort := range portOverrides {
-		var forwarder *LoopbackForwarder
-		// Default: try user-specified port, fall back to OS-assigned.
-		forwarder, err = StartLoopbackForwarder(ctx, portName, hostPort, vmIP, guestPort)
+	for _, spec := range forwardSpecs {
+		forwarder, err := StartLoopbackForwarder(
+			ctx, spec.Name, spec.HostPort, vmIP, spec.GuestPort,
+		)
 		if err != nil {
-			forwarder, err = StartLoopbackForwarder(ctx, portName, 0, vmIP, guestPort)
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: Failed to start %s port forwarder: %v\n", portName, err)
-			continue
+			for _, activeForwarder := range forwarders {
+				_ = activeForwarder.Close()
+			}
+			shutdownVM(vm)
+
+			return fmt.Errorf(
+				"cannot bind host port %d for forward %q: %w",
+				spec.HostPort, spec.Name, err,
+			)
 		}
 
-		forwarders[portName] = forwarder
-		registerForwarder(portName, forwarder)
-		hostPort := forwarder.Port()
-		hostPorts[guestPort] = hostPort
-		fmt.Printf("%s forwarding: 127.0.0.1:%d -> %s:%d\n", portName, hostPort, vmIP, guestPort)
+		forwarders[spec.Name] = forwarder
+		registerForwarder(spec.Name, forwarder)
+		forwardStates[spec.Name] = ForwardState{
+			GuestPort: spec.GuestPort,
+			HostPort:  forwarder.Port(),
+		}
+		fmt.Printf(
+			"%s forwarding: 127.0.0.1:%d -> %s:%d\n",
+			spec.Name, forwarder.Port(), vmIP, spec.GuestPort,
+		)
 	}
 
 	// Ensure forwarders are closed on exit
@@ -1501,7 +1598,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 	} else {
 		fmt.Println("SSH service is ready")
 		if err := writeHealthyStartArtifacts(
-			vmIP, cpuCountStr, ramSizeStr, sharedDir, sshPrivateKeyPath, hostPorts,
+			vmIP, cpuCountStr, ramSizeStr, sharedDir, forwardStates,
 		); err != nil {
 			return err
 		}
@@ -1524,8 +1621,8 @@ func runVMDaemon(cpuCountStr, ramSizeStr, portsOverride string) error {
 // writeHealthyStartArtifacts writes vm-state.json and prints access
 // information once SSH readiness has been confirmed.
 func writeHealthyStartArtifacts(
-	vmIP, cpuCountStr, ramSizeStr, sharedDir, sshPrivateKeyPath string,
-	hostPorts map[int]int,
+	vmIP, cpuCountStr, ramSizeStr, sharedDir string,
+	forwards map[string]ForwardState,
 ) error {
 	vmState := map[string]interface{}{
 		"vm_name":   "exasol-local-vm",
@@ -1533,16 +1630,10 @@ func writeHealthyStartArtifacts(
 		"cpu_count": cpuCountStr,
 		"ram_size":  ramSizeStr,
 		"pid":       fmt.Sprintf("%d", os.Getpid()),
-		"ports":     hostPorts,
+		"forwards":  forwards,
 	}
 	// Use relative path for shared directory
 	vmState["shared_dir"] = "./" + filepath.Base(sharedDir)
-
-	if _, err := os.Stat(sshPrivateKeyPath); err == nil {
-		vmState["ssh_private_key"] = displayPath(sshPrivateKeyPath)
-	} else {
-		fmt.Fprintf(os.Stderr, "Warning: SSH private key not found: %s\n", sshPrivateKeyPath)
-	}
 
 	stateData, err := json.MarshalIndent(vmState, "", "  ")
 	if err != nil {
@@ -1554,12 +1645,6 @@ func writeHealthyStartArtifacts(
 	}
 
 	fmt.Println("VM state written to vm-state.json")
-
-	// Display access information
-	fmt.Println("\n=== VM Access Information ===")
-	if sshPort, ok := hostPorts["ssh"]; ok && sshPort > 0 {
-		fmt.Printf("SSH:      ssh -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@127.0.0.1\n", displayPath(sshPrivateKeyPath), sshPort)
-	}
 
 	return nil
 }
