@@ -61,20 +61,22 @@ if [ -n "${PODMAN_CONVERTER_BUILD_CACHE_TO:-}" ]; then
 fi
 
 echo "==> Building VM contents image with podman..."
-if ! podman build "${BASE_BUILD_ARGS[@]}" "${BASE_BUILD_CACHE_FROM_ARGS[@]}" "$ROOT_DIR/container"; then
-    if [ "${#BASE_BUILD_CACHE_FROM_ARGS[@]}" -eq 0 ]; then
-        exit 1
+if [ -n "${PODMAN_BASE_BUILD_CACHE_FROM:-}" ]; then
+    if ! podman build "${BASE_BUILD_ARGS[@]}" "${BASE_BUILD_CACHE_FROM_ARGS[@]}" "$ROOT_DIR/container"; then
+        echo "Warning: VM contents image build failed with remote cache; retrying without --cache-from" >&2
+        podman build "${BASE_BUILD_ARGS[@]}" "$ROOT_DIR/container"
     fi
-    echo "Warning: VM contents image build failed with remote cache; retrying without --cache-from" >&2
+else
     podman build "${BASE_BUILD_ARGS[@]}" "$ROOT_DIR/container"
 fi
 
 echo "==> Building podman image -> VM disk image converter with podman..."
-if ! podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "${IMG_CONVERTER_BUILD_CACHE_FROM_ARGS[@]}" "$ROOT_DIR/host/build"; then
-    if [ "${#IMG_CONVERTER_BUILD_CACHE_FROM_ARGS[@]}" -eq 0 ]; then
-        exit 1
+if [ -n "${PODMAN_CONVERTER_BUILD_CACHE_FROM:-}" ]; then
+    if ! podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "${IMG_CONVERTER_BUILD_CACHE_FROM_ARGS[@]}" "$ROOT_DIR/host/build"; then
+        echo "Warning: converter image build failed with remote cache; retrying without --cache-from" >&2
+        podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "$ROOT_DIR/host/build"
     fi
-    echo "Warning: converter image build failed with remote cache; retrying without --cache-from" >&2
+else
     podman build "${IMG_CONVERTER_BUILD_ARGS[@]}" "$ROOT_DIR/host/build"
 fi
 
