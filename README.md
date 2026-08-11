@@ -1,75 +1,70 @@
-# Exasol Local Runtime
+# Exasol Local VM
 
-Exasol Local Runtime provides a local Exasol database instance through a
-platform-specific runtime artifact.
+Exasol Local VM builds a small Linux VM appliance and platform launchers for
+software that needs a local Linux execution environment. The macOS launcher
+owns the VM, not the containers running inside it.
 
-The artifact is the product interface. It prepares local state, starts the local
-database, reports connection information, and stops the database again. Platform
-backends such as VMs, WSL, native containers, or platform virtualization APIs are
-implementation details hidden behind that interface.
+The appliance includes Podman. A consuming runtime such as exasol-personal is
+responsible for loading images, creating containers, and managing their
+lifecycle by executing Podman commands through the launcher.
 
-## Current status
+## macOS launcher
 
-- The primary release artifact today is the macOS runtime binary published in a
-  zip archive.
-- The macOS artifact embeds the Exasol nano DB payload and the runtime assets it
-  needs.
-- Windows and Linux artifacts are target platforms and should expose the same
-  user-facing behavior as far as reasonably possible.
-
-## Using the runtime
-
-After unpacking a runtime archive, use the runtime binary to:
-
-1. initialize local state
-2. start the local Exasol DB with CPU, memory, and storage settings
-3. read the reported localhost connection information
-4. stop the local DB when done
-
-For the current macOS artifact, the flow is:
+Initialize and start a VM:
 
 ```bash
 ./launcher init
-./launcher start 2 2048 10
+./launcher start --forward database:8563:0 2 4096 20
+```
+
+Each `--forward` value is `<name>:<guest-port>:<host-port>`. Host port `0`
+requests an available loopback port. `vm-state.json` reports the effective
+named mappings without exposing the guest transport.
+
+Run commands inside the VM:
+
+```bash
+./launcher run podman info
+./launcher run podman load -i /mnt/host/runtime-artifacts/image.tar
+```
+
+Calling `launcher run` without a command from a terminal opens a VM shell. A
+consumer that owns a container can use the same interface for a container shell:
+
+```bash
+./launcher run --tty podman exec -it <container> sh
+```
+
+The launcher streams stdin, stdout, and stderr and returns the guest command's
+exit code. SSH is an internal transport and is not part of the consumer
+contract.
+
+The host directory reported as `shared_dir` in `vm-state.json` is mounted at
+`/mnt/host` in the VM. Files passed to guest commands must be staged below that
+directory and translated to the corresponding `/mnt/host/...` path.
+
+Inspect and stop the VM with:
+
+```bash
+./launcher status
+./launcher health-check
 ./launcher stop
 ```
 
-By default, initialization generates an SSH key pair for VM administration. To
-use an existing private key instead, pass it during initialization:
+## Building
+
+Build the complete ARM64 appliance from source before packaging the launcher:
 
 ```bash
-./launcher init --ssh-key ~/.ssh/id_ed25519
-```
-
-The preferred DB endpoint is `127.0.0.1:8563`. If that port is unavailable, the
-runtime reports the actual localhost endpoint to use.
-
-## Developing
-
-Common entry points:
-
-- `launcher/` — platform runtime binaries, with `launcher/mac/` as the current
-  primary release path
-- `launcher/assets/` — initialization assets embedded into runtime artifacts
-- `host/build/` — build pipeline for runtime backend assets
-- `host/run/` — Linux/QEMU development launcher
-- `container/` — Linux guest environment used by the current macOS backend
-- `docs/requirements.md` — product requirements
-- `docs/architecture.md` — current architecture overview
-
-Useful tasks:
-
-```bash
-task install-deps
 task build IMG_ARCH=aarch64
-task start-vm IMG_ARCH=aarch64
-task stop-vm
-```
-
-The macOS release binary must be built, signed, and notarized on macOS:
-
-```bash
+task package-mac IMG_ARCH=aarch64
 task build-mac-launcher IMG_ARCH=aarch64
 ```
 
-See `docs/release-workflow.md` for release workflow details.
+The macOS release binary must be signed and notarized. See
+[the release workflow](docs/release-workflow.md).
+
+## Design
+
+See [the architecture](docs/architecture.md) and
+[the requirements](docs/requirements.md).
