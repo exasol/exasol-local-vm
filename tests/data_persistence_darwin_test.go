@@ -10,10 +10,7 @@
 package integration
 
 import (
-	"fmt"
 	"os"
-	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -68,13 +65,16 @@ func TestDataPersistenceAcrossRestart(t *testing.T) {
 	waitForDataMount(t, f, 120*time.Second)
 
 	const sentinel = "exasol-persistence-sentinel"
-	runSSHCommand(t, f, fmt.Sprintf("printf %s > /var/persist-test.txt && sync", shellQuote(sentinel)))
+	runVMCommand(
+		t, f,
+		"sh", "-c", `printf '%s' "$1" > /var/persist-test.txt && sync`, "sh", sentinel,
+	)
 
 	f.StopVM()
 	waitForVMStopped(t, f, 90*time.Second)
 	f.StartVM(2, 4096, 10)
 
-	got := strings.TrimSpace(runSSHCommand(t, f, "cat /var/persist-test.txt"))
+	got := strings.TrimSpace(runVMCommand(t, f, "cat", "/var/persist-test.txt"))
 	if got != sentinel {
 		t.Fatalf("persistence sentinel mismatch: got %q, want %q", got, sentinel)
 	}
@@ -94,7 +94,10 @@ func TestDataDiskGrowth(t *testing.T) {
 	waitForDataMount(t, f, 120*time.Second)
 
 	const sentinel = "exasol-growth-sentinel"
-	runSSHCommand(t, f, fmt.Sprintf("printf %s > /var/grow-test.txt && sync", shellQuote(sentinel)))
+	runVMCommand(
+		t, f,
+		"sh", "-c", `printf '%s' "$1" > /var/grow-test.txt && sync`, "sh", sentinel,
+	)
 
 	f.StopVM()
 	waitForVMStopped(t, f, 90*time.Second)
@@ -113,7 +116,7 @@ func TestDataDiskGrowth(t *testing.T) {
 	}
 
 	f.StartVM(2, 4096, 20)
-	got := strings.TrimSpace(runSSHCommand(t, f, "cat /var/grow-test.txt"))
+	got := strings.TrimSpace(runVMCommand(t, f, "cat", "/var/grow-test.txt"))
 	if got != sentinel {
 		t.Fatalf("sentinel mismatch after resize: got %q, want %q", got, sentinel)
 	}
@@ -163,29 +166,17 @@ func TestDataDiskSizeMatchReusesExisting(t *testing.T) {
 	}
 }
 
-// waitForDataMount SSHes into the guest and polls /proc/mounts for the ext4
-// data-disk mount at /var, retrying until timeout. Darwin-only because the
+// waitForDataMount runs a guest command and polls /proc/mounts for the ext4
+// data-disk mount at /var. Darwin-only because the
 // windows launcher does not maintain a raw ext4 filesystem inside the WSL2
 // backing VM (data lives on the volume-backed /exa mount).
 func waitForDataMount(t *testing.T, f *LauncherFixture, timeout time.Duration) {
 	t.Helper()
 
-	sshPort := readSSHPortFromVMState(t, f)
 	checkVarMountCmd := `awk '$2 == "/var" && $3 == "ext4" { found=1 } END { exit(found ? 0 : 1) }' /proc/mounts`
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		cmd := exec.Command("ssh",
-			"-i", f.SSHKeyPath(),
-			"-p", strconv.Itoa(sshPort),
-			"-o", "StrictHostKeyChecking=no",
-			"-o", "UserKnownHostsFile=/dev/null",
-			"-o", "ConnectTimeout=5",
-			"-o", "BatchMode=yes",
-			"root@127.0.0.1",
-			fmt.Sprintf("sh -c %s", shellQuote(checkVarMountCmd)),
-		)
-		cmd.Dir = f.WorkDir
-		if err := cmd.Run(); err == nil {
+		if _, err := runVMCommandCapture(f, "sh", "-c", checkVarMountCmd); err == nil {
 			return
 		}
 		time.Sleep(2 * time.Second)
