@@ -35,11 +35,16 @@ type LauncherFixture struct {
 	t         *testing.T
 }
 
-// vmState is the on-disk shape of vm-state.json (the subset the tests care
-// about). Only .ports is guaranteed populated on all platforms; on mac it
-// also carries an "ssh" key which is absent on windows.
+// vmState contains the platform-specific forwarding result. Ports is the
+// Windows container contract; Forwards is the macOS VM contract.
 type vmState struct {
-	Ports map[string]int `json:"ports"`
+	Ports    map[string]int          `json:"ports"`
+	Forwards map[string]forwardState `json:"forwards"`
+}
+
+type forwardState struct {
+	GuestPort int `json:"guest_port"`
+	HostPort  int `json:"host_port"`
 }
 
 // NewLauncherFixture locates the platform-appropriate launcher zip
@@ -108,6 +113,22 @@ func (f *LauncherFixture) StartVMWithPorts(cpu, ramMB, dataSizeGB int, ports str
 		fmt.Sprintf("%d", ramMB),
 		fmt.Sprintf("%d", dataSizeGB),
 	)
+	f.vmRunning = true
+}
+
+// StartVMWithForwards starts the macOS VM with repeated labeled forward specs.
+func (f *LauncherFixture) StartVMWithForwards(cpu, ramMB, dataSizeGB int, forwards ...string) {
+	f.t.Helper()
+	args := []string{"start"}
+	for _, forward := range forwards {
+		args = append(args, "--forward", forward)
+	}
+	args = append(args,
+		fmt.Sprintf("%d", cpu),
+		fmt.Sprintf("%d", ramMB),
+		fmt.Sprintf("%d", dataSizeGB),
+	)
+	f.run(args...)
 	f.vmRunning = true
 }
 
@@ -284,14 +305,7 @@ func (f *LauncherFixture) Cleanup() {
 		f.CopyLogsToFailuresDir(f.t.Name())
 	}
 	if f.vmRunning {
-		// cmd.Dir MUST be f.WorkDir so the launcher's stopCmd can find
-		// resources/config.json (relative path). Without it, stopCmd
-		// prints "No resources/config.json; nothing to stop." and
-		// no-ops — which on windows leaks the globally-named
-		// exasol-local-db container into the next test and cascades
-		// into "Container is already running" failures for
-		// TestPortOverride*, TestStatusLifecycle, and TestDBConnection.
-		// StopVM/run() sets cmd.Dir; this fallback path must too.
+		// Launcher state is relative to WorkDir on every platform.
 		cmd := exec.Command(f.BinaryPath, "stop")
 		cmd.Dir = f.WorkDir
 		_ = cmd.Run()
