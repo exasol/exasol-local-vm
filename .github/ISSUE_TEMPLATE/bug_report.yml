@@ -58,7 +58,6 @@ body:
       options:
         - Linux
         - macOS
-        - Windows
         - Other
     validations:
       required: true
@@ -88,7 +87,7 @@ body:
     attributes:
       label: Environment Details
       description: Runtime, virtualization, container engine, or other relevant environment details.
-      placeholder: e.g., Podman version, vfkit version, Hyper-V details, CI launcher, local machine
+      placeholder: e.g., Podman version, vfkit version, CI launcher, local machine
 
   - type: textarea
     id: logs

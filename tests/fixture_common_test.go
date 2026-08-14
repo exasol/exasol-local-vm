@@ -1,14 +1,13 @@
 // Copyright 2026 Exasol AG
 // SPDX-License-Identifier: MIT
 
-//go:build darwin || windows
+//go:build darwin
 
-// Package integration contains end-to-end tests for the launcher binaries.
-// Tests require the notarized artifact zip produced by the build-packages CI
-// workflow. By default the fixture looks for the current platform's zip under
-// ../dist/; override with the LAUNCHER_ZIP env var. Platform-specific bits
-// (default zip path, binary name, SSH/data-disk helpers) live in
-// fixture_darwin_test.go and fixture_windows_test.go.
+// Package integration contains end-to-end tests for the macOS launcher.
+// Tests require the notarized artifact zip produced by CI. By default the
+// fixture looks under ../dist/; override with the LAUNCHER_ZIP environment
+// variable. Launcher defaults and VM-specific helpers live in
+// fixture_darwin_test.go.
 package integration
 
 import (
@@ -35,10 +34,7 @@ type LauncherFixture struct {
 	t         *testing.T
 }
 
-// vmState contains the platform-specific forwarding result. Ports is the
-// Windows container contract; Forwards is the macOS VM contract.
 type vmState struct {
-	Ports    map[string]int          `json:"ports"`
 	Forwards map[string]forwardState `json:"forwards"`
 }
 
@@ -47,10 +43,9 @@ type forwardState struct {
 	HostPort  int `json:"host_port"`
 }
 
-// NewLauncherFixture locates the platform-appropriate launcher zip
-// (launcherZipDefault + LAUNCHER_ZIP env var), unzips it into a fresh
-// temporary directory, and returns a ready-to-use fixture. If the zip
-// cannot be found the test is skipped.
+// NewLauncherFixture locates the launcher zip, unzips it into a fresh temporary
+// directory, and returns a ready-to-use fixture. If the zip cannot be found the
+// test is skipped.
 func NewLauncherFixture(t *testing.T) *LauncherFixture {
 	t.Helper()
 
@@ -71,8 +66,6 @@ func NewLauncherFixture(t *testing.T) *LauncherFixture {
 	}
 
 	binaryPath := filepath.Join(workDir, launcherBinaryName)
-	// os.Chmod on windows only affects the read-only attribute (which we
-	// do not need to touch on a fresh extract), but the call is harmless.
 	if err := os.Chmod(binaryPath, 0755); err != nil {
 		os.RemoveAll(workDir)
 		t.Fatalf("failed to chmod launcher binary %s: %v", binaryPath, err)
@@ -96,19 +89,6 @@ func (f *LauncherFixture) Init() {
 func (f *LauncherFixture) StartVM(cpu, ramMB, dataSizeGB int) {
 	f.t.Helper()
 	f.run("start",
-		fmt.Sprintf("%d", cpu),
-		fmt.Sprintf("%d", ramMB),
-		fmt.Sprintf("%d", dataSizeGB),
-	)
-	f.vmRunning = true
-}
-
-// StartVMWithPorts is like StartVM but also passes --ports to override which
-// host port is bound for each named service (e.g. "db:9090,ssh:2222").
-func (f *LauncherFixture) StartVMWithPorts(cpu, ramMB, dataSizeGB int, ports string) {
-	f.t.Helper()
-	f.run("start",
-		"--ports", ports,
 		fmt.Sprintf("%d", cpu),
 		fmt.Sprintf("%d", ramMB),
 		fmt.Sprintf("%d", dataSizeGB),
@@ -208,12 +188,9 @@ func (f *LauncherFixture) ResizeData(newSizeGB int) error {
 	return nil
 }
 
-// CopyLogsToFailuresDir copies launcher log files and any host-shared
-// directory contents from WorkDir into failures/<testName>/ so they survive
-// fixture cleanup and can be inspected after a test failure. Files that do
-// not exist on this platform are silently skipped, so the same helper works
-// unchanged on mac (vm.log, vm-console.log, vm-shared/) and windows
-// (vm-state.json only).
+// CopyLogsToFailuresDir copies launcher log files and host-shared directory
+// contents from WorkDir into failures/<testName>/ so they survive fixture
+// cleanup and can be inspected after a test failure.
 func (f *LauncherFixture) CopyLogsToFailuresDir(testName string) {
 	f.t.Helper()
 	dest := filepath.Join("failures", testName)
@@ -225,8 +202,7 @@ func (f *LauncherFixture) CopyLogsToFailuresDir(testName string) {
 		f.copyFileToDir(filepath.Join(f.WorkDir, name), filepath.Join(dest, name))
 	}
 
-	// vm-shared is the mac VirtioFS folder shared with the guest. Skipped
-	// entirely on windows because the directory does not exist.
+	// vm-shared is the VirtioFS folder shared with the guest.
 	sharedDir := filepath.Join(f.WorkDir, "vm-shared")
 	sharedDest := filepath.Join(dest, "vm-shared")
 	entries, err := os.ReadDir(sharedDir)
@@ -296,16 +272,15 @@ func (f *LauncherFixture) copyPathToDir(src, dst string) {
 	})
 }
 
-// Cleanup captures diagnostics for a failed test (while the launcher / VM can
-// still be reached), then stops the launcher if it is running and removes
-// WorkDir. SSHCaptureDiagnostics is a no-op on windows.
+// Cleanup captures diagnostics for a failed test while the VM can still be
+// reached, then stops the launcher if it is running and removes WorkDir.
 func (f *LauncherFixture) Cleanup() {
 	if f.t.Failed() {
 		f.SSHCaptureDiagnostics(f.t.Name())
 		f.CopyLogsToFailuresDir(f.t.Name())
 	}
 	if f.vmRunning {
-		// Launcher state is relative to WorkDir on every platform.
+		// Launcher state is relative to WorkDir.
 		cmd := exec.Command(f.BinaryPath, "stop")
 		cmd.Dir = f.WorkDir
 		_ = cmd.Run()
@@ -332,9 +307,8 @@ func (f *LauncherFixture) run(args ...string) {
 	}
 }
 
-// findLauncherZip returns the path to the platform-appropriate launcher zip.
-// Honors the LAUNCHER_ZIP env var override; falls back to launcherZipDefault
-// (defined per platform in fixture_{darwin,windows}_test.go).
+// findLauncherZip returns the path to the launcher zip. It honors the
+// LAUNCHER_ZIP environment variable and otherwise uses launcherZipDefault.
 func findLauncherZip(t *testing.T) string {
 	t.Helper()
 

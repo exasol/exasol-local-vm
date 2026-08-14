@@ -1,11 +1,10 @@
 // Copyright 2026 Exasol AG
 // SPDX-License-Identifier: MIT
 
-//go:build darwin || windows
+//go:build darwin
 
-// Cross-platform status-lifecycle tests. The mac-only case
-// (TestStatusAfterForcefulKill, which relies on SIGKILL to the vm.pid
-// daemon and SSH-based DB-state flushing) lives in status_darwin_test.go.
+// General status-lifecycle tests for the macOS launcher. The forceful-kill
+// case lives in status_darwin_test.go.
 package integration
 
 import (

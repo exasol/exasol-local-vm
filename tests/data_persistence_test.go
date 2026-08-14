@@ -1,11 +1,10 @@
 // Copyright 2026 Exasol AG
 // SPDX-License-Identifier: MIT
 
-//go:build darwin || windows
+//go:build darwin
 
-// Cross-platform data-persistence tests. The mac-only cases (that reach
-// into vm/data.img, filesystem inodes, or the guest OS over SSH) live in
-// data_persistence_darwin_test.go.
+// General data-persistence tests for the macOS launcher. Cases that inspect
+// vm/data.img or the guest OS live in data_persistence_darwin_test.go.
 package integration
 
 import (
@@ -16,11 +15,6 @@ import (
 
 // TestDataDiskShrinkRejected verifies that resize-data to a size smaller
 // than the recorded value fails with a message that mentions "shrink".
-//
-// On mac the launcher tracks the actual on-disk data.img size; on windows
-// it tracks the requested size in resources/data-size.txt. Both surfaces
-// enforce the same grow-only contract and produce the same substring in
-// their error output.
 func TestDataDiskShrinkRejected(t *testing.T) {
 	requireIntegration(t)
 

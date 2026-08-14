@@ -172,7 +172,6 @@ detect_version_check_operating_system() {
     case "$kernel_name" in
         Darwin*) printf 'MacOS' ;;
         Linux*) printf 'Linux' ;;
-        MINGW*|MSYS*|CYGWIN*|Windows_NT*) printf 'Windows' ;;
         *) printf '%s' "$kernel_name" ;;
     esac
 }

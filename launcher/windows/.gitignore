@@ -1,7 +1,0 @@
-*.tar.xz
-*.exe
-# Ignore native-platform build outputs. The module is named
-# 'windows-launcher', so 'go build .' on a Linux/mac dev machine produces
-# this bare-name binary. Not distributable — the shipped artifact is
-# launcher.exe under release/launcher/windows/x86_64/.
-/windows-launcher

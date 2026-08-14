@@ -26,9 +26,8 @@ SPDX = "SPDX-License-Identifier: MIT"
 # The tool only checks/adds headers for these file groups:
 #   1. GitHub Actions workflow YAML files and composite/action metadata YAML
 #   2. POSIX-style shell scripts (.sh/.bash/.zsh/.ksh or shell shebang)
-#   3. PowerShell scripts (*.ps1)
-#   4. Go source files (*.go), deliberately NOT go.mod/go.sum
-#   5. Container files named Containerfile or Dockerfile
+#   3. Go source files (*.go), deliberately NOT go.mod/go.sum
+#   4. Container files named Containerfile or Dockerfile
 #
 # It deliberately does NOT target XML/plist files, Linux config files such as
 # fstab/inittab/*.conf/*.event, Markdown, JSON, or go.mod.
@@ -54,10 +53,6 @@ SHELL_SHEBANG_COMMANDS = {
     "sh",
     "zsh",
 }
-
-POWERSHELL_SCRIPT_EXTENSIONS = (
-    ".ps1",
-)
 
 GO_SOURCE_EXTENSIONS = (
     ".go",
@@ -129,8 +124,6 @@ def detect_comment_style(path: Path, text: str) -> str | None:
     if matches_any_glob(relative_path, GITHUB_ACTIONS_YAML_GLOBS):
         return "#"
     if is_shell_script(relative_path, text):
-        return "#"
-    if relative_path.suffix in POWERSHELL_SCRIPT_EXTENSIONS:
         return "#"
     if relative_path.suffix in GO_SOURCE_EXTENSIONS:
         return "//"

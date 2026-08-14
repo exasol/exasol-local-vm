@@ -3,10 +3,8 @@
 
 //go:build darwin
 
-// Mac-only status tests: TestStatusAfterForcefulKill relies on SIGKILL to
-// the launcher-owned daemon identified by vm.pid. That concept does not
-// apply on Windows, where Podman owns the container's lifecycle. The
-// cross-platform TestStatusLifecycle lives in status_test.go.
+// TestStatusAfterForcefulKill relies on SIGKILL to the launcher-owned daemon
+// identified by vm.pid. The graceful lifecycle case lives in status_test.go.
 package integration
 
 import (

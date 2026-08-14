@@ -24,7 +24,6 @@ KERNEL_FILE="${ARTIFACT_DIR}/vmlinuz-virt"
 INITRAMFS_FILE="${ARTIFACT_DIR}/initramfs.img"
 RAW_DISK_FILE="${ARTIFACT_DIR}/disk.img"
 RAW_DISK_THIN_FILE="${ARTIFACT_DIR}/disk_thin.img"
-VHDX_FILE="${ARTIFACT_DIR}/disk.vhdx"
 ARCH_FILE="${ARTIFACT_DIR}/arch.txt"
 CMDLINE_FILE="${ARTIFACT_DIR}/kernel-cmdline.txt"
 
@@ -139,7 +138,7 @@ EOF
 # Remove target files because systemd-repart refuses to overwrite them
 # This is technically racy for concurrent builds but we probably don't care and
 # littering `output` with temporary files is just a different failure mode.
-rm -f "${RAW_DISK_THIN_FILE}" "${RAW_DISK_FILE}" "${VHDX_FILE}"
+rm -f "${RAW_DISK_THIN_FILE}" "${RAW_DISK_FILE}"
 
 SYSTEMD_REPART_ARGS=(
     --dry-run=no
@@ -157,6 +156,4 @@ SYSTEMD_REPART_ARGS=(
 # need it duplicated in the esp/boot
 systemd-repart "${SYSTEMD_REPART_ARGS[@]}" --exclude-partitions=esp "${RAW_DISK_THIN_FILE}"
 
-systemd-repart "${SYSTEMD_REPART_ARGS[@]}"  "${RAW_DISK_FILE}"
-
-qemu-img convert -f raw -O vhdx -o subformat=dynamic "${RAW_DISK_FILE}" "${VHDX_FILE}"
+systemd-repart "${SYSTEMD_REPART_ARGS[@]}" "${RAW_DISK_FILE}"
