@@ -35,7 +35,8 @@ type LauncherFixture struct {
 }
 
 type vmState struct {
-	Forwards map[string]forwardState `json:"forwards"`
+	Forwards  map[string]forwardState `json:"forwards"`
+	SharedDir string                  `json:"shared_dir"`
 }
 
 type forwardState struct {
@@ -82,6 +83,12 @@ func NewLauncherFixture(t *testing.T) *LauncherFixture {
 func (f *LauncherFixture) Init() {
 	f.t.Helper()
 	f.run("init")
+}
+
+// InitWithSSHKey initializes the launcher with an existing private key.
+func (f *LauncherFixture) InitWithSSHKey(privateKeyPath string) {
+	f.t.Helper()
+	f.run("init", "--ssh-key", privateKeyPath)
 }
 
 // StartVM runs `launcher start <cpu> <ramMB> <dataSizeGB>` and waits for it to

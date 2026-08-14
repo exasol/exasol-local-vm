@@ -60,6 +60,27 @@ func TestRunCommandInsideVM(t *testing.T) {
 		}
 	})
 
+	t.Run("maps files from the reported shared directory to /mnt/host", func(t *testing.T) {
+		// Given
+		state := f.VMState()
+		if state.SharedDir == "" {
+			t.Fatal("vm-state.json does not report shared_dir")
+		}
+		hostSharedDir := filepath.Join(f.WorkDir, filepath.Clean(state.SharedDir))
+		const content = "launcher shared-directory boundary\n"
+		if err := os.WriteFile(filepath.Join(hostSharedDir, "boundary.txt"), []byte(content), 0644); err != nil {
+			t.Fatalf("failed to write host shared file: %v", err)
+		}
+
+		// When
+		output := runVMCommand(t, f, "cat", "/mnt/host/boundary.txt")
+
+		// Then
+		if output != content {
+			t.Fatalf("guest shared file content = %q, want %q", output, content)
+		}
+	})
+
 	t.Run("opens a VM shell when invoked from a terminal", func(t *testing.T) {
 		// When
 		cmd := exec.Command("/usr/bin/script", "-q", "/dev/null", f.BinaryPath, "run")
@@ -90,4 +111,25 @@ func TestRunCommandInsideVM(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestInitWithSSHKeySupportsGuestCommand(t *testing.T) {
+	// Given
+	f := NewLauncherFixture(t)
+	defer f.Cleanup()
+	privateKeyPath := filepath.Join(f.WorkDir, "imported-ed25519-key")
+	keygen := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", privateKeyPath)
+	if output, err := keygen.CombinedOutput(); err != nil {
+		t.Fatalf("failed to generate test SSH key: %v\noutput:\n%s", err, output)
+	}
+
+	// When
+	f.InitWithSSHKey(privateKeyPath)
+	f.StartVM(2, 4096, 10)
+	output := runVMCommand(t, f, "printf", "imported-key-ready")
+
+	// Then
+	if output != "imported-key-ready" {
+		t.Fatalf("guest command output = %q, want imported-key-ready", output)
+	}
 }
