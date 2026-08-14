@@ -11,6 +11,9 @@ tasks:
     desc: Run all lint checks
     cmds:
       - task: lint-copyright
+      - task: lint-shell
+      - task: lint-go-format
+      - task: lint-go-mac
 
   lint-copyright:
     desc: Check configured source files for copyright and SPDX headers
@@ -21,6 +24,29 @@ tasks:
     desc: Add missing copyright and SPDX headers to configured source files
     cmds:
       - python3 tools/copyright_headers.py --fix
+
+  lint-shell:
+    desc: Check shell script syntax
+    cmds:
+      - git ls-files -z '*.sh' | xargs -0 bash -n
+
+  lint-go-format:
+    desc: Check Go formatting
+    cmds:
+      - test -z "$(gofmt -l launcher/mac/*.go tests/*.go)"
+
+  lint-go-mac:
+    desc: Check the macOS launcher module and Go source
+    platforms: [darwin]
+    cmds:
+      - ./host/package/with-mac-embed-placeholders.sh go mod tidy -diff
+      - ./host/package/with-mac-embed-placeholders.sh go vet ./...
+
+  tests-unit:
+    desc: Run macOS launcher unit tests with the race detector
+    platforms: [darwin]
+    cmds:
+      - ./host/package/with-mac-embed-placeholders.sh go test -race ./...
 
   install-deps:
     desc: Install host dependencies for building and running the VM with Podman on Linux
