@@ -1074,14 +1074,6 @@ func startCmd(
 	if _, err := os.Stat(vmDir); os.IsNotExist(err) {
 		return fmt.Errorf("VM not initialized. Run 'mac-launcher init' first")
 	}
-	if err := refreshInitAssets(sharedDir); err != nil {
-		return err
-	}
-	// Ensure the data disk exists at the requested size (create / grow / error).
-	dataDiskPath := filepath.Join(vmDir, "data.img")
-	if err := ensureDataDisk(dataDiskPath, dataSizeGB); err != nil {
-		return err
-	}
 
 	// Check if VM is already running by probing the status socket.
 	if conn, err := net.DialTimeout("unix", vmSocketPath, 2*time.Second); err == nil {
@@ -1096,6 +1088,15 @@ func startCmd(
 		if resp.Status == "running" {
 			return fmt.Errorf("VM is already running")
 		}
+	}
+
+	if err := refreshInitAssets(sharedDir); err != nil {
+		return err
+	}
+	// Ensure the data disk exists at the requested size (create / grow / error).
+	dataDiskPath := filepath.Join(vmDir, "data.img")
+	if err := ensureDataDisk(dataDiskPath, dataSizeGB); err != nil {
+		return err
 	}
 
 	// Get the current executable path
