@@ -257,6 +257,12 @@ jobs:
       - name: Install Task
         run: |
           brew install go-task
+
+      - name: Run macOS launcher unit tests
+        run: task tests-unit
+
+      - name: Run lint checks
+        run: task lint
       
       - name: Setup macOS signing certificate
         id: macos-signing
@@ -412,4 +418,3 @@ jobs:
           path: tests/failures
           if-no-files-found: ignore
           retention-days: 7
-
