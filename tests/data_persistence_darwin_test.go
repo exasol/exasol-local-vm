@@ -167,9 +167,7 @@ func TestDataDiskSizeMatchReusesExisting(t *testing.T) {
 }
 
 // waitForDataMount runs a guest command and polls /proc/mounts for the ext4
-// data-disk mount at /var. Darwin-only because the
-// windows launcher does not maintain a raw ext4 filesystem inside the WSL2
-// backing VM (data lives on the volume-backed /exa mount).
+// data-disk mount at /var.
 func waitForDataMount(t *testing.T, f *LauncherFixture, timeout time.Duration) {
 	t.Helper()
 

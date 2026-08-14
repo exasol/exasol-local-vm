@@ -2,8 +2,8 @@
 
 ## Purpose
 
-Exasol Local VM provides a local Linux VM for a consuming runtime. It must not
-own or embed the consuming runtime's application containers.
+Exasol Local VM provides a local Linux VM on macOS for a consuming runtime. It
+must not own or embed the consuming runtime's application containers.
 
 ## Appliance
 

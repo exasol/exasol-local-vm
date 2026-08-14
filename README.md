@@ -1,7 +1,7 @@
 # Exasol Local VM
 
-Exasol Local VM builds a small Linux VM appliance and platform launchers for
-software that needs a local Linux execution environment. The macOS launcher
+Exasol Local VM builds a small Linux VM appliance and a macOS launcher for
+software that needs a local Linux execution environment on macOS. The launcher
 owns the VM, not the containers running inside it.
 
 The appliance includes Podman. A consuming runtime such as exasol-personal is

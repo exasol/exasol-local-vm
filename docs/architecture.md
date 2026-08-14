@@ -2,9 +2,9 @@
 
 ## Boundary
 
-Exasol Local VM provides a Linux VM execution environment. The macOS launcher
-owns VM initialization, boot, shutdown, persistent guest storage, host sharing,
-loopback forwarding, and guest command execution.
+Exasol Local VM provides a Linux VM execution environment on macOS. The macOS
+launcher owns VM initialization, boot, shutdown, persistent guest storage, host
+sharing, loopback forwarding, and guest command execution.
 
 The consuming runtime owns application images and containers. In particular,
 the launcher does not load the Exasol image, create an Exasol container, choose

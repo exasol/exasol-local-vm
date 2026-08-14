@@ -10,12 +10,3 @@ release/
 # Staged at build time by host/build/build-artifacts.sh, removed on exit.
 container/container.tar.gz
 ci-downloads/*
-# Staged at build time by launcher/assets/stage-windows-init-assets.sh; embedded
-# into the launcher binary and not committed.
-launcher/assets/windows/init/exasol-nano-db.tar.gz
-launcher/assets/windows/init/exasol-nano-db.tar.gz.metadata
-
-# Per-launcher-install container ID written by `windows-launcher init`
-# (plan.md § "Allow multiple instances to be launched simultaneously").
-# Never ships in the launcher zip and never belongs in source control.
-.containerId
