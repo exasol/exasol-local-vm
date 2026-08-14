@@ -28,7 +28,6 @@ INITRD_FILE="${INITRD_FILE:-/vm-image/initramfs.img}"
 KERNEL_CMDLINE_FILE="${KERNEL_CMDLINE_FILE:-/vm-image/kernel-cmdline.txt}"
 DEFAULT_VM_CONFIG="/etc/exasol-local-vm/vm-config.json"
 SHARED_DIR="${SHARED_DIR:-/shared}"
-CONTAINER_MANIFEST="$SHARED_DIR/container-manifest.json"
 
 QEMU_PID=""
 VIRTIOFSD_PID=""
@@ -253,15 +252,6 @@ if [ -d "$SHARED_DIR" ]; then
         -numa 'node,memdev=mem'
     )
 
-    if [ -f "${CONTAINER_MANIFEST}" ] && \
-            jq -e 'has("ports") and (.ports | type == "array")' "${CONTAINER_MANIFEST}" >/dev/null 2>&1; then
-        PORT_COUNT="$(jq -r '.ports | length' "${CONTAINER_MANIFEST}")"
-        for ((i = 0; i < PORT_COUNT; i++)); do
-            PORT="$(jq -r ".ports[$i]" "${CONTAINER_MANIFEST}")"
-            PORTFWD_RULES+=("hostfwd=::${PORT}-:${PORT}")
-        done
-    fi
-
 fi
 
 NETDEV_ARGS=(-netdev 'user,id=net0')
@@ -320,4 +310,3 @@ configure_terminal
 
 trap - EXIT
 exec "$QEMU_BIN" "${QEMU_ARGS[@]}"
-
