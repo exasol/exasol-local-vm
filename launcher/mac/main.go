@@ -555,15 +555,6 @@ func sleepUntil(deadline time.Time, duration time.Duration) {
 	time.Sleep(shorterDuration(duration, remaining))
 }
 
-// waitForVMIP waits for the VM to report its IP address in the console log
-func waitForVMIP(consoleLogPath string, timeout time.Duration) (string, error) {
-	initOutput, err := waitForInitOutput(consoleLogPath, timeout)
-	if err != nil {
-		return "", err
-	}
-	return initOutput.IP, nil
-}
-
 func waitForInitOutput(consoleLogPath string, timeout time.Duration) (*InitOutput, error) {
 	deadline := time.Now().Add(timeout)
 
@@ -1528,7 +1519,6 @@ func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 
 	fmt.Printf("[%s] Starting VM...\n", time.Now().Format("15:04:05"))
 
-	// Create and start VM
 	fmt.Printf("[%s] Creating virtual machine instance...\n", time.Now().Format("15:04:05"))
 	vm, err := vz.NewVirtualMachine(vzConfig)
 	if err != nil {

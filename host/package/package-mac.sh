@@ -53,13 +53,5 @@ tar -C "$ROOT_DIR/package" -cf - "$PACKAGE_NAME" | xz -9 --extreme -v > "$RELEAS
 
 echo "==> macOS package archive created: $RELEASE_FILE"
 
-# Build the Go launcher with embedded release archive
-echo "==> Building macOS launcher..."
-LAUNCHER_DIR="$ROOT_DIR/launcher/mac"
-pushd "$LAUNCHER_DIR" > /dev/null
-
-# Copy the release archive to be embedded
-cp "$RELEASE_FILE" vm-package.tar.xz
-
 echo "==> macOS package created: $PACKAGE_DIR"
 echo "==> Release archive: $RELEASE_FILE"
