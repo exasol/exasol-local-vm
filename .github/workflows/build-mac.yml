@@ -379,6 +379,7 @@ jobs:
       - macOS
       - ARM64
       - virtualization
+      - osx06
     needs: build-mac-launcher
     if: ${{ always() && needs.build-mac-launcher.result == 'success' }}
 
