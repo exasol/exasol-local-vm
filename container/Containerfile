@@ -17,6 +17,8 @@ RUN apk upgrade -aU \
     podman iptables \
     # Needed to read the podman container manifest
     jq \
+    # Needed to preserve sparse allocation when copying data to VirtioFS
+    coreutils \
     # Needed for autologin on some ttys
     agetty \
     linux-virt

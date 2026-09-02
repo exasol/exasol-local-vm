@@ -8,11 +8,14 @@ package integration
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestRunCommandInsideVM(t *testing.T) {
@@ -78,6 +81,62 @@ func TestRunCommandInsideVM(t *testing.T) {
 		// Then
 		if output != content {
 			t.Fatalf("guest shared file content = %q, want %q", output, content)
+		}
+	})
+
+	t.Run("preserves directory metadata and sparse allocation in the shared directory", func(t *testing.T) {
+		// Given
+		state := f.VMState()
+		hostSharedDir := filepath.Join(f.WorkDir, filepath.Clean(state.SharedDir))
+		const (
+			guestSource = "/var/copy-contract-source"
+			guestTarget = "/mnt/host/copy-contract-target"
+			fileSize    = int64(64 * 1024 * 1024)
+		)
+		runVMCommand(t, f, "sh", "-c", `
+set -eu
+rm -rf "$1" "$2"
+mkdir -p "$1" "$2"
+truncate -s "$3" "$1/sparse"
+printf x | dd of="$1/sparse" bs=1 seek="$(( $3 - 1 ))" conv=notrunc status=none
+chmod 0640 "$1/sparse"
+touch -d @1577934245 "$1/sparse"
+ln -s sparse "$1/link"
+cp -a --sparse=always "$1/." "$2/"
+sync
+`, "sh", guestSource, guestTarget, fmt.Sprintf("%d", fileSize))
+
+		// When
+		targetDir := filepath.Join(hostSharedDir, "copy-contract-target")
+		fileInfo, err := os.Stat(filepath.Join(targetDir, "sparse"))
+
+		// Then
+		if err != nil {
+			t.Fatalf("failed to stat copied sparse file: %v", err)
+		}
+		if fileInfo.Size() != fileSize {
+			t.Fatalf("copied file size = %d, want %d", fileInfo.Size(), fileSize)
+		}
+		if fileInfo.Mode().Perm() != 0640 {
+			t.Fatalf("copied file mode = %o, want 640", fileInfo.Mode().Perm())
+		}
+		wantModTime := time.Unix(1577934245, 0)
+		if !fileInfo.ModTime().Equal(wantModTime) {
+			t.Fatalf("copied file modification time = %v, want %v", fileInfo.ModTime(), wantModTime)
+		}
+		stat, ok := fileInfo.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("unexpected stat type for copied sparse file")
+		}
+		if allocated := int64(stat.Blocks) * 512; allocated >= fileSize/2 {
+			t.Fatalf("copied file allocated %d bytes for logical size %d", allocated, fileSize)
+		}
+		linkTarget, err := os.Readlink(filepath.Join(targetDir, "link"))
+		if err != nil {
+			t.Fatalf("failed to read copied symbolic link: %v", err)
+		}
+		if linkTarget != "sparse" {
+			t.Fatalf("copied symbolic link target = %q, want sparse", linkTarget)
 		}
 	})
 
