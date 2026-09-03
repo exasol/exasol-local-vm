@@ -124,7 +124,12 @@ jobs:
           ls -lh release/
 
   build-mac-launcher:
-    runs-on: macos-latest
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - virtualization
+      - osx06
     needs: build-disk-images
     if: ${{ always() && (needs.build-disk-images.result == 'success' || needs.build-disk-images.result == 'skipped') }}
     outputs:
@@ -379,6 +384,7 @@ jobs:
       - macOS
       - ARM64
       - virtualization
+      - osx06
     needs: build-mac-launcher
     if: ${{ always() && needs.build-mac-launcher.result == 'success' }}
 
