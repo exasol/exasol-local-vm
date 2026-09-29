@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -153,6 +154,78 @@ func TestRunCmdGivenRemoteCommandFailure(t *testing.T) {
 	}
 	if got, want := stderr.String(), "|stderr"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestSetGuestClockUsesExistingRootSSHCommand(t *testing.T) {
+	tempDir := t.TempDir()
+	argsPath := filepath.Join(tempDir, "ssh-args")
+	fakeSSH := []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SSH_ARGS_FILE\"\n")
+	if err := os.WriteFile(filepath.Join(tempDir, "ssh"), fakeSSH, 0755); err != nil {
+		t.Fatalf("failed to write fake ssh: %v", err)
+	}
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SSH_ARGS_FILE", argsPath)
+
+	err := setGuestClock(
+		context.Background(),
+		VMRuntimeState{IP: "192.0.2.10"},
+		RuntimeConfig{SSHPrivateKey: "/tmp/test-key"},
+		time.Unix(1234567890, 0),
+	)
+	if err != nil {
+		t.Fatalf("setGuestClock() error = %v", err)
+	}
+
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("failed to read ssh arguments: %v", err)
+	}
+	want := "-i\n/tmp/test-key\n-o\nStrictHostKeyChecking=no\n-o\nUserKnownHostsFile=/dev/null\n" +
+		"-o\nBatchMode=yes\n-o\nLogLevel=ERROR\nroot@192.0.2.10\n'date' '-u' '-s' '@1234567890'\n"
+	if string(args) != want {
+		t.Fatalf("ssh arguments = %q, want %q", args, want)
+	}
+}
+
+func TestGuestClockSynchronizationRetriesAndStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := make(chan int, 3)
+	callCount := 0
+	var stderr bytes.Buffer
+
+	done := startGuestClockSynchronization(ctx, time.Millisecond, func(context.Context) error {
+		callCount++
+		select {
+		case calls <- callCount:
+		default:
+		}
+		if callCount == 1 {
+			return errors.New("temporary failure")
+		}
+		return nil
+	}, &stderr)
+
+	if call := <-calls; call != 1 {
+		t.Fatalf("first synchronization call = %d, want 1", call)
+	}
+	select {
+	case call := <-calls:
+		if call != 2 {
+			t.Fatalf("periodic synchronization call = %d, want 2", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("periodic synchronization did not run")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("clock synchronization did not stop after cancellation")
+	}
+	if !strings.Contains(stderr.String(), "Warning: failed to synchronize guest clock: temporary failure") {
+		t.Fatalf("warning log = %q", stderr.String())
 	}
 }
 
