@@ -98,6 +98,7 @@ const (
 	sharedDirName            = "vm-shared"
 	authorizedKeysName       = "authorized_keys"
 	vmSocketPath             = "vm.sock"
+	guestClockSyncInterval   = time.Minute
 )
 
 // launcherVersion is set at build time with -ldflags. Local development builds
@@ -316,6 +317,44 @@ func runCmd(command []string, allocateTTY bool, stdin io.Reader, stdout, stderr 
 	}
 
 	return nil
+}
+
+func setGuestClock(ctx context.Context, state VMRuntimeState, config RuntimeConfig, now time.Time) error {
+	command := []string{"date", "-u", "-s", "@" + strconv.FormatInt(now.Unix(), 10)}
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs(state, config, command, false)...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func startGuestClockSynchronization(
+	ctx context.Context,
+	interval time.Duration,
+	synchronize func(context.Context) error,
+	stderr io.Writer,
+) <-chan struct{} {
+	syncClock := func() {
+		if err := synchronize(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(stderr, "Warning: failed to synchronize guest clock: %v\n", err)
+		}
+	}
+
+	syncClock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				syncClock()
+			}
+		}
+	}()
+	return done
 }
 
 // createSparseDataDisk creates a sparse raw disk image for VM data storage
@@ -1538,11 +1577,14 @@ func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 	// vz RequestStop is failing to trigger ACPI shutdown, so we must rely on ssh
 	// We populate sshTarget once the VM has reported its IP.
 	var sshTarget atomic.Pointer[string] // "ip:port"
+	clockSyncCtx, stopClockSync := context.WithCancel(context.Background())
+	defer stopClockSync()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		<-sigCh
+		stopClockSync()
 		fmt.Println("Received stop signal; requesting guest poweroff via SSH...")
 
 		sshOK := false
@@ -1694,6 +1736,18 @@ func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 				"up so health-check/diag can still report real per-port reachability.\n", sshErr)
 	} else {
 		fmt.Println("SSH service is ready")
+		clockSyncDone := startGuestClockSynchronization(
+			clockSyncCtx,
+			guestClockSyncInterval,
+			func(ctx context.Context) error {
+				return setGuestClock(ctx, VMRuntimeState{IP: vmIP}, runtimeConfig, time.Now())
+			},
+			os.Stderr,
+		)
+		defer func() {
+			stopClockSync()
+			<-clockSyncDone
+		}()
 		if err := writeHealthyStartArtifacts(
 			vmIP, cpuCountStr, ramSizeStr, sharedDir, forwardStates,
 		); err != nil {
