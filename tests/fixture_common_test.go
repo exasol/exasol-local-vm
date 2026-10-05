@@ -35,6 +35,7 @@ type LauncherFixture struct {
 }
 
 type vmState struct {
+	PID       string                  `json:"pid"`
 	Forwards  map[string]forwardState `json:"forwards"`
 	SharedDir string                  `json:"shared_dir"`
 }

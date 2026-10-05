@@ -29,6 +29,11 @@ The launcher must accept labeled guest-to-host TCP forwards when the VM starts.
 A nonzero host port must bind exactly or fail. Host port zero must request an
 available loopback port.
 
+Consumers must be able to add, remove, and list forwards on a ready VM without
+restarting it. Add and remove must be idempotent. Conflicting settings for an
+existing label must fail. Removal must close that forward's active connections
+while preserving other forwards. Bind addresses must be loopback addresses.
+
 The effective mapping must be machine-readable and keyed by the supplied label.
 Transport-only ports and guest addresses must not be part of the consumer
 contract.

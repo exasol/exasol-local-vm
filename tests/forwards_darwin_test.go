@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,73 @@ func TestLabeledPortForwardingGivenOccupiedHostPort(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot bind host port") {
 		t.Fatalf("start error = %v, want host-port bind failure", err)
+	}
+}
+
+func TestLiveForwardingPreservesRunningVM(t *testing.T) {
+	// Given
+	f := NewLauncherFixture(t)
+	defer f.Cleanup()
+	f.Init()
+	f.StartVMWithForwards(2, 4096, 10, "existing:22:0")
+	before := f.VMState()
+	forward := func(args ...string) map[string]forwardState {
+		t.Helper()
+		cmd := exec.Command(f.BinaryPath, append([]string{"forward"}, args...)...)
+		cmd.Dir = f.WorkDir
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("forward %v: %v: %s", args, err, output)
+		}
+		var response struct {
+			Forwards map[string]forwardState `json:"forwards"`
+		}
+		if err := json.Unmarshal(output, &response); err != nil {
+			t.Fatal(err)
+		}
+		return response.Forwards
+	}
+	// When
+	added := forward("add", "live:22:0")
+	repeated := forward("add", "live:22:0")
+	listed := forward("list")
+	afterAdd := f.VMState()
+	assertSSHBanner(t, added["live"].HostPort)
+	removed := forward("remove", "live")
+	forward("remove", "live")
+	afterRemove := f.VMState()
+	// Then
+	if !reflect.DeepEqual(added, repeated) || !reflect.DeepEqual(added, listed) || !reflect.DeepEqual(added, afterAdd.Forwards) {
+		t.Fatalf("inconsistent live mappings: added=%v repeated=%v listed=%v saved=%v", added, repeated, listed, afterAdd.Forwards)
+	}
+	if before.PID == "" || before.PID != afterAdd.PID || before.PID != afterRemove.PID {
+		t.Fatalf("VM PID changed: %q, %q, %q", before.PID, afterAdd.PID, afterRemove.PID)
+	}
+	if !reflect.DeepEqual(removed, before.Forwards) || !reflect.DeepEqual(removed, afterRemove.Forwards) {
+		t.Fatalf("unexpected mappings after removal: response=%v state=%v", removed, afterRemove.Forwards)
+	}
+	assertSSHBanner(t, before.Forwards["existing"].HostPort)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", added["live"].HostPort), time.Second)
+	if err == nil {
+		conn.Close()
+		t.Fatal("removed forward still accepts connections")
+	}
+	cmd := exec.Command(f.BinaryPath, "health-check")
+	cmd.Dir = f.WorkDir
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var health struct {
+		Ports map[string]struct {
+			State string `json:"state"`
+		} `json:"ports"`
+	}
+	if err := json.Unmarshal(output, &health); err != nil {
+		t.Fatal(err)
+	}
+	if len(health.Ports) != 1 || health.Ports["existing"].State != "reachable" {
+		t.Fatalf("unexpected health after removal: %s", output)
 	}
 }
 

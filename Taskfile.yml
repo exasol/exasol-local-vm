@@ -45,6 +45,12 @@ tasks:
     cmds:
       - ./host/package/with-mac-embed-placeholders.sh go test -race ./...
 
+  tests-forwarding:
+    desc: Run portable forwarding tests with the race detector
+    dir: launcher/mac
+    cmds:
+      - go test -race forwarding.go forward_commands.go forward_commands_test.go
+
   install-deps:
     desc: Install host dependencies for building and running the VM with Podman on Linux
     run: once
