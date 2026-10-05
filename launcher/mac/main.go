@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -53,51 +52,12 @@ type VMRuntimeState struct {
 	IP string `json:"vm_ip"`
 }
 
-type ForwardSpec struct {
-	Name      string
-	GuestPort int
-	HostPort  int
-}
-
-// ForwardState is the public forwarding result stored in vm-state.json.
-type ForwardState struct {
-	GuestPort int `json:"guest_port"`
-	HostPort  int `json:"host_port"`
-}
-
-type forwardSpecList []ForwardSpec
-
-func (list forwardSpecList) String() string {
-	parts := make([]string, 0, len(list))
-	for _, spec := range list {
-		parts = append(parts, encodeForwardSpec(spec))
-	}
-
-	return strings.Join(parts, ",")
-}
-
-func (list *forwardSpecList) Set(value string) error {
-	spec, err := parseForwardSpec(value)
-	if err != nil {
-		return err
-	}
-	for _, existing := range *list {
-		if existing.Name == spec.Name {
-			return fmt.Errorf("forward name %q is configured more than once", spec.Name)
-		}
-	}
-	*list = append(*list, spec)
-
-	return nil
-}
-
 const (
 	defaultSSHPrivateKeyPath = "vm-ssh-key"
 	runtimeConfigPath        = "vm-config.json"
 	vmRuntimeStatePath       = "vm-runtime.json"
 	sharedDirName            = "vm-shared"
 	authorizedKeysName       = "authorized_keys"
-	vmSocketPath             = "vm.sock"
 	guestClockSyncInterval   = time.Minute
 )
 
@@ -381,157 +341,6 @@ func createSparseDataDisk(path string, sizeGB int) error {
 	return nil
 }
 
-// LoopbackForwarder forwards TCP connections from host to guest
-type LoopbackForwarder struct {
-	name       string
-	listener   net.Listener
-	guestHost  string
-	guestPort  int
-	closeOnce  sync.Once
-	closeError error
-	wg         sync.WaitGroup
-}
-
-// StartLoopbackForwarder starts a TCP proxy from hostPort to guestHost:guestPort
-// If hostPort is 0, the OS will allocate a free port dynamically
-func StartLoopbackForwarder(ctx context.Context, name string, hostPort int, guestHost string, guestPort int) (*LoopbackForwarder, error) {
-	listener, err := (&net.ListenConfig{}).Listen(
-		ctx,
-		"tcp",
-		fmt.Sprintf("127.0.0.1:%d", hostPort),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to listen on 127.0.0.1:%d: %w", hostPort, err)
-	}
-
-	forwarder := &LoopbackForwarder{
-		name:      name,
-		listener:  listener,
-		guestHost: guestHost,
-		guestPort: guestPort,
-	}
-	forwarder.wg.Add(1)
-	go forwarder.acceptLoop(ctx)
-
-	return forwarder, nil
-}
-
-// classifyDialErr turns a raw dial error into the small state vocabulary
-// ("reachable", "refused", "blocked", or "timeout") reported over the status
-// socket, rather than exposing OS-specific errors.
-func classifyDialErr(err error) string {
-	if err == nil {
-		return "reachable"
-	}
-
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "timeout"
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "timeout"
-	}
-	if errors.Is(err, syscall.ECONNREFUSED) {
-		return "refused"
-	}
-	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) ||
-		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
-		return "blocked"
-	}
-
-	// Unrecognized failure: signal a problem rather than silently
-	// reporting reachable.
-	return "blocked"
-}
-
-// Probe dials the guest address on its own, independent of any real client
-// connection, so health-check can report state even when nothing is
-// currently forwarding traffic through this port.
-func (f *LoopbackForwarder) Probe(ctx context.Context, timeout time.Duration) string {
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	conn, err := (&net.Dialer{}).DialContext(probeCtx, "tcp", fmt.Sprintf("%s:%d", f.guestHost, f.guestPort))
-	if err == nil {
-		conn.Close()
-	}
-
-	return classifyDialErr(err)
-}
-
-// Port returns the actual host port being listened on
-func (f *LoopbackForwarder) Port() int {
-	if addr, ok := f.listener.Addr().(*net.TCPAddr); ok {
-		return addr.Port
-	}
-	return 0
-}
-
-// Close stops the forwarder and waits for all connections to finish
-func (f *LoopbackForwarder) Close() error {
-	f.closeOnce.Do(func() {
-		f.closeError = f.listener.Close()
-		f.wg.Wait()
-	})
-
-	if f.closeError != nil && !errors.Is(f.closeError, net.ErrClosed) {
-		return f.closeError
-	}
-
-	return nil
-}
-
-func (f *LoopbackForwarder) acceptLoop(ctx context.Context) {
-	defer f.wg.Done()
-
-	for {
-		clientConn, err := f.listener.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return
-			}
-			continue
-		}
-
-		f.wg.Add(1)
-		go f.proxyConnection(ctx, clientConn)
-	}
-}
-
-func (f *LoopbackForwarder) proxyConnection(ctx context.Context, clientConn net.Conn) {
-	defer f.wg.Done()
-	defer clientConn.Close()
-
-	guestConn, err := (&net.Dialer{}).DialContext(
-		ctx,
-		"tcp",
-		fmt.Sprintf("%s:%d", f.guestHost, f.guestPort),
-	)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] Warning: %s forwarder could not reach guest %s:%d (%s): %v\n",
-			time.Now().Format("15:04:05"), f.name, f.guestHost, f.guestPort, classifyDialErr(err), err)
-		return
-	}
-	defer guestConn.Close()
-
-	var copyWG sync.WaitGroup
-	copyWG.Add(2)
-
-	go func() {
-		defer copyWG.Done()
-		io.Copy(guestConn, clientConn)
-		guestConn.Close()
-	}()
-
-	go func() {
-		defer copyWG.Done()
-		io.Copy(clientConn, guestConn)
-		clientConn.Close()
-	}()
-
-	copyWG.Wait()
-}
-
 func waitForSSHService(addr string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
@@ -665,6 +474,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "                                      - rejected (error) if larger; shrinking")
 		fmt.Fprintln(os.Stderr, "                                        is not supported.")
 		fmt.Fprintln(os.Stderr, "  stop                              Stop running VM")
+		fmt.Fprintln(os.Stderr, "  forward add|remove|list            Manage forwards on a running VM")
 		fmt.Fprintln(os.Stderr, "  run [--tty] [--] [command ...]   Run a command inside the VM")
 		fmt.Fprintln(os.Stderr, "                                    With no command, open a shell when stdin is a TTY.")
 		fmt.Fprintln(os.Stderr, "  status                            Print JSON {\"running\": bool}")
@@ -677,6 +487,8 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "forward":
+		err = forwardCmd(os.Args[2:], os.Stdout)
 	case "init":
 		initFlags := flag.NewFlagSet("init", flag.ContinueOnError)
 		initFlags.SetOutput(os.Stderr)
@@ -773,7 +585,7 @@ func main() {
 		versionCmd(os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop, run, status, health-check, resize-data, version")
+		fmt.Fprintln(os.Stderr, "Available commands: init, start, stop, run, forward, status, health-check, resize-data, version")
 		os.Exit(1)
 	}
 
@@ -986,66 +798,6 @@ func ensureDataDisk(path string, requestedSizeGB int) error {
 		currentSizeGB := currentBytes / (1024 * 1024 * 1024)
 		return fmt.Errorf("existing data disk is %dGB, larger than requested %dGB; shrinking data disks is not supported", currentSizeGB, requestedSizeGB)
 	}
-}
-
-func parseForwardSpec(value string) (ForwardSpec, error) {
-	parts := strings.Split(value, ":")
-	if len(parts) != 3 {
-		return ForwardSpec{}, fmt.Errorf(
-			"invalid forward %q: expected <name>:<guest-port>:<host-port>", value,
-		)
-	}
-
-	name := strings.TrimSpace(parts[0])
-	if name == "" {
-		return ForwardSpec{}, fmt.Errorf("invalid forward %q: name must not be empty", value)
-	}
-	for _, character := range name {
-		if (character >= 'a' && character <= 'z') ||
-			(character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') ||
-			character == '-' || character == '_' || character == '.' {
-			continue
-		}
-
-		return ForwardSpec{}, fmt.Errorf(
-			"invalid forward %q: name may contain only letters, digits, '.', '_' and '-'", value,
-		)
-	}
-
-	guestPort, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if err != nil || guestPort < 1 || guestPort > 65535 {
-		return ForwardSpec{}, fmt.Errorf(
-			"invalid forward %q: guest port must be an integer from 1 to 65535", value,
-		)
-	}
-	hostPort, err := strconv.Atoi(strings.TrimSpace(parts[2]))
-	if err != nil || hostPort < 0 || hostPort > 65535 {
-		return ForwardSpec{}, fmt.Errorf(
-			"invalid forward %q: host port must be an integer from 0 to 65535", value,
-		)
-	}
-
-	return ForwardSpec{Name: name, GuestPort: guestPort, HostPort: hostPort}, nil
-}
-
-func encodeForwardSpec(spec ForwardSpec) string {
-	return fmt.Sprintf("%s:%d:%d", spec.Name, spec.GuestPort, spec.HostPort)
-}
-
-func parseForwardSpecs(value string) ([]ForwardSpec, error) {
-	if strings.TrimSpace(value) == "" {
-		return nil, nil
-	}
-
-	var specs forwardSpecList
-	for _, entry := range strings.Split(value, ",") {
-		if err := specs.Set(entry); err != nil {
-			return nil, err
-		}
-	}
-
-	return specs, nil
 }
 
 // shutdownVM asks the VM to stop and waits (briefly) for it to actually do
@@ -1584,6 +1336,7 @@ func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 
 	go func() {
 		<-sigCh
+		closeForwarders()
 		stopClockSync()
 		fmt.Println("Received stop signal; requesting guest poweroff via SSH...")
 
@@ -1680,17 +1433,15 @@ func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 	// is still visible via `health-check` even when the SSH-readiness gate
 	// never passes, instead of leaving no evidence behind at all.
 	ctx := context.Background()
-	forwarders := make(map[string]*LoopbackForwarder)
 	forwardStates := make(map[string]ForwardState)
+	defer closeForwarders()
 
 	for _, spec := range forwardSpecs {
 		forwarder, err := StartLoopbackForwarder(
 			ctx, spec.Name, spec.HostPort, vmIP, spec.GuestPort,
 		)
 		if err != nil {
-			for _, activeForwarder := range forwarders {
-				_ = activeForwarder.Close()
-			}
+			closeForwarders()
 			shutdownVM(vm)
 
 			return fmt.Errorf(
@@ -1699,9 +1450,9 @@ func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 			)
 		}
 
-		forwarders[spec.Name] = forwarder
 		registerForwarder(spec.Name, forwarder)
 		forwardStates[spec.Name] = ForwardState{
+			HostIP:    "127.0.0.1",
 			GuestPort: spec.GuestPort,
 			HostPort:  forwarder.Port(),
 		}
@@ -1710,13 +1461,6 @@ func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 			spec.Name, forwarder.Port(), vmIP, spec.GuestPort,
 		)
 	}
-
-	// Ensure forwarders are closed on exit
-	defer func() {
-		for _, forwarder := range forwarders {
-			forwarder.Close()
-		}
-	}()
 
 	fmt.Printf("Waiting for SSH service at %s...\n", target)
 	if sshErr := waitForSSHService(target, 2*time.Minute); sshErr != nil {
@@ -1748,11 +1492,16 @@ func runVMDaemon(cpuCountStr, ramSizeStr, encodedForwards string) error {
 			stopClockSync()
 			<-clockSyncDone
 		}()
+		forwarderRegistryMu.Lock()
 		if err := writeHealthyStartArtifacts(
 			vmIP, cpuCountStr, ramSizeStr, sharedDir, forwardStates,
 		); err != nil {
+			forwarderRegistryMu.Unlock()
 			return err
 		}
+		forwardGuestHost = vmIP
+		forwardsReady = !forwardsStopping
+		forwarderRegistryMu.Unlock()
 	}
 
 	// Wait for VM to finish (or be interrupted). This runs whether or not
@@ -1798,7 +1547,7 @@ func writeHealthyStartArtifacts(
 		return fmt.Errorf("failed to marshal vm-state: %w", err)
 	}
 
-	if err := os.WriteFile("vm-state.json", stateData, 0644); err != nil {
+	if err := writeVMState(stateData); err != nil {
 		return fmt.Errorf("failed to write vm-state.json: %w", err)
 	}
 
@@ -1827,83 +1576,16 @@ func writeDaemonDegradedMarker(cause error) error {
 	return nil
 }
 
-const (
-	// healthCheckPerPortTimeout bounds a single forwarder's probe dial, so a
-	// blocked/hanging guest connection cannot stall the whole health-check.
-	healthCheckPerPortTimeout = 2 * time.Second
-	// healthCheckConnDeadline bounds the whole health-check request/response,
-	// generous enough for every forwarder's probe to run concurrently and
-	// still finish comfortably inside it.
-	healthCheckConnDeadline = 10 * time.Second
-	// statusConnDeadline bounds the cheap, non-probing "status" request.
-	statusConnDeadline = 5 * time.Second
-)
-
-var (
-	forwarderRegistryMu sync.RWMutex
-	forwarderRegistry   = map[string]*LoopbackForwarder{}
-)
-
-// registerForwarder makes a forwarder visible to health-check requests on
-// the status socket, keyed by its service name (e.g. "ssh").
-func registerForwarder(name string, forwarder *LoopbackForwarder) {
-	forwarderRegistryMu.Lock()
-	defer forwarderRegistryMu.Unlock()
-	forwarderRegistry[name] = forwarder
-}
-
-func forwarderSnapshot() map[string]*LoopbackForwarder {
-	forwarderRegistryMu.RLock()
-	defer forwarderRegistryMu.RUnlock()
-
-	snapshot := make(map[string]*LoopbackForwarder, len(forwarderRegistry))
-	for name, forwarder := range forwarderRegistry {
-		snapshot[name] = forwarder
-	}
-
-	return snapshot
-}
-
-// portHealthResponse is the per-port shape returned by a health-check request.
-type portHealthResponse struct {
-	State string `json:"state"`
-}
-
-// probeForwarders always dials fresh rather than returning each forwarder's
-// last-observed state, so a port nothing has recently connected through
-// (e.g. SSH during a plain start/connect) still gets a current answer.
-func probeForwarders(ctx context.Context) map[string]portHealthResponse {
-	snapshot := forwarderSnapshot()
-	result := make(map[string]portHealthResponse, len(snapshot))
-
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for name, forwarder := range snapshot {
-		wg.Add(1)
-		go func(name string, forwarder *LoopbackForwarder) {
-			defer wg.Done()
-			state := forwarder.Probe(ctx, healthCheckPerPortTimeout)
-			mu.Lock()
-			result[name] = portHealthResponse{State: state}
-			mu.Unlock()
-		}(name, forwarder)
-	}
-	wg.Wait()
-
-	return result
-}
-
-// startStatusListener serves {"request":"status"} -> {"status":"running"}
-// and {"request":"health-check"} -> {"ports": {"<name>": {"state": "..."}}}
-// on a Unix domain socket. health-check is kept separate from status, and
-// only dials out when explicitly requested, so routine status polling never
-// pays for (or triggers) a network probe. Stale sockets from a previous run
-// are removed on entry.
+// Health checks probe only on request so routine status polling remains cheap.
 func startStatusListener() error {
 	os.Remove(vmSocketPath)
 	ln, err := net.Listen("unix", vmSocketPath)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", vmSocketPath, err)
+	}
+	if err := os.Chmod(vmSocketPath, 0600); err != nil {
+		ln.Close()
+		return fmt.Errorf("cannot restrict VM socket access: %w", err)
 	}
 	go func() {
 		defer ln.Close()
@@ -1916,14 +1598,14 @@ func startStatusListener() error {
 			go func(c net.Conn) {
 				defer c.Close()
 				c.SetDeadline(time.Now().Add(statusConnDeadline)) //nolint:errcheck
-				var req struct {
-					Request string `json:"request"`
-				}
-				if err := json.NewDecoder(c).Decode(&req); err != nil {
+				var req forwardRequest
+				if err := json.NewDecoder(io.LimitReader(c, 4096)).Decode(&req); err != nil {
 					return
 				}
 
 				switch req.Request {
+				case "forward-add", "forward-remove", "forward-list":
+					json.NewEncoder(c).Encode(handleForwardRequest(req))
 				case "status":
 					json.NewEncoder(c).Encode(map[string]string{"status": "running"}) //nolint:errcheck
 				case "health-check":

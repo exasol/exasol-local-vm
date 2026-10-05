@@ -21,6 +21,25 @@ Each `--forward` value is `<name>:<guest-port>:<host-port>`. Host port `0`
 requests an available loopback port. `vm-state.json` reports the effective
 named mappings without exposing the guest transport.
 
+Manage forwards after the VM is ready:
+
+```bash
+./launcher forward add metrics:9090:0
+./launcher forward list
+./launcher forward remove metrics
+```
+
+These commands return JSON with a `forwards` object containing the effective
+`host_ip`, `host_port`, and `guest_port` for each name. Add accepts
+`--host-ip <loopback-ip>` before the mapping and defaults to `127.0.0.1`.
+Adding the same settings or removing an absent name succeeds without changing
+other forwards. Remove a name before changing its settings. Removal closes
+existing connections through that forward.
+
+Changes take effect immediately and update `vm-state.json` without restarting
+the VM. Commands require a ready VM. Consumers restore their desired forwards
+on the next start. Guest services must listen on a VM-reachable address.
+
 Run commands inside the VM:
 
 ```bash

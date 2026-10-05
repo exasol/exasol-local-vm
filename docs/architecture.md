@@ -32,9 +32,10 @@ installation inside the VM, and reads the effective host ports from
 `vm-state.json`.
 
 Forward labels are opaque consumer identifiers. A requested nonzero host port
-must bind exactly or startup fails. Host port zero delegates selection to the
-operating system. This keeps forwarding fixed for the lifetime of a VM and
-avoids a mutable networking API.
+must bind exactly or the request fails. Host port zero delegates selection to
+the operating system. Consumers can add, remove, and list forwards on a ready
+VM through `launcher forward`. These commands use the existing private control
+socket. Startup and live forwards share the same registry and health checks.
 
 ## Command Execution
 
@@ -59,7 +60,9 @@ path.
 
 `vm-state.json` is the consumer-facing result of a successful start. It contains
 resource settings, the shared directory, the daemon PID, and effective labeled
-forwards. It contains no SSH credentials, SSH forward, or guest IP.
+forwards. Live changes atomically refresh its mappings. It describes the current
+VM, while consumers own desired configuration and restore it on restart. It
+contains no SSH credentials, SSH forward, or guest IP.
 
 Guest addressing and credentials are launcher-private state used by command
 execution and shutdown. Consumers must use `launcher run`, `status`,
