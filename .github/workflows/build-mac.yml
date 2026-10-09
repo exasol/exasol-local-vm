@@ -259,9 +259,12 @@ jobs:
             exit 1
           fi
 
-      - name: Install Task
+      - name: Check if task is available
         run: |
-          brew install go-task
+          if ! command -v task >/dev/null 2>&1; then
+            echo "::error::task is missing from PATH"
+            exit 1
+          fi
 
       - name: Run macOS launcher unit tests
         run: task tests-unit
