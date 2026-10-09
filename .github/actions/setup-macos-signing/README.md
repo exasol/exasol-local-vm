@@ -2,6 +2,14 @@
 
 This action configures code signing for macOS binaries with the `com.apple.security.virtualization` entitlement required for using the macOS Virtualization.framework.
 
+Each invocation creates a private, unique `macos-signing.*` directory under
+`RUNNER_TEMP` for the keychain and certificate files. Consumers must use the
+`keychain-path` and `p12-path` outputs instead of fixed `/tmp` paths. The
+`signing-directory` output is available before certificate preparation so callers
+can clean up after setup failures as well as successful signing. The build workflow
+uses an `always()` cleanup step after the launcher build to delete the keychain
+and remove the temporary certificate and private-key files.
+
 ## Required Secrets
 
 To enable code signing in GitHub Actions, add these repository secrets:
