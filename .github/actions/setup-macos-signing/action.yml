@@ -14,49 +14,64 @@ inputs:
     description: 'Base64-encoded Developer ID Application certificate'
     required: true
 outputs:
+  signing-directory:
+    description: 'Temporary directory to remove after signing'
+    value: ${{ steps.prepare-directory.outputs.signing-directory }}
   p12-path:
     description: 'Path to the prepared signing certificate'
-    value: /tmp/signing_certificate.p12
+    value: ${{ steps.prepare-directory.outputs.signing-directory }}/signing_certificate.p12
   keychain-path:
     description: 'Path to the temporary macOS signing keychain'
-    value: ${{ steps.import-certificate.outputs.keychain-path }}
+    value: ${{ steps.prepare-directory.outputs.signing-directory }}/build-signing.keychain-db
   signing-identity:
     description: 'Detected Developer ID Application signing identity'
     value: ${{ steps.import-certificate.outputs.signing-identity }}
 runs:
   using: 'composite'
   steps:
-    - name: Prepare signing certificate
+    - name: Create temporary signing directory
+      id: prepare-directory
       shell: bash
       run: |
+        set -euo pipefail
+        SIGNING_DIRECTORY="$(mktemp -d "$RUNNER_TEMP/macos-signing.XXXXXX")"
+        echo "signing-directory=$SIGNING_DIRECTORY" >> "$GITHUB_OUTPUT"
+    - name: Prepare signing certificate
+      shell: bash
+      env:
+        SIGNING_DIRECTORY: ${{ steps.prepare-directory.outputs.signing-directory }}
+      run: |
+        set -euo pipefail
+        umask 077
+        cd "$SIGNING_DIRECTORY"
         # Decode the p12 key file
-        echo "${{ inputs.p12-key }}" | base64 -d > /tmp/private_key.p12
+        echo "${{ inputs.p12-key }}" | base64 -d > private_key.p12
 
         echo "=== Checking what's in the existing p12 (presumed only to be the private signing key) ==="
-        openssl pkcs12 -in /tmp/private_key.p12 -passin "pass:${{ inputs.p12-password }}" -noout -info || echo "Failed to read p12"
+        openssl pkcs12 -in private_key.p12 -passin "pass:${{ inputs.p12-password }}" -noout -info || echo "Failed to read p12"
         
         # Check if p12 already contains a certificate
-        if openssl pkcs12 -in /tmp/private_key.p12 -passin "pass:${{ inputs.p12-password }}" -nokeys 2>/dev/null | grep -q "BEGIN CERTIFICATE"; then
+        if openssl pkcs12 -in private_key.p12 -passin "pass:${{ inputs.p12-password }}" -nokeys 2>/dev/null | grep -q "BEGIN CERTIFICATE"; then
           echo "=== P12 already contains certificate, using as-is ==="
-          cp /tmp/private_key.p12 /tmp/signing_certificate.p12
+          cp private_key.p12 signing_certificate.p12
         else
           echo "=== P12 only contains key, merging with certificate ==="
           
           # Convert signing key to PEM
-          openssl pkcs12 -in /tmp/private_key.p12 -nocerts -nodes -passin "pass:${{ inputs.p12-password }}" -out /tmp/private_key.pem
+          openssl pkcs12 -in private_key.p12 -nocerts -nodes -passin "pass:${{ inputs.p12-password }}" -out private_key.pem
           
           # Convert signing certificate to PEM
           echo -e "\n=== Convert signing certificate to PEM ==="
-          echo "${{ inputs.application-cert }}" | base64 -d > /tmp/developerID_application.cer
-          openssl x509 -in /tmp/developerID_application.cer -inform DER -out /tmp/developerID_application.crt -outform PEM
+          echo "${{ inputs.application-cert }}" | base64 -d > developerID_application.cer
+          openssl x509 -in developerID_application.cer -inform DER -out developerID_application.crt -outform PEM
           
           # Read cert and key from PEM and export as pkcs12.
           # Force legacy algorithms (SHA1 MAC, 3DES key/cert encryption) for compatibility
           # with macOS security import, which rejects the AES/SHA256 defaults from OpenSSL 3.x.
           openssl pkcs12 -export \
-            -inkey /tmp/private_key.pem \
-            -in /tmp/developerID_application.crt \
-            -out /tmp/signing_certificate.p12 \
+            -inkey private_key.pem \
+            -in developerID_application.crt \
+            -out signing_certificate.p12 \
             -name "Developer ID Application" \
             -passout "pass:${{ inputs.p12-password }}" \
             -macalg SHA1 \
@@ -67,10 +82,12 @@ runs:
       if: runner.os == 'macOS'
       id: import-certificate
       shell: bash
+      env:
+        SIGNING_DIRECTORY: ${{ steps.prepare-directory.outputs.signing-directory }}
       run: |
         set -euo pipefail
 
-        KEYCHAIN_PATH="/tmp/build-signing.keychain-db"
+        KEYCHAIN_PATH="$SIGNING_DIRECTORY/build-signing.keychain-db"
         KEYCHAIN_PASSWORD="$(openssl rand -hex 12)"
 
         security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -80,7 +97,7 @@ runs:
         # Add keychain to search list so codesign can find it
         security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed s/\"//g)
         
-        security import /tmp/signing_certificate.p12 \
+        security import "$SIGNING_DIRECTORY/signing_certificate.p12" \
           -k "$KEYCHAIN_PATH" \
           -P "${{ inputs.p12-password }}" \
           -T /usr/bin/codesign \
@@ -98,5 +115,4 @@ runs:
           exit 1
         fi
 
-        echo "keychain-path=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
         echo "signing-identity=$SIGNING_IDENTITY" >> "$GITHUB_OUTPUT"
