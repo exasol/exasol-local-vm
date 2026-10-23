@@ -9,6 +9,7 @@ RUN apk upgrade -aU \
   && apk add \
     alpine-base \
     openssh \
+    iputils-arping \
     # Needed to handle poweroff signal from the vm manager
     acpid \
     # Needed to auto-grow /var partition
